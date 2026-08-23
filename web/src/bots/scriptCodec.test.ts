@@ -96,6 +96,25 @@ test("encode then decode is a lossless round trip", () => {
   assert.deepStrictEqual([...warnings], []);
 });
 
+test("an existing deliver-ore step without a destination stays personal-hangar compatible", () => {
+  const { doc } = mustAccept(decodeScriptValue(golden()));
+  const loop = doc.program[0];
+  assert.ok(loop?.kind === "loop");
+  const delivery = loop.body[1];
+  assert.ok(delivery?.kind === "macro" && delivery.macro === "deliver-ore");
+  assert.equal(delivery.args["corpDivision"], undefined);
+});
+
+test("a Corporate Hangar division round-trips and divisions outside 1-7 are refused", () => {
+  const value = clone();
+  value.program[0].body[1].args.corpDivision = { kind: "corpDivision", division: 6 };
+  const { doc } = mustAccept(decodeScriptValue(value));
+  assert.deepEqual(decodeScriptText(encodeScriptDoc(doc)), { ok: true, doc, warnings: [] });
+
+  value.program[0].body[1].args.corpDivision.division = 8;
+  assert.match(mustRefuse(decodeScriptValue(value)), /corpDivision/i);
+});
+
 // The golden fixture only exercises belt/station/equipment args, so on its own it
 // cannot catch a serialiser that forgets a kind. This document uses EVERY OTHER
 // arg kind (count, corp, agent, fitting, itemType, place, bookmark) — if any is

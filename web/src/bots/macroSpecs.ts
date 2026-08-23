@@ -43,7 +43,12 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
     untilRequired: true,
   },
   "deliver-ore": {
-    args: [{ key: "station", kind: "station", required: true }],
+    args: [
+      { key: "station", kind: "station", required: true },
+      // Optional by design: old/saved bots without it keep delivering to the
+      // character's personal station hangar.
+      { key: "corpDivision", kind: "corpDivision", required: false },
+    ],
     untilRequired: false,
   },
   "defend-with-drones": { args: [], untilRequired: false },

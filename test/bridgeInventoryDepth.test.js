@@ -263,6 +263,12 @@ function fakeGateway(options = {}) {
         return { service, method, result: null, notifications: [] };
       }
       if (method === "Add") {
+        if (options.refuseAdd === true) {
+          throw Object.assign(
+            new Error("You do not have the required corporation access."),
+            { code: "CALL_REFUSED", statusCode: 409 },
+          );
+        }
         // A dispatch failure with NOTHING applied — the ordinary error case,
         // which must still surface as an error.
         if (options.throwOnAdd === true) {
@@ -965,6 +971,81 @@ test("corp move IN files a personal item under the chosen division's flag", asyn
   assert.equal(add.kwargs.flag, FLAG_DIVISION_2);
   assert.equal(gateway.world.get(100).locationID, OFFICE_CONTENT_LOCATION_ID);
   assert.equal(gateway.world.get(100).flagID, FLAG_DIVISION_2);
+});
+
+test("ore delivery routes the active ship's Ore Hold and Cargo directly to the selected corp division", async () => {
+  const gateway = fakeGateway({ items: [...fixtureItems(), oreInHold()] });
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+
+  const { response, payload } = await apiRequest(baseUrl, "/api/bridge/ship/ore-hold/unload", {
+    method: "POST",
+    body: {
+      itemIDs: [500, 300],
+      destination: { kind: "corp", division: 2 },
+      expectedStationID: STATION_ID,
+    },
+  });
+
+  assert.equal(response.status, 200, JSON.stringify(payload));
+  assert.deepEqual([...payload.moved].sort((a, b) => a - b), [300, 500]);
+  assert.deepEqual(payload.remaining, []);
+  assert.equal(gateway.world.get(500).locationID, OFFICE_CONTENT_LOCATION_ID);
+  assert.equal(gateway.world.get(500).flagID, FLAG_DIVISION_2);
+  assert.equal(gateway.world.get(300).locationID, OFFICE_CONTENT_LOCATION_ID);
+  assert.equal(gateway.world.get(300).flagID, FLAG_DIVISION_2);
+  const adds = gateway.calls.boundCall.filter((call) => call.method === "Add");
+  assert.equal(adds.length, 2);
+  assert.ok(adds.every((call) => call.kwargs.flag === FLAG_DIVISION_2));
+});
+
+test("corporate ore delivery rejects missing/invalid destinations without personal-hangar fallback", async () => {
+  const noOfficeGateway = fakeGateway({ items: [...fixtureItems(), oreInHold()], officeRows: [] });
+  const first = await startTestServer({ gateway: noOfficeGateway });
+  await selectOnServer(first.baseUrl);
+  const noOffice = await apiRequest(first.baseUrl, "/api/bridge/ship/ore-hold/unload", {
+    method: "POST",
+    body: { itemIDs: [500], destination: { kind: "corp", division: 2 }, expectedStationID: STATION_ID },
+  });
+  assert.equal(noOffice.response.status, 409);
+  assert.equal(noOffice.payload.error, "NO_CORP_OFFICE");
+  assert.equal(noOfficeGateway.world.get(500).locationID, ACTIVE_SHIP_ID);
+
+  const invalidGateway = fakeGateway({ items: [...fixtureItems(), oreInHold(501)] });
+  const second = await startTestServer({ gateway: invalidGateway });
+  await selectOnServer(second.baseUrl);
+  const invalid = await apiRequest(second.baseUrl, "/api/bridge/ship/ore-hold/unload", {
+    method: "POST",
+    body: { itemIDs: [501], destination: { kind: "corp", division: 8 }, expectedStationID: STATION_ID },
+  });
+  assert.equal(invalid.response.status, 400);
+  assert.equal(invalid.payload.error, "INVALID_DIVISION");
+  assert.equal(invalidGateway.world.get(501).locationID, ACTIVE_SHIP_ID);
+});
+
+test("corporate ore delivery propagates backend refusal and wrong-station errors", async () => {
+  const refusedGateway = fakeGateway({ items: [...fixtureItems(), oreInHold()], refuseAdd: true });
+  const first = await startTestServer({ gateway: refusedGateway });
+  await selectOnServer(first.baseUrl);
+  const refused = await apiRequest(first.baseUrl, "/api/bridge/ship/ore-hold/unload", {
+    method: "POST",
+    body: { itemIDs: [500], destination: { kind: "corp", division: 1 }, expectedStationID: STATION_ID },
+  });
+  assert.equal(refused.response.status, 409);
+  assert.equal(refused.payload.error, "CALL_REFUSED");
+  assert.match(refused.payload.message, /required corporation access/);
+  assert.equal(refusedGateway.world.get(500).locationID, ACTIVE_SHIP_ID);
+
+  const wrongGateway = fakeGateway({ items: [...fixtureItems(), oreInHold(502)] });
+  const second = await startTestServer({ gateway: wrongGateway });
+  await selectOnServer(second.baseUrl);
+  const wrong = await apiRequest(second.baseUrl, "/api/bridge/ship/ore-hold/unload", {
+    method: "POST",
+    body: { itemIDs: [502], destination: { kind: "corp", division: 1 }, expectedStationID: STATION_ID + 1 },
+  });
+  assert.equal(wrong.response.status, 409);
+  assert.equal(wrong.payload.error, "WRONG_STATION");
+  assert.equal(wrongGateway.world.get(502).locationID, ACTIVE_SHIP_ID);
 });
 
 test("transfer rejects a division outside 1-7", async () => {

@@ -81,6 +81,8 @@ export interface ScriptRunnerDeps {
   sleep(ms: number): Promise<void>;
   onProgress(snapshot: ScriptRunnerSnapshot): void;
   isSessionLost(error: unknown): boolean;
+  /** Preserve a typed backend refusal when a one-way corporate delivery fails. */
+  refusalReason?(error: unknown): string;
   readonly registry: MacroRegistry;
   readonly travelHome: HomeTravelDecider;
 }
@@ -199,6 +201,16 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       } catch (error) {
         if (deps.isSessionLost(error)) {
           setError(SESSION_LOST);
+          return;
+        }
+        // Corporate delivery is a one-way ownership transfer. Retrying a
+        // refused call forever would hide NO_CORP_OFFICE / access / station
+        // failures and make it unclear where the ore went. Pause immediately
+        // with the backend's own words. Personal-hangar actions retain the
+        // runner's existing retry behaviour.
+        if (result.action.kind === "unloadOre" && result.action.destination?.kind === "corp") {
+          const reason = deps.refusalReason?.(error) ?? (error instanceof Error ? error.message : String(error));
+          pauseWith(reason);
           return;
         }
         // A refusal is not a crash — the next tick re-reads and decides again.

@@ -121,6 +121,7 @@ test("a chosen world slot shows its name, never its id (R7d)", () => {
     },
   };
   assert.match(stepSentence(named), /Home Station/);
+  assert.match(stepSentence(named), /personal station hangar/i);
   assert.doesNotMatch(stepSentence(named), LOOKS_LIKE_ID);
 
   // A reference with an id but no resolved name must fall back to words, not the number.
@@ -134,4 +135,10 @@ test("a chosen world slot shows its name, never its id (R7d)", () => {
   };
   assert.doesNotMatch(stepSentence(unnamed), LOOKS_LIKE_ID);
   assert.match(stepSentence(unnamed), /a station you pick/);
+
+  const corporate: MacroStep = {
+    ...named,
+    args: { ...named.args, corpDivision: { kind: "corpDivision", division: 4 } },
+  };
+  assert.match(stepSentence(corporate), /Corporate Hangar division 4/);
 });

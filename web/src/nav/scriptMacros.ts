@@ -443,7 +443,26 @@ const deliverOre: MacroDecider = (step, obs, mem, board) => {
   if (obs.flightStatus?.docked === true && obs.flightStatus.stationID === target) {
     const items = holdItemIDs(obs.holds ?? null);
     if (items.length > 0) {
-      return tick({ kind: "unloadOre", itemIDs: items }, "Unloading the ore into the hangar.", "Unloading", ACTING);
+      const division = step.args["corpDivision"];
+      if (division !== undefined && division.kind !== "corpDivision") {
+        return tick(WAIT, "The delivery destination is invalid.", "Hauling", {
+          kind: "blocked",
+          reason: "Pick a valid Corporate Hangar division, or use the personal station hangar.",
+        });
+      }
+      const destination =
+        division === undefined
+          ? { kind: "hangar" as const }
+          : { kind: "corp" as const, division: division.division };
+      const where = destination.kind === "corp"
+        ? `Corporate Hangar division ${destination.division}`
+        : "the personal station hangar";
+      return tick(
+        { kind: "unloadOre", itemIDs: items, destination, expectedStationID: target },
+        `Unloading the ore into ${where}.`,
+        "Unloading",
+        ACTING,
+      );
     }
     return tick(WAIT, "The ore is unloaded.", "Done hauling", { kind: "done" });
   }

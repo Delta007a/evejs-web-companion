@@ -236,6 +236,9 @@ export type Arg =
   /** A PLACE items can sit while docked: the station hangar, the ship's cargo
    * hold, or its ore hold. A closed vocabulary, validated by the codec. */
   | { readonly kind: "place"; readonly place: ItemPlace }
+  /** Optional deliver-ore destination. Absent means the personal station
+   * hangar, preserving every bot saved before corporation delivery existed. */
+  | { readonly kind: "corpDivision"; readonly division: number }
   /** A saved BOOKMARK. The id is a same-world hint; the NAME (its label) is what
    * the block matches at run time, so an imported script still finds "Safe spot". */
   | { readonly kind: "bookmark"; readonly bookmarkID: number | null; readonly name: string | null }
@@ -263,6 +266,8 @@ export type Arg =
 /** The move block's place vocabulary. */
 export type ItemPlace = "hangar" | "cargo" | "ore-hold";
 export const ITEM_PLACES: readonly ItemPlace[] = Object.freeze<ItemPlace[]>(["hangar", "cargo", "ore-hold"]);
+export const MIN_CORP_HANGAR_DIVISION = 1;
+export const MAX_CORP_HANGAR_DIVISION = 7;
 
 /**
  * Which rock the mine block reaches for first.

@@ -59,6 +59,7 @@ function script(program: readonly ProgramNode[]): BotScript {
 
 interface Harness {
   observeThrows?: () => never;
+  issueThrows?: (action: ScriptAction) => unknown;
   registry?: MacroRegistry;
 }
 
@@ -75,10 +76,13 @@ function harness(opts: Harness = {}) {
     },
     issue: async (a) => {
       issued.push(a);
+      const error = opts.issueThrows?.(a);
+      if (error !== undefined) throw error;
     },
     sleep: async () => {},
     onProgress: (s) => progress.push(s),
     isSessionLost: (e) => e instanceof SessionLost,
+    refusalReason: (e) => `backend: ${e instanceof Error ? e.message : String(e)}`,
     registry: opts.registry ?? registry,
     travelHome: home,
   });
@@ -104,6 +108,24 @@ test("ordinary writes still settle before deciding again", async () => {
   await h.runner.tick();
   assert.deepEqual(h.issued.map((a) => a.kind), ["unloadOre"]);
   assert.equal(h.runner.getStatus(), "stopped");
+});
+
+test("a refused Corporate Hangar unload pauses with the backend reason", async () => {
+  const corporateDeliver: MacroDecider = () => mt(
+    { kind: "unloadOre", itemIDs: [1], destination: { kind: "corp", division: 2 }, expectedStationID: 60003760 },
+    { kind: "acting" },
+  );
+  const h = harness({
+    registry: { ...registry, "deliver-ore": corporateDeliver },
+    issueThrows: () => new Error("Your corporation has no office at this station."),
+  });
+  h.runner.start(script([macroStep("corp", "deliver-ore")]));
+
+  await h.runner.tick();
+
+  assert.equal(h.runner.getStatus(), "paused");
+  assert.match(h.runner.snapshot().pauseReason ?? "", /backend: Your corporation has no office/);
+  assert.equal(h.issued.length, 1, "the one-way delivery is not silently retried");
 });
 
 const READY_RETURNING_SESSION_ACTIONS: readonly ScriptAction[] = [

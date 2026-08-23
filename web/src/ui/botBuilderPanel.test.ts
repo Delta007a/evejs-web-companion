@@ -58,6 +58,9 @@ test("the example program reads as plain sentences", () => {
   const text = visibleText(renderPanel());
   assert.match(text, /Mine at the nearest belt/);
   assert.match(text, /the ore hold is 90% full/);
+  assert.match(text, /Personal Station Hangar/);
+  assert.match(text, /Corporate Hangar/);
+  assert.match(text, /Division 7/);
 });
 
 test("the default shields watch shows, and the example is valid out of the box", () => {

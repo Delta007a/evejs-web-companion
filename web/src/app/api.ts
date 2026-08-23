@@ -2413,6 +2413,10 @@ export interface MiningActionResult {
   readonly notifications: readonly JsonValue[];
 }
 
+export type OreDeliveryDestination =
+  | { readonly kind: "hangar" }
+  | { readonly kind: "corp"; readonly division: number };
+
 function readIDArray(value: JsonValue | undefined): readonly number[] | null {
   if (!Array.isArray(value)) {
     return null;
@@ -2433,10 +2437,21 @@ export async function getMiningHolds(options: ApiOptions = {}): Promise<MiningHo
 export async function unloadMiningHolds(
   itemIDs: readonly number[],
   options: ApiOptions = {},
+  destination: OreDeliveryDestination = { kind: "hangar" },
+  expectedStationID: number | null = null,
 ): Promise<MiningActionResult> {
+  const body: Record<string, JsonValue> = { itemIDs: [...itemIDs] };
+  // Preserve the old request byte-for-byte for personal-hangar callers. The
+  // optional fields only exist for an explicitly configured bot delivery.
+  if (destination.kind === "corp") {
+    body.destination = destination as unknown as JsonValue;
+  }
+  if (expectedStationID !== null) {
+    body.expectedStationID = expectedStationID;
+  }
   const data = await postJson(
     "/api/bridge/ship/ore-hold/unload",
-    { itemIDs: [...itemIDs] },
+    body,
     options,
   );
   return {

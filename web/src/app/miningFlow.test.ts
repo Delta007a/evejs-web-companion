@@ -224,6 +224,12 @@ test("unloadMiningHolds reports success quietly, and re-reads the holds", async 
   assert.equal(state.lastAction, "Unload");
   assert.equal(state.silentDecline, null);
   assert.equal(state.actionError, null);
+  const unloadRequest = requests.find((entry) => entry.path === "/api/bridge/ship/ore-hold/unload");
+  assert.deepEqual(
+    unloadRequest?.body,
+    { itemIDs: [ORE_STACK_ID] },
+    "legacy personal-hangar callers send the unchanged request shape",
+  );
   assert.ok(
     requests.some((entry) => entry.path === "/api/bridge/ship/ore-hold"),
     "the holds are re-read so the panel shows the truth after the move",

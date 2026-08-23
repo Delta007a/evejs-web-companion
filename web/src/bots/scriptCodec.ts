@@ -41,6 +41,8 @@ import {
   MIN_QTY_ARG,
   MIN_REPEAT_TIMES,
   ITEM_PLACES,
+  MAX_CORP_HANGAR_DIVISION,
+  MIN_CORP_HANGAR_DIVISION,
   CHAT_CHANNEL_ARGS,
   ROCK_PICKS,
   MAX_TEXT_ARG_LEN,
@@ -524,6 +526,18 @@ function readArg(raw: unknown, expected: Arg["kind"], label: string, ctx: Ctx): 
       refuse(SAY.badArg(label));
     }
     return { kind: "place", place: place as ItemPlace };
+  }
+  if (expected === "corpDivision") {
+    const division = obj["division"];
+    if (
+      typeof division !== "number" ||
+      !Number.isSafeInteger(division) ||
+      division < MIN_CORP_HANGAR_DIVISION ||
+      division > MAX_CORP_HANGAR_DIVISION
+    ) {
+      refuse(SAY.badArg(label));
+    }
+    return { kind: "corpDivision", division };
   }
   if (expected === "destination") {
     // A station OR a system — and which one it is decides how the autopilot flies
@@ -1089,6 +1103,8 @@ function orderArg(arg: Arg): unknown {
       return { kind: "itemType", typeID: arg.typeID, name: arg.name };
     case "place":
       return { kind: "place", place: arg.place };
+    case "corpDivision":
+      return { kind: "corpDivision", division: arg.division };
     case "bookmark":
       return { kind: "bookmark", bookmarkID: arg.bookmarkID, name: arg.name };
     case "isk":

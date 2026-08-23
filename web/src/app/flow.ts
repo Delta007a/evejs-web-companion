@@ -6401,7 +6401,25 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             return;
           case "unloadOre":
             if (action.itemIDs.length > 0) {
-              await api.unloadMiningHolds(action.itemIDs, callOptions);
+              const destination = action.destination ?? { kind: "hangar" as const };
+              const result = await api.unloadMiningHolds(
+                action.itemIDs,
+                callOptions,
+                destination,
+                action.expectedStationID ?? null,
+              );
+              if (destination.kind === "corp") {
+                if (result.moved === null || result.remaining === null) {
+                  throw new Error("The Corporate Hangar unload could not be verified, so the bot paused.");
+                }
+                if (result.remaining.length > 0) {
+                  throw new Error(
+                    result.moved.length === 0
+                      ? "The server did not move any ore to the Corporate Hangar, and gave no reason."
+                      : `Only ${result.moved.length} of ${result.requested.length} ore stacks moved to the Corporate Hangar; the bot paused with the rest still aboard.`,
+                  );
+                }
+              }
             }
             return;
           case "agentButton": {
@@ -6644,6 +6662,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         }
       },
       isSessionLost,
+      refusalReason: errorWords,
       registry: SCRIPT_MACROS,
       travelHome: scriptTravelHome,
     };

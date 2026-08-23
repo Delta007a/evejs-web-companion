@@ -16211,9 +16211,10 @@ app.get("/api/bridge/ship/ore-hold", requireAuth, async (req, res, next) => {
   }
 });
 
-// Unload mined ore into the station hangar. This is R3's invbroker.Add in the
-// unfit direction: the DESTINATION (the hangar) is the bound object and the ship
-// is the source location — no new server method at all.
+// Unload mined ore into the personal station hangar, or (when explicitly
+// requested) a corporation division. This is R3's invbroker.Add in the unfit
+// direction: the DESTINATION is the bound object and the ship is the source
+// location — no new EveJS server method at all.
 //
 // Docked-only, because there is nowhere else for it to go.
 app.post("/api/bridge/ship/ore-hold/unload", requireAuth, async (req, res, next) => {
@@ -16243,21 +16244,42 @@ app.post("/api/bridge/ship/ore-hold/unload", requireAuth, async (req, res, next)
       });
       return;
     }
+    const expectedStationID = Number(body.expectedStationID) || 0;
+    if (expectedStationID > 0 && held.stationID !== expectedStationID) {
+      res.status(409).json({
+        ok: false,
+        error: "WRONG_STATION",
+        message: "The ship is not docked at the station selected for this delivery.",
+      });
+      return;
+    }
     const shipID = held.activeShipID;
     if (!shipID) {
       res.status(409).json({ ok: false, error: "NO_ACTIVE_SHIP", message: "No active ship." });
       return;
     }
-    const hangarSpec = hangarBindSpec(held);
+    // Omitted means the historical personal-hangar behaviour. There is no
+    // fallback: an explicit corp destination must resolve or the route refuses.
+    const destination = body.destination === undefined
+      ? { spec: hangarBindSpec(held), flag: ITEM_FLAG_HANGAR }
+      : await resolvePlace(held, req.webSessionID, body.destination);
+    if (destination.flag !== ITEM_FLAG_HANGAR && !isValidDivision(destination.division)) {
+      res.status(400).json({
+        ok: false,
+        error: "INVALID_DESTINATION",
+        message: "Ore can only be delivered to the personal station hangar or a Corporate Hangar division.",
+      });
+      return;
+    }
     const notifications = [];
     for (const itemID of requested) {
       const outcome = await boundCall(
         held,
         req.webSessionID,
-        hangarSpec,
+        destination.spec,
         "Add",
         [itemID, shipID],
-        { flag: ITEM_FLAG_HANGAR },
+        { flag: destination.flag },
       );
       notifications.push(...outcome.notifications);
     }
@@ -16286,6 +16308,9 @@ app.post("/api/bridge/ship/ore-hold/unload", requireAuth, async (req, res, next)
       notifications,
     });
   } catch (error) {
+    if (sendPlaceError(res, error)) {
+      return;
+    }
     next(error);
   }
 });

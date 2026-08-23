@@ -256,6 +256,15 @@ test("deliver: docked with ore -> unload; docked empty -> done", () => {
   const withOre: MiningHold[] = [{ key: "ore", label: "Ore Hold", items: [{ itemID: 8, typeID: 1230, quantity: 100 }], capacity: null, present: true, error: null }];
   const unload = deliver(haulStep, obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }), holds: withOre }), NM, {});
   assert.ok(unload.action.kind === "unloadOre" && unload.action.itemIDs.includes(8));
+  assert.deepEqual(unload.action.kind === "unloadOre" ? unload.action.destination : null, { kind: "hangar" });
+  assert.equal(unload.action.kind === "unloadOre" ? unload.action.expectedStationID : null, 60000004);
+
+  const corpStep: MacroStep = {
+    ...haulStep,
+    args: { ...haulStep.args, corpDivision: { kind: "corpDivision", division: 3 } },
+  };
+  const corp = deliver(corpStep, obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }), holds: withOre }), NM, {});
+  assert.deepEqual(corp.action.kind === "unloadOre" ? corp.action.destination : null, { kind: "corp", division: 3 });
 
   const done = deliver(haulStep, obs({ flightStatus: flight({ docked: true, inSpace: false, stationID: 60000004 }), holds: [] }), NM, {});
   assert.equal(done.outcome.kind, "done");

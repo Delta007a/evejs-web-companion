@@ -88,11 +88,16 @@ test("every macro has a category with a label, and the filter offers no empty bu
   assert.deepEqual(inUse, CATEGORY_ORDER.filter((c) => inUse.includes(c)));
 });
 
-test("travel and deliver both take a station picker", () => {
-  for (const id of ["travel-to-station", "deliver-ore"] as const) {
-    const params = macroEntry(id).params;
-    assert.equal(params.length, 1);
-    assert.equal(params[0]?.picker, "station");
-    assert.equal(params[0]?.required, true);
-  }
+test("travel and deliver take a station picker; delivery may select a corp division", () => {
+  const travel = macroEntry("travel-to-station").params;
+  assert.equal(travel.length, 1);
+  assert.equal(travel[0]?.picker, "station");
+  assert.equal(travel[0]?.required, true);
+
+  const delivery = macroEntry("deliver-ore").params;
+  assert.equal(delivery.length, 2);
+  assert.equal(delivery[0]?.picker, "station");
+  assert.equal(delivery[0]?.required, true);
+  assert.equal(delivery[1]?.picker, "corpDivision");
+  assert.equal(delivery[1]?.required, false);
 });

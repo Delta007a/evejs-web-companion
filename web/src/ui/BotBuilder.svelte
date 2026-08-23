@@ -155,6 +155,14 @@
   });
 
   const currentStation = $derived<{ id: number; name: string } | null>(stations[0] ?? null);
+  const deliveryDivisions = $derived.by<readonly { division: number; label: string }[]>(() => {
+    const names = new Map($inventory.corp.divisions.map((division) => [division.division, division.name]));
+    return Array.from({ length: 7 }, (_, index) => {
+      const division = index + 1;
+      const name = names.get(division);
+      return { division, label: name ? `${name} (division ${division})` : `Division ${division}` };
+    });
+  });
   const someWatchDocks = $derived(watches.some((w) => w.respond === "dock-and-pause"));
   const hasSubBot = $derived(steps.some((n) => n.kind === "sub-bot"));
   const builtDoc = $derived<BotScript>(buildScript());
@@ -553,6 +561,31 @@
   function setStepStationRef(i: number, ref: WorldRef, side: Side | null = null, j = -1): void {
     updateStep(i, (s) => ({ ...s, args: { ...s.args, station: { kind: "station", ref } } }), side, j);
   }
+  function deliveryDestinationValue(step: MacroStep): string {
+    const division = step.args["corpDivision"];
+    return division !== undefined && division.kind === "corpDivision"
+      ? `corp:${division.division}`
+      : "hangar";
+  }
+  function setDeliveryDestination(i: number, raw: string, side: Side | null = null, j = -1): void {
+    updateStep(
+      i,
+      (s) => {
+        if (raw === "hangar") {
+          const { corpDivision: _dropped, ...args } = s.args;
+          return { ...s, args };
+        }
+        const match = /^corp:([1-7])$/.exec(raw);
+        if (!match) return s;
+        return {
+          ...s,
+          args: { ...s.args, corpDivision: { kind: "corpDivision", division: Number(match[1]) } },
+        };
+      },
+      side,
+      j,
+    );
+  }
   /** The destination slot: a station OR a system (the picker keeps which). */
   function destinationRef(step: MacroStep): WorldRef {
     const arg = step.args["destination"];
@@ -633,6 +666,10 @@
         savedSpots = rows;
       })
       .catch(() => {});
+    // Names are corporation-wide and make the destination readable. A missing
+    // office here is harmless: the picker keeps Division 1..7 fallbacks, while
+    // the destination station is resolved authoritatively at delivery time.
+    void flow.loadCorpHangar().catch(() => {});
   });
   function bookmarkArgID(step: MacroStep): number | null {
     const arg = step.args["bookmark"];
@@ -1176,6 +1213,21 @@
             <span class="inline-edit">
               at
               <StationPicker {flow} value={stationArgRef(step)} current={currentStation} onPick={(ref) => setStepStationRef(i, ref, side, j)} />
+            </span>
+          {/if}
+          {#if step.macro === "deliver-ore"}
+            <span class="inline-edit">
+              into
+              <select
+                aria-label="Ore delivery destination"
+                value={deliveryDestinationValue(step)}
+                onchange={(e) => setDeliveryDestination(i, e.currentTarget.value, side, j)}
+              >
+                <option value="hangar">Personal Station Hangar</option>
+                {#each deliveryDivisions as division (division.division)}
+                  <option value={`corp:${division.division}`}>Corporate Hangar — {division.label}</option>
+                {/each}
+              </select>
             </span>
           {/if}
           {#if step.macro === "find-distribution-agent" || step.macro === "find-combat-agent"}
