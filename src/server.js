@@ -13,6 +13,7 @@ const eveStore = require("./eveStore");
 const eveGatewayClient = require("./eveGatewayClient");
 const webAuth = require("./webAuth");
 const staticDataModule = require("./staticData");
+const pilotTraining = require("./pilotTraining");
 const config = require("./config");
 const botScriptStoreModule = require("./botScriptStore");
 const botHostModule = require("./botHost");
@@ -18363,6 +18364,52 @@ app.get("/api/roster/training", requireAuth, async (req, res, next) => {
       }),
     );
     res.json({ ok: true, training: rows.filter((row) => row !== null) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Account-owned, session-free qualification read. No bridge selection and no
+// queue write: an online browser or server bot keeps control of its character.
+app.get("/api/pilot-training/characters", requireAuth, async (req, res, next) => {
+  try {
+    const characters = await store.listCharactersForAccount(req.account.accountID);
+    res.json({ ok: true, account: req.account.username, characters: characters.map((character) => ({
+      characterID: character.characterID,
+      name: character.characterName,
+    })) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/pilot-training/miner", requireAuth, async (req, res, next) => {
+  const characterID = Number(req.query.characterID);
+  if (!Number.isSafeInteger(characterID) || characterID <= 0) {
+    res.status(400).json({ ok: false, error: "INVALID_CHARACTER_ID" });
+    return;
+  }
+  try {
+    const character = await store.getCharacterForAccount(req.account.accountID, characterID);
+    if (!character) {
+      res.status(404).json({ ok: false, error: "CHARACTER_NOT_FOUND" });
+      return;
+    }
+    const sheet = await gateway.getSkills(req.account.accountID, characterID);
+    if (!sheet) {
+      res.status(503).json({ ok: false, error: "SKILL_STATE_UNAVAILABLE" });
+      return;
+    }
+    let report;
+    try {
+      report = pilotTraining.buildMinerReport(staticData, sheet, {
+        characterID, name: character.characterName, account: req.account.username,
+      });
+    } catch (error) {
+      res.status(503).json({ ok: false, error: "STATIC_SKILL_DATA_UNAVAILABLE", message: error.message });
+      return;
+    }
+    res.json({ ok: true, report });
   } catch (error) {
     next(error);
   }

@@ -80,6 +80,7 @@ export const NEOCOM_GLYPHS: Readonly<Record<TabID, NeocomGlyph>> = {
   agents: ["M11 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6", "M6 21a5 5 0 0 1 10 0", "M16 3h5v4h-5z"],
   finder: ["M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14", "M16.5 16.5L21 21"],
   skills: ["M5 20v-4M10 20v-8M15 20v-12M20 20v-16"],
+  pilotTraining: ["M4 20h16", "M6 16l4-4 3 2 5-7", "M5 5h9"],
   planets: ["M12 6a6 6 0 1 0 0 12 6 6 0 0 0 0-12", "M3 14c6 3.5 12 3.5 18 0"],
   // Planetary Industry: a small world over a row of three, the whole roster's
   // colonies rather than one planet.

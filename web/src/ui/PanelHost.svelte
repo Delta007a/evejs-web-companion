@@ -22,6 +22,7 @@
   import ShotsPanel from "./ShotsPanel.svelte";
   import EquipmentPanel from "./EquipmentPanel.svelte";
   import Skills from "./Skills.svelte";
+  import PilotTraining from "./PilotTraining.svelte";
   import Planets from "./Planets.svelte";
   import Travel from "./Travel.svelte";
   import Bots from "./Bots.svelte";
@@ -133,6 +134,8 @@
   <EquipmentPanel {store} {flow} />
 {:else if tab === "skills"}
   <Skills {store} {flow} />
+{:else if tab === "pilotTraining"}
+  <PilotTraining {store} {flow} />
 {:else if tab === "planets"}
   <Planets {store} {flow} />
 {:else if tab === "travel"}

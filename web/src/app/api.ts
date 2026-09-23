@@ -31,6 +31,7 @@ import {
   type RequestPriority,
 } from "./transport.ts";
 import type { JsonValue } from "../bridge/wire.ts";
+import type { MinerReport, TrainingCharacter } from "../training/types.ts";
 import type {
   AgentRow,
   IndustryActivity,
@@ -4441,6 +4442,36 @@ export async function salvageDrones(
     { droneIDs: [...droneIDs], targetID, confirm: true },
     options,
   );
+}
+
+// --- Pilot Training: account-owned read-only qualification -------------------
+
+/** Account-owned identities for a read-only training preview; no selection. */
+export async function loadTrainingCharacters(options: ApiOptions = {}): Promise<{
+  readonly account: string;
+  readonly characters: readonly TrainingCharacter[];
+}> {
+  const data = await getJson("/api/pilot-training/characters", options);
+  if (typeof data.account !== "string" || !Array.isArray(data.characters)) {
+    throw new BridgeCallError("BRIDGE_BAD_RESPONSE", "Training roster is incomplete.", 502);
+  }
+  const characters = data.characters as unknown as TrainingCharacter[];
+  if (characters.some((character) => !Number.isSafeInteger(character.characterID) ||
+      character.characterID <= 0 || typeof character.name !== "string")) {
+    throw new BridgeCallError("BRIDGE_BAD_RESPONSE", "Training roster is incomplete.", 502);
+  }
+  return { account: data.account, characters };
+}
+
+/** Gateway-owned skills plus static EveJS prerequisite closure, without a held session. */
+export async function loadMinerTraining(characterID: number, options: ApiOptions = {}): Promise<MinerReport> {
+  const data = await getJson(`/api/pilot-training/miner?characterID=${encodeURIComponent(characterID)}`, options);
+  const report = data.report as unknown as MinerReport | null;
+  if (!report || report.role !== "MINER" || !Array.isArray(report.stages) ||
+      !report.previews || report.pilot?.characterID !== characterID) {
+    throw new BridgeCallError("BRIDGE_BAD_RESPONSE", "Training qualification read is incomplete.", 502);
+  }
+  return report;
 }
 
 // --- R28 Skills: the character sheet and the training queue -------------------

@@ -31,6 +31,7 @@ export type TabID =
   | "agents"
   | "finder"
   | "skills"
+  | "pilotTraining"
   | "planets"
   | "piManager"
   | "activity"
@@ -148,6 +149,7 @@ export const TABS: readonly TabDef[] = [
   { id: "agents", label: "Agents & Missions", where: "both" },
   { id: "finder", label: "Agent Finder", where: "both" },
   { id: "skills", label: "Skills", where: "both" },
+  { id: "pilotTraining", label: "Pilot Training", where: "both" },
   { id: "planets", label: "Planets", where: "both" },
   // R108 slice 3 — a GLOBAL window (globalWindow.ts): every assigned pilot's
   // colonies on one board, read with no character selected. In the rail, like
