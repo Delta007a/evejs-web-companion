@@ -163,6 +163,13 @@ test("travel-to-belt: a distant belt -> warp to it", () => {
   assert.ok(t.action.kind === "warp" && t.action.targetID === 40001);
 });
 
+test("travel-to-belt: above 20 km but below EveJS's belt warp floor -> done without warp", () => {
+  const belt = entity({ itemID: 40001, name: "Asteroid Belt 1", position: { x: 50000, y: 0, z: 0 } });
+  const t = travelToBelt(travelToBeltStep, obs({ snapshot: snapshot([belt]) }), NM, {});
+  assert.equal(t.action.kind, "wait");
+  assert.equal(t.outcome.kind, "done");
+});
+
 test("travel-to-belt: already on the belt -> done, no mining involved", () => {
   const belt = entity({ itemID: 40001, name: "Asteroid Belt 1", position: { x: 5000, y: 0, z: 0 } });
   const t = travelToBelt(travelToBeltStep, obs({ snapshot: snapshot([belt]) }), NM, {});
@@ -337,6 +344,13 @@ test("mine: a dry belt in nearest mode reports it via the shared memory instead 
   assert.ok(t2.action.kind === "warp" && t2.action.targetID === 40002);
 });
 
+test("mine: nearest mode does not short-warp to its belt beyond the old 20 km arrival radius", () => {
+  const near = entity({ itemID: 40001, name: "Asteroid Belt 1", position: { x: 50000, y: 0, z: 0 } });
+  const t = mine(mineStep, obs({ snapshot: snapshot([near]) }), NM, {});
+  assert.equal(t.action.kind, "rememberBeltDry");
+  assert.ok(t.action.kind === "rememberBeltDry" && t.action.beltName === "Asteroid Belt 1");
+});
+
 test("mine: every belt in the system reported dry -> blocked with a plain reason", () => {
   const near = entity({ itemID: 40001, name: "Asteroid Belt 1", position: { x: 5000, y: 0, z: 0 } });
   const far = entity({ itemID: 40002, name: "Asteroid Belt 2", position: { x: 8000, y: 0, z: 0 } });
@@ -362,6 +376,35 @@ test("mine: a CHOSEN (pinned) belt still just pauses when dry — no rotation", 
   assert.equal(t.outcome.kind, "blocked");
   assert.equal(t.outcome.kind === "blocked" ? t.outcome.reason : "", "This belt has no rocks left to mine.");
   assert.equal(t.boardPatch, undefined);
+});
+
+test("mine: a nearby pinned belt above 20 km but below EveJS's warp floor never short-warps", () => {
+  const belt = entity({ itemID: 40001, name: "Asteroid Belt 1", position: { x: 50000, y: 0, z: 0 } });
+  const step: MacroStep = {
+    id: "mp-near",
+    kind: "macro",
+    macro: "mine-at-belt",
+    args: { belt: { kind: "belt", belt: { mode: "chosen", ref: { entity: "belt", id: 40001, name: "Asteroid Belt 1", systemName: null } } } },
+    until: { kind: "ore-hold-at-least", fraction: 0.9 },
+  };
+  const t = mine(step, obs({ snapshot: snapshot([belt]) }), NM, {});
+  assert.equal(t.action.kind, "wait");
+  assert.equal(t.outcome.kind, "blocked");
+  assert.match(t.outcome.kind === "blocked" ? t.outcome.reason : "", /no rocks left/i);
+});
+
+test("mine: a genuinely distant pinned belt still warps to that pinned belt", () => {
+  const pinned = entity({ itemID: 40001, name: "Asteroid Belt 1", position: { x: 500000, y: 0, z: 0 } });
+  const step: MacroStep = {
+    id: "mp-far",
+    kind: "macro",
+    macro: "mine-at-belt",
+    args: { belt: { kind: "belt", belt: { mode: "chosen", ref: { entity: "belt", id: 40001, name: "Asteroid Belt 1", systemName: null } } } },
+    until: { kind: "ore-hold-at-least", fraction: 0.9 },
+  };
+  const t = mine(step, obs({ snapshot: snapshot([pinned]) }), NM, {});
+  assert.equal(t.action.kind, "warp");
+  assert.ok(t.action.kind === "warp" && t.action.targetID === 40001);
 });
 
 test("mine: the shared belt memory is read from the observation, independent of per-step memory", () => {

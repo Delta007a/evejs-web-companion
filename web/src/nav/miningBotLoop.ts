@@ -38,6 +38,7 @@
 import {
   MAX_SILENT_DOCK_ATTEMPTS,
   MAX_WARP_ATTEMPTS,
+  MIN_WARP_DISTANCE_M,
   STATION_DOCKING_RADIUS_M,
   decideCloseIn,
   measureSpace,
@@ -73,6 +74,23 @@ export const MINING_BOT_CADENCE_MS = 2000;
  * finds them out by being refused.
  */
 export const BELT_ARRIVAL_RADIUS_M = 20_000;
+
+/**
+ * The lowest measured SURFACE distance at which EveJS 0.12.9-Beta can accept a
+ * `minRange=0` warp to an asteroid belt.
+ *
+ * EveJS refuses when the requested warp's travel distance is under
+ * `MIN_WARP_DISTANCE_METERS` (`warpCommands.js`). For an `asteroidBelt`,
+ * `getWarpStopDistanceForTarget` uses `2_500 + 2 * shipRadius`
+ * (`warpState.js`). `measureSpace` has already subtracted the ship and belt
+ * radii, so converting that centre-distance rule to this module's surface
+ * distance leaves one ship radius added and the belt radius subtracted.
+ */
+export function beltWarpFloorMeters(shipRadius: number, beltRadius: number): number {
+  const ship = Number.isFinite(shipRadius) ? Math.max(0, shipRadius) : 0;
+  const belt = Number.isFinite(beltRadius) ? Math.max(0, beltRadius) : 0;
+  return Math.max(0, MIN_WARP_DISTANCE_M + 2_500 + ship - belt);
+}
 
 /** Settle windows for asynchronous movement/writes and recoverable refusals. */
 const SETTLE_DOCK_REFUSAL = 2;

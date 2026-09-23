@@ -23,7 +23,7 @@ import { BOARD_SLOT_KEY, DEFAULT_HUNT_MAX_JUMPS, DEFAULT_HUNT_RANGE_AU } from ".
 import type { MacroStep, OreFamilyArg, SquadRoleArg, WorldRef } from "../bots/botScript.ts";
 import { launchFullPercent } from "../bots/macroSpecs.ts";
 import type { SpaceEntity, SpaceSnapshot, SpaceVector } from "../store/types.ts";
-import { BELT_ARRIVAL_RADIUS_M, freightHoldItemIDs, holdsFreeM3, isMineableRock } from "./miningBotLoop.ts";
+import { BELT_ARRIVAL_RADIUS_M, beltWarpFloorMeters, freightHoldItemIDs, holdsFreeM3, isMineableRock } from "./miningBotLoop.ts";
 import { nearestUnworkedBelt, type BeltOption } from "./beltRotation.ts";
 import type { ExplorationSiteKind } from "../scanner/siteKind.ts";
 import {
@@ -608,6 +608,21 @@ function highestGradeRocks(rocks: readonly SpaceEntity[]): readonly SpaceEntity[
   return rocks.filter((rock) => rock.oreGrade === bestGrade);
 }
 
+/**
+ * Belt travel is complete either at the normal 20 km arrival radius or once
+ * the selected belt is too close for EveJS to accept another warp to it. The
+ * latter is the common case after mining or hauling has carried the ship away
+ * from the belt marker while it remains on that belt's grid.
+ */
+function isAtBeltForTravel(belt: SpaceEntity, measurement: SpaceMeasurement | null): boolean {
+  const distance = measurement?.distances.get(belt.itemID);
+  if (distance === undefined || measurement === null) {
+    return false;
+  }
+  return distance <= BELT_ARRIVAL_RADIUS_M ||
+    distance < beltWarpFloorMeters(measurement.shipRadius, belt.radius);
+}
+
 // ── undock ───────────────────────────────────────────────────────────────────
 const undock: MacroDecider = (_step, obs) => {
   const docked = obs.flightStatus?.docked ?? null;
@@ -642,8 +657,7 @@ const travelToBelt: MacroDecider = (step, obs) => {
       : "There is no asteroid belt here to fly to.";
     return tick(WAIT, "No asteroid belt in view.", "Nothing to fly to", { kind: "blocked", reason });
   }
-  const beltDist = measurement?.distances.get(belt.itemID) ?? Number.POSITIVE_INFINITY;
-  if (beltDist <= BELT_ARRIVAL_RADIUS_M) {
+  if (isAtBeltForTravel(belt, measurement)) {
     return tick(WAIT, "At the belt.", "Arrived", { kind: "done" });
   }
   return tick({ kind: "warp", targetID: belt.itemID }, `Warping to ${rockLabel(belt)}.`, "Flying to the belt", ACTING, false, {});
@@ -834,8 +848,7 @@ function mineNoTargetRocks(
         reason: "The belt this step is pinned to is not on this grid.",
       });
     }
-    const beltDist = measurement?.distances.get(belt.itemID) ?? Number.POSITIVE_INFINITY;
-    if (beltDist <= BELT_ARRIVAL_RADIUS_M) {
+    if (isAtBeltForTravel(belt, measurement)) {
       const reason = family !== null ? `No ${family.name} left here.` : "This belt has no rocks left to mine.";
       return tick(WAIT, "At the belt, but there is nothing to mine.", "Belt empty", { kind: "blocked", reason });
     }
@@ -877,8 +890,8 @@ function mineNoTargetRocks(
     return tick(WAIT, reason, "Nothing left to mine", { kind: "blocked", reason });
   }
 
-  const targetDist = target.distance ?? Number.POSITIVE_INFINITY;
-  if (targetDist <= BELT_ARRIVAL_RADIUS_M) {
+  const targetBelt = belts.find((belt) => belt.itemID === target.id) ?? null;
+  if (targetBelt !== null && isAtBeltForTravel(targetBelt, measurement)) {
     // On grid with it, and it has none of what we want — tell the BFF's
     // shared memory (name-keyed) instead of writing a board patch of our own,
     // so every pilot's rotation, not just this one, steers away from it.
