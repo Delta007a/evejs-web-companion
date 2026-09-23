@@ -225,13 +225,13 @@ export const MINING_LADDER: readonly MiningRung[] = Object.freeze([
   },
   {
     id: "reading-drone-bay",
-    name: "A pirate is here — looking in the drone bay",
+    name: "Read drone control state before acting",
     group: "Danger",
     fit: "clean",
   },
   {
     id: "launch-drones",
-    name: "A pirate is here, so the drones go out — they defend the ship on their own",
+    name: "Manage the mining or defensive drone flight",
     group: "Danger",
     fit: "clean",
   },

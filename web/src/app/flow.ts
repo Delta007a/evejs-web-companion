@@ -239,7 +239,7 @@ import {
   threatFromAttributes,
   type RatThreat,
 } from "../nav/ratThreat.ts";
-import { splitDroneRoles, type DroneRoleIDs } from "../nav/droneRoles.ts";
+import { droneRoleForGroup, splitDroneRoles, type DroneRoleIDs } from "../nav/droneRoles.ts";
 import {
   DRONE_RANGE_BONUS_ATTRIBUTE_ID,
   DRONE_RANGE_SKILL_TYPE_IDS,
@@ -6883,10 +6883,20 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         store.apply({ type: "mining/holds", holds });
         return holds;
       },
-      getDroneBayItemIDs: async () => {
-        const result = await api.getDrones(callOptions);
-        const bay = decodeDroneBay(result.bay);
-        return bay === null ? null : bay.map((stack) => stack.itemID);
+      getDroneState: async () => {
+        const raw = await api.getDrones(callOptions);
+        const bay = decodeDroneBay(raw.bay);
+        const out = decodeDronesInSpace(raw.inSpace);
+        const typeIDs = new Set([...bay ?? [], ...out ?? []].flatMap(d => d.typeID === null ? [] : [d.typeID]));
+        try {
+          await resolveNamesNow([...typeIDs].map(id => ({ kind: "typeGroup" as const, id })));
+        } catch (error) {
+          if (isSessionLost(error)) throw error;
+          // Role lookup failure cannot erase the control state needed for recall.
+        }
+        const names = store.names.get().resolved;
+        return { bay, out, maxActive: decodeDroneLimits(raw.shipInfo).maxActiveDrones,
+          roles: Object.fromEntries([...typeIDs].map(id => [id, droneRoleForGroup(names[nameKey("typeGroup", id)])])) };
       },
       undock: async () => {
         await api.undock(callOptions);
@@ -6911,12 +6921,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       activateModule: async (moduleID, targetID) => {
         await api.activateModule(moduleID, { targetID, repeat: -1 }, callOptions);
       },
-      launchDrones: async (itemIDs) => {
-        await api.launchDrones(
-          itemIDs.map((itemID) => ({ itemID, quantity: 1 })),
-          callOptions,
-        );
-      },
+      launchDrones: async (drones) => { await api.launchDrones(drones, callOptions); },
+      recallDrones: async (ids) => { await api.recallDrones(ids, callOptions); },
+      mineDrones: async (ids, targetID) => { await api.mineWithDrones(ids, targetID, callOptions); },
+      engageDrones: async (ids, targetID) => { await api.engageDrones(ids, targetID, callOptions); },
       unloadHolds: async (itemIDs) => {
         await api.unloadMiningHolds(itemIDs, callOptions);
       },
@@ -9251,6 +9259,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
         const ship = snapshot?.ship ?? null;
         const droneRoles = await classifyDroneRoles(bay, snapshot, ship?.itemID ?? null);
+        const miningOut = decodeDronesInSpace(dronesResult.inSpace);
+        const miningTypes = new Set([...bay ?? [], ...miningOut ?? []].flatMap(d => d.typeID === null ? [] : [d.typeID]));
+        await resolveNamesNow([...miningTypes].map(id => ({ kind: "typeGroup" as const, id })));
+        const miningDrones = { bay, out: miningOut, maxActive: decodeDroneLimits(dronesResult.shipInfo).maxActiveDrones,
+          roles: Object.fromEntries([...miningTypes].map(id => [id, droneRoleForGroup(store.names.get().resolved[nameKey("typeGroup", id)])])) };
         const hold = destinationHold(holds);
         const capacity = hold?.capacity ?? null;
         const used = capacity?.used ?? null;
@@ -9982,6 +9995,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           lockedTargetIDs,
           holds,
           droneBayItemIDs,
+          miningDrones,
           combatDroneBayItemIDs: droneRoles.bay?.combat ?? null,
           salvageDroneBayItemIDs: droneRoles.bay?.salvage ?? null,
           combatDroneIDs: droneRoles.out?.combat ?? null,
@@ -10130,10 +10144,13 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           case "launchDrones":
             if (action.droneItemIDs.length > 0) {
               await api.launchDrones(
-                action.droneItemIDs.map((itemID) => ({ itemID, quantity: 1 })),
+                action.quantities ?? action.droneItemIDs.map((itemID) => ({ itemID, quantity: 1 })),
                 callOptions,
               );
             }
+            return;
+          case "mineDrones":
+            await api.mineWithDrones(action.droneIDs, action.targetID, callOptions);
             return;
           case "engageDrones":
             if (action.droneIDs.length > 0) {

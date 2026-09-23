@@ -162,6 +162,7 @@ function myDrone(): SpaceEntity {
   return entity({
     itemID: DRONE_IN_SPACE,
     kind: "drone",
+    typeID: 2456,
     name: "Hobgoblin I",
     ownerID: PLAN.myCharacterID,
     controllerID: SHIP,
@@ -248,7 +249,6 @@ const EMPTY_MEMORY: MiningDecisionMemory = {
   lockRefusedRockIDs: new Set<number>(),
   approachingTargetID: null,
   headingHome: null,
-  launchGaveUp: false,
   noYieldCycles: 0,
 };
 
@@ -264,8 +264,12 @@ function observe(overrides: Partial<MiningObservation> = {}): MiningObservation 
     measurement: measureSpace(space),
     lockedTargetIDs: [],
     holds: [oreHold(0)],
-    droneBayItemIDs: null,
+    drones: { bay: [], out: [], maxActive: 1, roles: { 2456: "combat" } },
     ...overrides,
+    ...(overrides.drones && space ? { drones: { ...overrides.drones, out: space.entities.filter(d => d.controllerID === SHIP && d.kind === "drone").map(d => ({
+      itemID: d.itemID, typeID: d.typeID, controlled: true, activity: d.droneActivity, targetID: d.targetEntityID,
+      name: d.name, shieldRatio: d.shieldRatio, armorRatio: d.armorRatio, hullRatio: d.hullRatio,
+    })) } } : {}),
     // measurement always tracks whatever snapshot ended up in play unless the
     // caller supplied one explicitly.
     ...(overrides.measurement === undefined ? { measurement: measureSpace(space) } : {}),
@@ -724,22 +728,22 @@ test("mid-warp the bot does NOTHING, whatever the measurement says is in reach",
 test("rung 1: a pirate with no drones of ours out LAUNCHES — launching IS the defence", () => {
   const decision = decide({
     snapshot: snapshot([pirate(), rock(ROCK_A, 8_000, 5_000, "Veldspar")]),
-    droneBayItemIDs: [DRONE_STACK],
+    drones: { bay: [{ itemID: DRONE_STACK, typeID: 2456, quantity: 1 }], out: [], maxActive: 1, roles: { 2456: "combat" } },
   });
   assert.equal(decision.action.kind, "launch");
   if (decision.action.kind === "launch") {
-    assert.deepEqual(decision.action.droneItemIDs, [DRONE_STACK]);
+    assert.deepEqual(decision.action.drones, [{ itemID: DRONE_STACK, quantity: 1 }]);
   }
-  assert.match(decision.why, /defend the ship on their own/i);
+  assert.match(decision.why, /defend the ship/i);
 });
 
 test("rung 1: drones already out are not launched again — the SNAPSHOT is the authority", () => {
   const decision = decide({
     snapshot: snapshot([pirate(), myDrone(), rock(ROCK_A, 8_000, 5_000, "Veldspar")]),
-    droneBayItemIDs: [DRONE_STACK],
+    drones: { bay: [{ itemID: DRONE_STACK, typeID: 2456, quantity: 1 }], out: [], maxActive: 1, roles: { 2456: "combat" } },
   });
   assert.notEqual(decision.action.kind, "launch");
-  assert.equal(decision.action.kind, "lock", "with the drones out it gets on with mining");
+  assert.equal(decision.action.kind, "engageDrones", "active combat drones engage the hostile");
 });
 
 test("rung 1: an ABANDONED owned drone does NOT count as defence — the bay still LAUNCHES (R48 live)", () => {
@@ -749,11 +753,11 @@ test("rung 1: an ABANDONED owned drone does NOT count as defence — the bay sti
   // ship sits next to a pirate with ten combat drones still in the bay.
   const decision = decide({
     snapshot: snapshot([pirate(), abandonedDrone(), rock(ROCK_A, 8_000, 5_000, "Veldspar")]),
-    droneBayItemIDs: [DRONE_STACK],
+    drones: { bay: [{ itemID: DRONE_STACK, typeID: 2456, quantity: 1 }], out: [], maxActive: 1, roles: { 2456: "combat" } },
   });
   assert.equal(decision.action.kind, "launch", "a drone we cannot command is not defence");
   if (decision.action.kind === "launch") {
-    assert.deepEqual(decision.action.droneItemIDs, [DRONE_STACK]);
+    assert.deepEqual(decision.action.drones, [{ itemID: DRONE_STACK, quantity: 1 }]);
   }
 });
 
@@ -774,7 +778,7 @@ test("rung 1: the CONTROLLER reads the bay past an abandoned drone and launches 
 test("rung 1: an empty drone bay is not a reason to stop — the health floor is still armed", () => {
   const decision = decide({
     snapshot: snapshot([pirate(), rock(ROCK_A, 8_000, 5_000, "Veldspar")]),
-    droneBayItemIDs: [],
+    drones: { bay: [], out: [], maxActive: 1, roles: { 2456: "combat" } },
   });
   assert.equal(decision.action.kind, "lock", "no drones to send, so it keeps mining");
 });
@@ -789,7 +793,7 @@ test("rung 1: below the health floor it ABANDONS the belt and docks — survival
       ],
       { shieldRatio: 0.3, armorRatio: 1, hullRatio: 1 },
     ),
-    droneBayItemIDs: [DRONE_STACK],
+    drones: { bay: [{ itemID: DRONE_STACK, typeID: 2456, quantity: 1 }], out: [], maxActive: 1, roles: { 2456: "combat" } },
   });
   // Not "launch": once under the floor no launch saves the ship.
   assert.equal(decision.action.kind, "warp");
@@ -823,7 +827,7 @@ test("rung 1: a pirate AND an unreadable shield bar stops the bot rather than gu
       armorRatio: null,
       hullRatio: null,
     }),
-    droneBayItemIDs: [DRONE_STACK],
+    drones: { bay: [{ itemID: DRONE_STACK, typeID: 2456, quantity: 1 }], out: [], maxActive: 1, roles: { 2456: "combat" } },
   });
   assert.equal(decision.action.kind, "pause");
   if (decision.action.kind === "pause") {
@@ -841,7 +845,7 @@ test("police are not pirates: CONCORD on the grid triggers nothing", () => {
   });
   const decision = decide({
     snapshot: snapshot([concord, rock(ROCK_A, 8_000, 5_000, "Veldspar")]),
-    droneBayItemIDs: [DRONE_STACK],
+    drones: { bay: [{ itemID: DRONE_STACK, typeID: 2456, quantity: 1 }], out: [], maxActive: 1, roles: { 2456: "combat" } },
   });
   assert.equal(decision.action.kind, "lock");
 });
@@ -882,14 +886,20 @@ function makeDeps(
       getSpaceSnapshot: async () => world.snapshot(),
       getLockedTargetIDs: async () => (world.locked ? world.locked() : []),
       getHolds: async () => (world.holds ? world.holds() : [oreHold(0)]),
-      getDroneBayItemIDs: async () => (world.bay ? world.bay() : []),
+      getDroneState: async () => ({
+        bay: (world.bay?.() ?? []).map(itemID => ({ itemID, typeID: 2456, quantity: 1 })),
+        out: [], maxActive: 1, roles: { 2456: "combat" },
+      }),
       undock: async () => record("undock"),
       warp: async (id) => record("warp", [id]),
       approach: async (id) => record("approach", [id]),
       dock: async (id) => record("dock", [id]),
       lockTarget: async (id) => record("lock", [id]),
       activateModule: async (m, t) => record("activate", [m, t]),
-      launchDrones: async (ids) => record("launch", [...ids]),
+      launchDrones: async (drones) => record("launch", drones.map(d => d.itemID)),
+      recallDrones: async (ids) => record("recall", ids),
+      mineDrones: async (ids, targetID) => record("mine", [...ids, targetID]),
+      engageDrones: async (ids, targetID) => record("engage", [...ids, targetID]),
       unloadHolds: async (ids) => record("unload", [...ids]),
       sleep: async () => {},
       onProgress: (p) => progress.push(p),
@@ -1583,4 +1593,126 @@ test("NOTHING repeats unboundedly: a world where every branch fails still stops"
     "and said why, in the loop's own words",
   );
   assert.ok(rec.calls.length < 60, `and did not spam the bridge (${rec.calls.length} calls)`);
+});
+
+
+// Mining drones use the same rock decision and controller as mining modules.
+const minerState = (out: readonly import("../store/types.ts").DroneInSpace[] = []) => ({
+  bay: [{ itemID: 8001, typeID: 101, quantity: 3 }, { itemID: 8002, typeID: 100, quantity: 3 }],
+  out, maxActive: 1, roles: { 101: "mining" as const, 100: "combat" as const },
+});
+const activeDrone = (itemID = 81, typeID = 101, targetID: number | null = null, activity = "idle") => ({
+  itemID, typeID, targetID, activity, controlled: true, name: null,
+  shieldRatio: 1, armorRatio: 1, hullRatio: 1,
+});
+function droneWorld(active = true): MiningObservation {
+  return { ...observe({ snapshot: snapshot([rock(ROCK_A, 8000, 5000, "Veldspar")],
+    { activeModuleIDs: active ? [LASER_A, LASER_B] : [] }), lockedTargetIDs: [ROCK_A] }), drones: minerState() };
+}
+
+test("mining drones supplement both modules and use their selected asteroid", () => {
+  const obs = droneWorld(false);
+  const mem = memory({ currentRockID: ROCK_A });
+  const first = decideMiningAction(obs, PLAN, mem);
+  assert.equal(first.action.kind, "activate");
+  const running = droneWorld();
+  assert.deepEqual(decideMiningAction(running, PLAN, mem).action, { kind: "launch", drones: [{ itemID: 8001, quantity: 1 }] });
+  const flight = decideMiningAction({ ...running, drones: minerState([activeDrone()]) }, PLAN, mem);
+  assert.deepEqual(flight.action, { kind: "mineDrones", droneIDs: [81], targetID: ROCK_A });
+});
+
+test("asteroid disappearance drops the existing target before drone retasking", () => {
+  const obs = droneWorld();
+  const missing = { ...obs, snapshot: snapshot([rock(ROCK_B, 4000, 2000, "Scordite")]), drones: minerState([activeDrone(81, 101, ROCK_A, "mining")]) };
+  const drop = decideMiningAction(missing, PLAN, memory({ currentRockID: ROCK_A }));
+  assert.ok(drop.dropRock);
+  assert.notEqual(drop.action.kind, "mineDrones");
+  const next = decideMiningAction({ ...missing, lockedTargetIDs: [ROCK_B], snapshot: snapshot([rock(ROCK_B, 4000, 2000, "Scordite")], { activeModuleIDs: [LASER_A, LASER_B] }) }, PLAN, memory({ currentRockID: null }));
+  assert.equal(next.takeRock, ROCK_B);
+  assert.deepEqual(next.action, { kind: "mineDrones", droneIDs: [81], targetID: ROCK_B });
+});
+
+for (const path of ["haul", "retreat", "dock", "belt"] as const) {
+  test(`${path} path recalls drones and waits before navigation`, () => {
+    let obs = droneWorld();
+    let mem = memory({ currentRockID: ROCK_A });
+    if (path === "haul") obs = { ...obs, holds: [oreHold(10000)] };
+    if (path === "retreat") obs = { ...obs, snapshot: snapshot([], { shieldRatio: 0.1 }) };
+    if (path === "dock") { mem = { ...mem, headingHome: "Return home" }; obs = { ...obs, snapshot: snapshot([entity({ itemID: STATION, kind: "station", position: { x: 800, y: 0, z: 0 } })]) }; }
+    if (path === "belt") { mem = { ...mem, currentRockID: null }; obs = { ...obs, snapshot: snapshot([]) }; }
+    obs = { ...obs, measurement: measureSpace(obs.snapshot), drones: minerState([activeDrone()]) };
+    const recall = decideMiningAction(obs, PLAN, mem);
+    assert.equal(recall.action.kind, "recallDrones");
+    mem = { ...mem, headingHome: recall.headHome ?? mem.headingHome, droneMemory: recall.droneMemory };
+    const waiting = decideMiningAction(obs, PLAN, mem);
+    assert.equal(waiting.action.kind, "wait");
+    const returned = decideMiningAction({ ...obs, drones: minerState() }, PLAN, { ...mem, droneMemory: waiting.droneMemory });
+    assert.ok(["warp", "dock", "approach"].includes(returned.action.kind));
+  });
+}
+
+test("unknown drone reads fail closed while mining modules can still operate", () => {
+  const obs = { ...droneWorld(false), drones: null };
+  assert.equal(decideMiningAction(obs, PLAN, memory({ currentRockID: ROCK_A })).action.kind, "activate");
+  const travel = decideMiningAction({ ...obs, holds: [oreHold(10000)] }, PLAN, memory({ currentRockID: ROCK_A }));
+  assert.equal(travel.action.kind, "wait");
+});
+
+test("controller dispatches the complete confirmed mining/combat/mining cycle", async () => {
+  let hostile = false;
+  let drones = minerState();
+  const calls: unknown[] = [];
+  const { deps } = makeDeps({ status: () => status(),
+    snapshot: () => snapshot([rock(ROCK_A, 8000, 5000, "Veldspar"), ...(hostile ? [pirate()] : [])], { activeModuleIDs: [LASER_A, LASER_B] }),
+    locked: () => [ROCK_A],
+  });
+  const bot = createMiningBot({ ...deps,
+    getDroneState: async () => drones,
+    launchDrones: async rows => { calls.push(["launch", rows]); },
+    recallDrones: async ids => { calls.push(["recall", ids]); },
+    mineDrones: async (ids, target) => { calls.push(["mine", ids, target]); },
+    engageDrones: async (ids, target) => { calls.push(["engage", ids, target]); },
+  });
+  bot.start(PLAN);
+  assert.equal((await bot.tick()).kind, "launch");
+  drones = minerState([activeDrone()]);
+  assert.equal((await bot.tick()).kind, "mineDrones");
+  drones = minerState([activeDrone(81, 101, ROCK_A, "mining")]);
+  hostile = true;
+  assert.equal((await bot.tick()).kind, "recallDrones");
+  assert.equal((await bot.tick()).kind, "wait");
+  drones = minerState();
+  assert.equal((await bot.tick()).kind, "launch");
+  drones = minerState([activeDrone(82, 100)]);
+  assert.equal((await bot.tick()).kind, "engageDrones");
+  drones = minerState([activeDrone(82, 100, PIRATE, "fighting")]);
+  hostile = false;
+  await bot.tick(); await bot.tick();
+  assert.equal((await bot.tick()).kind, "recallDrones");
+  assert.equal((await bot.tick()).kind, "wait");
+  drones = minerState();
+  assert.equal((await bot.tick()).kind, "launch");
+  drones = minerState([activeDrone(83)]);
+  assert.equal((await bot.tick()).kind, "mineDrones");
+  assert.deepEqual(calls, [
+    ["launch", [{ itemID: 8001, quantity: 1 }]], ["mine", [81], ROCK_A], ["recall", [81]],
+    ["launch", [{ itemID: 8002, quantity: 1 }]], ["engage", [82], PIRATE], ["recall", [82]],
+    ["launch", [{ itemID: 8001, quantity: 1 }]], ["mine", [83], ROCK_A],
+  ]);
+});
+
+
+test("a refused mining order does not stop modules or retry without a bound", async () => {
+  const { deps } = makeDeps({ status: () => status(),
+    snapshot: () => droneWorld().snapshot, locked: () => [ROCK_A],
+  });
+  let orders = 0;
+  const bot = createMiningBot({ ...deps,
+    getDroneState: async () => minerState([activeDrone()]),
+    mineDrones: async () => { orders++; throw refusal("That drone cannot mine the selected resource."); },
+  });
+  bot.start(PLAN);
+  await drive(bot, 20);
+  assert.equal(orders, 3);
+  assert.equal(bot.snapshot().status, "running");
 });

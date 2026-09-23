@@ -194,7 +194,6 @@ const EMPTY_MEMORY: MiningDecisionMemory = {
   lockRefusedRockIDs: new Set<number>(),
   approachingTargetID: null,
   headingHome: null,
-  launchGaveUp: false,
   noYieldCycles: 0,
 };
 
@@ -206,7 +205,7 @@ function observe(overrides: Partial<MiningObservation> = {}): MiningObservation 
     measurement: measureSpace(space),
     lockedTargetIDs: [],
     holds: [oreHold(0)],
-    droneBayItemIDs: null,
+    drones: { bay: [], out: [], maxActive: 1, roles: { 2456: "combat" } },
     ...overrides,
     ...(overrides.measurement === undefined ? { measurement: measureSpace(space) } : {}),
   };
@@ -356,10 +355,10 @@ test("danger: the safety floor, an unreadable ship next to a pirate, and the dro
   assert.equal(blind.rung, "pirate-unknown-health");
   assert.equal(blind.action.kind, "pause");
 
-  const looking = decide({ snapshot: snapshot([pirate]), droneBayItemIDs: null });
+  const looking = decide({ snapshot: snapshot([pirate, entity({ itemID: ROCK_ID, kind: "asteroid" })]), drones: null });
   assert.equal(looking.rung, "reading-drone-bay");
 
-  const launch = decide({ snapshot: snapshot([pirate]), droneBayItemIDs: [DRONE_STACK] });
+  const launch = decide({ snapshot: snapshot([pirate, entity({ itemID: ROCK_ID, kind: "asteroid" })]), drones: { bay: [{ itemID: DRONE_STACK, typeID: 2456, quantity: 1 }], out: [], maxActive: 1, roles: { 2456: "combat" } } });
   assert.equal(launch.rung, "launch-drones");
   assert.equal(launch.action.kind, "launch");
 });

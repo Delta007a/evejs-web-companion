@@ -159,6 +159,7 @@ const ARG_KEY_LABEL: Readonly<Record<string, string>> = {
   agent: "Agent",
   level: "Preferred mission level",
   fallback: "Fallback to lower available level",
+  drones: "Mining drones and defensive combat swap",
   maxJumps: "Longest trip (jumps)",
   // A bare "Amount" (the generic label for a count) says nothing about what is
   // being counted, and this one is a percentage of a command centre's hold.

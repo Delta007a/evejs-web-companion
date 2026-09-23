@@ -1,3 +1,5 @@
+import { hostileRows } from "../space/overview.ts";
+import { decideMiningDroneFlight, freshDroneMemory, type MiningDroneMemory } from "./miningDroneFlight.ts";
 // A4b — the tick orchestrator: given a script, a fresh observation, and the
 // running memory, decide the ONE action this tick, and hand back the next
 // memory. Pure and total — it always returns exactly one action (wait included)
@@ -108,7 +110,8 @@ export type ScriptAction =
    * prop mod cares, and only the rung that names one fills this in.
    */
   | { readonly kind: "deactivate"; readonly moduleID: number; readonly typeID?: number }
-  | { readonly kind: "launchDrones"; readonly droneItemIDs: readonly number[] }
+  | { readonly kind: "launchDrones"; readonly droneItemIDs: readonly number[]; readonly quantities?: readonly { itemID: number; quantity: number }[] }
+  | { readonly kind: "mineDrones"; readonly droneIDs: readonly number[]; readonly targetID: number }
   | { readonly kind: "engageDrones"; readonly droneIDs: readonly number[]; readonly targetID: number }
   | { readonly kind: "recallDrones"; readonly droneIDs: readonly number[] }
   /**
@@ -778,6 +781,7 @@ interface Latched {
 }
 
 export interface ScriptMemory {
+  readonly miningFlight?: MiningDroneMemory;
   readonly position: Position;
   readonly loopPass: number;
   /**
@@ -1004,7 +1008,54 @@ function sayRepairDidNotHold(when: Condition): string {
 
 // ─── The tick ────────────────────────────────────────────────────────────────
 
+/** Drone safety surrounds the existing navigator; postponed navigation keeps its
+ * original memory, so scanner rotation and warp accounting advance only on issue. */
 export function decideScriptAction(
+  script: BotScript, obs: ScriptObservation, mem: ScriptMemory,
+  registry: MacroRegistry, travelHome: HomeTravelDecider,
+): ScriptTickResult {
+  const base = decideScriptCore(script, obs, mem, registry, travelHome);
+  if (obs.inWarp === true || obs.docked === true) return base;
+  const mining = activeMacroID(script, mem) === "mine-at-belt";
+  const step = mining ? activeStep(script, mem.position) : null;
+  const setting = step?.args["drones"];
+  const enabled = setting?.kind === "toggle" && setting.enabled;
+  if (!enabled && mem.miningFlight === undefined) return base;
+  const leaving = !enabled || base.status !== "running" || base.memory.latched !== null ||
+    base.stepPath !== step?.id || ["warp", "warpScan", "warpBookmark", "startRoute", "startSystemRoute", "dock", "undock"].includes(base.action.kind);
+  const rocks = obs.snapshot?.entities.filter(e => !e.isSelf && (e.miningYieldTypeID !== null || e.beltID !== null)) ?? [];
+  const picked = base.action.kind === "activate" || base.action.kind === "lock" ? base.action.targetID :
+    step === null ? null : base.memory.macroMem[step.id]?.["rockID"];
+  const rockID = typeof picked === "number" && rocks.some(r => r.itemID === picked) ? picked : null;
+  const origin = obs.snapshot?.ship?.position ?? { x: 0, y: 0, z: 0 };
+  const hostileID = obs.snapshot === null || obs.snapshot === undefined ? null :
+    hostileRows(obs.snapshot, origin)[0]?.itemID ?? null;
+  const flight = decideMiningDroneFlight(
+    obs.snapshot == null || obs.hostileOnGrid === null ? null : obs.miningDrones ?? null,
+    mem.miningFlight ?? freshDroneMemory(), hostileID, rockID, leaving,
+  );
+  if (flight.failedDefense) {
+    return { ...base, action: WAIT, status: "running", memory: { ...mem, miningFlight: flight.memory,
+      latched: { interruptID: null, reason: "Combat drones could not defend the ship; heading home after recall." } } };
+  }
+  const a = flight.action;
+  if (a === null) {
+    // This flight owns launch, engagement and stand-down while mining. The
+    // generic fight-back watch must not bypass its limit or three-clear gate.
+    if (!leaving && ["launchDrones", "engageDrones", "recallDrones"].includes(base.action.kind)) {
+      return { ...base, action: WAIT, memory: { ...mem, miningFlight: flight.memory } };
+    }
+    return { ...base, memory: { ...base.memory, miningFlight: leaving ? undefined : flight.memory } };
+  }
+  const action: ScriptAction = a.kind === "launch" ? { kind: "launchDrones", droneItemIDs: a.drones.map(d => d.itemID), quantities: a.drones } :
+    a.kind === "wait" || a.kind === "pause" ? WAIT : a;
+  return { ...base, action, containerTargetID: undefined, stepPath: step?.id ?? base.stepPath,
+    status: a.kind === "pause" ? "paused" : "running", pauseReason: a.kind === "pause" ? a.reason : null,
+    why: a.kind === "wait" || a.kind === "pause" ? a.reason : "Managing the mining and defensive drone flights.",
+    phase: "Managing drones", memory: { ...mem, latched: base.memory.latched, miningFlight: flight.memory } };
+}
+
+function decideScriptCore(
   script: BotScript,
   obs: ScriptObservation,
   mem: ScriptMemory,

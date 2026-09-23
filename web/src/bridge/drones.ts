@@ -108,7 +108,9 @@ export function decodeDroneBay(raw: JsonValue | undefined): readonly DroneBaySta
       continue;
     }
     seen.add(itemID);
-    stacks.push({ itemID, typeID, quantity: numberOrNull(row.quantity) ?? 1 });
+    const quantity = typeof row.quantity === "boolean" ? null : numberOrNull(row.quantity);
+    // An unreadable or malformed quantity must not manufacture a single drone.
+    stacks.push({ itemID, typeID, quantity: quantity !== null && Number.isSafeInteger(quantity) && quantity > 0 ? quantity : 0 });
   }
   return stacks;
 }

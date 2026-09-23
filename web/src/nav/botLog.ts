@@ -144,6 +144,8 @@ export function describeAction(action: ScriptAction): string {
       return `deactivate module ${action.moduleID}`;
     case "launchDrones":
       return `launch drones ${action.droneItemIDs.join(",")}`;
+    case "mineDrones":
+      return `drones ${action.droneIDs.join(",")} mining ${action.targetID}`;
     case "engageDrones":
       return `drones ${action.droneIDs.join(",")} onto ${action.targetID}`;
     case "recallDrones":

@@ -42,6 +42,7 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
   },
   "mine-at-belt": {
     args: [
+      { key: "drones", kind: "toggle", required: false },
       { key: "belt", kind: "belt", required: true },
       // Optional: left unset, the bot runs every mining module fitted, so the
       // player never has to pick equipment (belt auto-resolves to nearest too).

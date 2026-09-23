@@ -494,7 +494,7 @@
       <h3>Keeping your ship alive</h3>
       <label class="check">
         <input type="checkbox" bind:checked={guardDrones} />
-        Send the drones out if a pirate turns up (they defend the ship on their own)
+        Use mining drones on asteroids and switch to combat drones to defend the ship
       </label>
       <p class="field">
         <label for="bot-floor">Break off and dock below</label>

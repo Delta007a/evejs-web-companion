@@ -1,3 +1,4 @@
+import type { MiningDroneState } from "./miningDroneFlight.ts";
 // A4a — reading the world for a player script: tri-state conditions and which
 // interrupt fires. Pure over an observation; the runner (slice B) builds the
 // observation from fresh reads each tick and feeds it here.
@@ -139,6 +140,7 @@ export function pickAdvertisedFleet(
 }
 
 export interface ScriptObservation {
+  readonly miningDrones?: MiningDroneState | null;
   /** Transient contention, never a refusal or evidence that a can is empty. */
   readonly claimedContainerIDs?: readonly number[];
   readonly inSpace: boolean | null;

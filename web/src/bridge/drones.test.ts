@@ -450,3 +450,9 @@ test("a snapshot that lists the same drone twice yields one drone", () => {
   ] as unknown as JsonValue);
   assert.deepEqual((drones ?? []).map((drone) => drone.itemID), [601, 602]);
 });
+
+
+test("missing and malformed bay quantities never default to a phantom drone", () => {
+  const rows = [undefined, null, "bad", false, true, -2, 1.5].map((quantity, i) => ({ itemID: 100 + i, typeID: 2456, quantity }));
+  assert.ok(decodeDroneBay(rows as unknown as JsonValue)?.every(stack => stack.quantity === 0));
+});

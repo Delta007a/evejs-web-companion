@@ -12,6 +12,9 @@ import type { MacroStep } from "../bots/botScript.ts";
 import type { FleetBroadcast } from "../bridge/fleetBroadcasts.ts";
 import type { RatThreat } from "./ratThreat.ts";
 import { SCRIPT_MACROS, scriptTravelHome } from "./scriptMacros.ts";
+import { decideScriptAction, initialMemory } from "./scriptDecide.ts";
+import type { BotScript } from "../bots/botScript.ts";
+import type { MiningDroneState } from "./miningDroneFlight.ts";
 import {
   emptyLedger,
   encodeLedger,
@@ -4558,4 +4561,47 @@ test("warp-to-ore-anomaly: the ore tour never gives up on a site — the miner d
     board = { ...board, ...(t.boardPatch ?? {}) };
   }
   assert.equal(board[LEDGER_KEYS.sites], undefined, "the ore tour writes no site ledger at all");
+});
+
+for (const mode of ["nearest", "site"] as const) {
+  test(`mining drones share the ${mode} miner without changing its navigation`, () => {
+    const step: MacroStep = { ...mineStep, args: { belt: { kind: "belt", belt: { mode } }, drones: { kind: "toggle", enabled: true } } };
+    const script: BotScript = { format: "evejs-bot-script", version: 1, name: "drone miner", notes: "", home: { entity: "station", id: 1, name: "Home", systemName: null }, interrupts: [], program: [step] };
+    let mem = initialMemory(script);
+    const rock = entity({ itemID: 10, kind: "asteroid", categoryID: 25, groupID: 462, miningYieldTypeID: 1230 });
+    const state: MiningDroneState = { bay: [{ itemID: 7, typeID: 100, quantity: 5 }], out: [], maxActive: 2, roles: { 100: "mining" } };
+    const o = obs({ snapshot: snapshot([rock]), miningDrones: state });
+    let t = decideScriptAction(script, o, mem, SCRIPT_MACROS, scriptTravelHome);
+    assert.equal(t.action.kind, "launchDrones");
+    assert.deepEqual(t.action.kind === "launchDrones" && t.action.quantities, [{ itemID: 7, quantity: 2 }]);
+    assert.deepEqual(t.memory.position, mem.position);
+    mem = t.memory;
+    const out = [{ itemID: 70, typeID: 100, controlled: true, targetID: 10, activity: "mining", name: null, shieldRatio: 1, armorRatio: 1, hullRatio: 1 }];
+    t = decideScriptAction(script, { ...o, miningDrones: { ...state, bay: [], out } }, mem, SCRIPT_MACROS, scriptTravelHome);
+    assert.equal(t.action.kind, "orbit", "upstream rock navigation resumes after drone issue");
+    mem = t.memory;
+    t = decideScriptAction(script, { ...o, oreHoldFraction: 1, miningDrones: { ...state, out } }, mem, SCRIPT_MACROS, scriptTravelHome);
+    assert.equal(t.action.kind, "recallDrones", "step completion waits for recall");
+    mem = t.memory;
+    t = decideScriptAction(script, { ...o, oreHoldFraction: 1, miningDrones: { ...state, out: null } }, mem, SCRIPT_MACROS, scriptTravelHome);
+    assert.equal(t.status, "running");
+    assert.equal(t.action.kind, "wait", "unknown return state cannot complete the step");
+    t = decideScriptAction(script, { ...o, oreHoldFraction: 1, miningDrones: state }, t.memory, SCRIPT_MACROS, scriptTravelHome);
+    assert.equal(t.status, "done");
+  });
+}
+
+test("site rotation waits for mining drones and retains upstream scanner board until warp", () => {
+  const step: MacroStep = { ...mineStep, args: { belt: { kind: "belt", belt: { mode: "site" } }, drones: { kind: "toggle", enabled: true } } };
+  const script: BotScript = { format: "evejs-bot-script", version: 1, name: "site", notes: "", home: { entity: "station", id: 1, name: "Home", systemName: null }, interrupts: [], program: [step] };
+  const out = [{ itemID: 70, typeID: 100, controlled: true, targetID: null, activity: "idle", name: null, shieldRatio: 1, armorRatio: 1, hullRatio: 1 }];
+  const o = obs({ snapshot: snapshot([]), miningDrones: { bay: [], out, roles: { 100: "mining" }, maxActive: 2 } });
+  const registry = { ...SCRIPT_MACROS, "mine-at-belt": () => ({ action: { kind: "warpScan" as const, target: "ABC" }, why: "site rotation", phase: "travel", armed: false, outcome: { kind: "acting" as const }, nextMem: { issued: true }, boardPatch: { oreAnomsVisited: "ABC" } }) };
+  const mem = initialMemory(script);
+  const recalling = decideScriptAction(script, o, mem, registry, scriptTravelHome);
+  assert.equal(recalling.action.kind, "recallDrones");
+  assert.deepEqual(recalling.memory.board, mem.board);
+  const ready = decideScriptAction(script, { ...o, miningDrones: { ...o.miningDrones!, out: [] } }, recalling.memory, registry, scriptTravelHome);
+  assert.equal(ready.action.kind, "warpScan");
+  assert.equal(ready.memory.board["oreAnomsVisited"], "ABC");
 });
