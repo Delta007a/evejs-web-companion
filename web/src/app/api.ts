@@ -19,7 +19,7 @@ import {
 } from "../bridge/charCreation.ts";
 import {
   clearSessionToken,
-  sessionAuthHeaders,
+  getSessionToken,
   setSessionToken,
   tokenAuthHeaders,
   withSessionTokenQuery,
@@ -85,6 +85,8 @@ export interface ApiOptions {
    * presence of the key — not its value — is what selects the mode.
    */
   readonly token?: string | null;
+  /** End this flow when the server rejects its authentication. */
+  readonly onAuthRequired?: () => void;
   /**
    * R92 — how this request competes for the client's request lanes. Defaults to
    * "read". Background polling should pass "poll" and anything the player just
@@ -142,6 +144,7 @@ async function requestJson(
   options: ApiOptions,
 ): Promise<Record<string, JsonValue>> {
   const doFetch = options.fetch ?? globalThis.fetch;
+  const requestToken = "token" in options ? options.token : getSessionToken();
   let response: Response;
   try {
     // ⚠ THE DEADLINE IS ARMED INSIDE THE LANE, NOT OUTSIDE IT. A request that
@@ -154,12 +157,13 @@ async function requestJson(
         signal: AbortSignal.timeout(REQUEST_DEADLINE_MS),
         ...init,
         headers: {
-          ...("token" in options ? tokenAuthHeaders(options.token) : sessionAuthHeaders()),
+          ...tokenAuthHeaders(requestToken),
           ...((init.headers as Record<string, string> | undefined) ?? {}),
         },
       }),
     );
   } catch (cause) {
+    if (cause instanceof BridgeCallError) throw cause;
     throw new BridgeCallError(
       "BRIDGE_NETWORK_ERROR",
       transportFailureWords(path, cause),
@@ -186,6 +190,10 @@ async function requestJson(
     !response.ok
   ) {
     const errorBody = (data ?? {}) as { error?: unknown; message?: unknown };
+    if (errorBody.error === "AUTH_REQUIRED" &&
+        ("token" in options ? options.token : getSessionToken()) === requestToken) {
+      options.onAuthRequired?.();
+    }
     throw new BridgeCallError(
       typeof errorBody.error === "string" ? errorBody.error : "BRIDGE_BAD_RESPONSE",
       typeof errorBody.message === "string"

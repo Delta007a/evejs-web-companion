@@ -197,7 +197,7 @@ function makeFakeStack(log) {
 
 function makeHost({ log = [], isCharacterHeld = () => false, ...extras } = {}) {
   return createBotHost({
-    webAuth: { createSessionToken: () => "bot-token" },
+    webAuth: { createBotSessionToken: () => "bot-token" },
     baseUrl: "http://127.0.0.1:0",
     isCharacterHeld,
     errorLogger: () => {},
@@ -1167,4 +1167,39 @@ test("a script row never grows an abandonment field", async () => {
   const host = makeHost({ persistPath: rosterPath });
   await host.start(START);
   assert.equal("abandonment" in readRosterFile(rosterPath)[0], false);
+});
+
+
+test("24-hour start mints a bot credential using the approved deadline", async () => {
+  const startTime = Date.now();
+  let mintedDeadline;
+  const host = makeHost({ now: () => startTime, webAuth: {
+    createBotSessionToken(_account, deadline) { mintedDeadline = deadline; return "bot-token"; },
+  } });
+  const result = await host.start({ ...START, grant: { ...START.grant, maxRuntimeMinutes: 1440 } });
+  assert.equal(result.ok, true);
+  assert.equal(mintedDeadline, startTime + 24 * 60 * 60 * 1000);
+  assert.equal(Date.parse(result.bot.expiresAt), mintedDeadline);
+  await host.stopAll();
+});
+
+test("concurrent starts recheck the claim after asynchronous holder verification", async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const host = makeHost({ isCharacterHeld: async () => { await gate; return false; } });
+  const starts = [host.start(START), host.start(START)];
+  release();
+  const results = await Promise.all(starts);
+  assert.equal(results.filter((result) => result.ok).length, 1);
+  assert.equal(results.find((result) => !result.ok).code, "BOT_ALREADY_RUNNING");
+  await host.stopAll();
+});
+
+test("preflight refusal never invokes the browser-release hook", async () => {
+  let released = false;
+  const host = makeHost();
+  const result = await host.start({ ...START, grant: null, beforeStart: async () => { released = true; } });
+  assert.equal(result.ok, false);
+  assert.equal(released, false);
+  assert.equal(host.claimedBy(START.characterID), null);
 });

@@ -132,20 +132,33 @@ function signPayload(encodedPayload) {
 }
 
 function createSessionToken(account) {
+  return signSessionToken(account, Date.now() + config.sessionTtlMs);
+}
+
+// Internal-only: the host supplies its validated run deadline, never an HTTP field.
+function createBotSessionToken(account, deadlineMs) {
+  const now = Date.now();
+  if (!Number.isFinite(deadlineMs) || deadlineMs <= now || deadlineMs > now + 24 * 60 * 60 * 1000) {
+    throw new Error("Invalid server bot authentication deadline.");
+  }
+  return signSessionToken(account, deadlineMs + 5 * 60 * 1000);
+}
+
+function signSessionToken(account, expiresAt) {
   const now = Date.now();
   const payload = {
     username: normalizeUsername(account.username),
     accountID: Number(account.accountID),
     sessionID: crypto.randomBytes(32).toString("base64url"),
     iat: now,
-    exp: now + config.sessionTtlMs,
+    exp: expiresAt,
   };
   const encodedPayload = base64UrlJson(payload);
   const signature = signPayload(encodedPayload);
   return `${encodedPayload}.${signature}`;
 }
 
-function verifySessionToken(token) {
+function verifySessionToken(token, { allowExpired = false } = {}) {
   const parts = String(token || "").split(".");
   if (parts.length !== 2) {
     return null;
@@ -165,7 +178,8 @@ function verifySessionToken(token) {
     !payload ||
     typeof payload.sessionID !== "string" ||
     payload.sessionID.length < 32 ||
-    Number(payload.exp || 0) < Date.now()
+    !Number.isFinite(payload.exp) ||
+    (!allowExpired && payload.exp < Date.now())
   ) {
     return null;
   }
@@ -188,6 +202,7 @@ function countConfiguredUsers() {
 module.exports = {
   countConfiguredUsers,
   createSessionToken,
+  createBotSessionToken,
   verifySessionToken,
   verifyWebPassword,
   upsertWebPassword,

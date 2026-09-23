@@ -437,3 +437,34 @@ test("logout clears the whole store", async () => {
   assert.equal(store.character.get().characters.length, 0);
   assert.equal(store.station.get().online, null);
 });
+
+
+for (const endpoint of ["typed", "bridge"]) {
+  test(`AUTH_REQUIRED from ${endpoint} signs out the flow instead of leaving a zombie cockpit`, async () => {
+    let expired = false;
+    const { fetch, requests } = makeFakeFetch((path, body) => expired
+      ? { status: 401, body: { ok: false, error: "AUTH_REQUIRED" } }
+      : bridgeCallResponder(path, body));
+    const store = createClientStore();
+    const flow = createAppFlow(store, { fetch, perSessionToken: true, livePush: false });
+    await flow.login("test2", "");
+    await flow.selectCharacter(140000003);
+    expired = true;
+    if (endpoint === "typed") {
+      await assert.rejects(flow.loadInventory(), (error: unknown) => isSessionLost(error));
+    } else {
+      await assert.rejects(flow.refreshStationPanel(), (error: unknown) => isSessionLost(error));
+    }
+    assert.equal(store.session.get().phase, "logged-out");
+    assert.equal(store.station.get().online, null);
+    assert.equal(flow.sessionToken(), null);
+    const beforeResume = requests.length;
+    flow.resumeCustomBot();
+    assert.equal(requests.length, beforeResume);
+    await assert.rejects(flow.logout(), (error: unknown) => isSessionLost(error));
+    assert.equal(requests.length, beforeResume, "expired flow must not log out a different session via the shared cookie");
+    expired = false;
+    await flow.login("test2", "");
+    assert.equal(store.session.get().phase, "logged-in");
+  });
+}

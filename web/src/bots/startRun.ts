@@ -150,15 +150,10 @@ export async function startHere(deps: LocalStartDeps, scriptID: string): Promise
 /**
  * Run a saved bot ON THE SERVER, flying THIS caller's current character.
  *
- * The handover is the SERVER's, in one request: /api/bots/start releases the
- * caller's own held session and claims the character for the bot atomically.
- * Started-first matters twice over — the login/select screens a tab falls to
- * poll the bot-flying marks, and a bot that already exists is on their FIRST
- * read (release-first left them blank until the next poll); and a refused
- * start changes nothing, so the caller just keeps flying (no take-the-hull-
- * back dance). `releaseSession` afterwards only syncs the caller's own UI —
- * its server-side session is already gone, so a failure there is NOT a failed
- * start: the bot has the hull either way.
+ * The server validates and reserves before releasing the caller, then starts
+ * the bot. Preflight refusal preserves ownership; a later startup failure
+ * attempts to restore it. The client release after success only clears its
+ * own UI. Failure of that final sync cannot turn an accepted run into failure.
  */
 export async function startOnServer(
   deps: ServerStartDeps,
@@ -177,8 +172,8 @@ export async function startOnServer(
   }
   const grant = createBotLaunchGrant(step.rev, step.policy, runtimeMinutes);
   try {
-    // START FIRST. See the doc comment above — a refused start must change
-    // nothing, so the release only happens once the server has accepted.
+    // The server owns validation and transfer. Clear the local UI only after
+    // acceptance; a refused start may have restored the caller's session.
     await deps.startServerBot(characterID, scriptID, grant);
   } catch (cause) {
     return {

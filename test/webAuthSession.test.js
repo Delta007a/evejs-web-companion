@@ -44,3 +44,21 @@ test("the server rejects a session ID changed without a valid signature", () => 
 
   assert.equal(webAuth.verifySessionToken(`${changedPayload}.${signature}`), null);
 });
+
+
+test("bot credential covers 24 hours plus cleanup without extending browser TTL", (t) => {
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const account = { username: "pilot", accountID: 42 };
+  const browser = webAuth.createSessionToken(account);
+  const bot = webAuth.createBotSessionToken(account, now + 24 * 60 * 60 * 1000);
+  assert.equal(webAuth.verifySessionToken(browser).exp, now + 12 * 60 * 60 * 1000);
+  assert.equal(webAuth.verifySessionToken(bot).exp, now + (24 * 60 + 5) * 60 * 1000);
+  Date.now.mock.mockImplementation(() => now + 24 * 60 * 60 * 1000);
+  assert.equal(webAuth.verifySessionToken(browser), null);
+  assert.ok(webAuth.verifySessionToken(bot));
+  Date.now.mock.mockImplementation(() => now + (24 * 60 + 6) * 60 * 1000);
+  assert.equal(webAuth.verifySessionToken(bot), null);
+  assert.ok(webAuth.verifySessionToken(bot, { allowExpired: true }));
+  assert.equal(webAuth.verifySessionToken(`${bot}tampered`, { allowExpired: true }), null);
+});

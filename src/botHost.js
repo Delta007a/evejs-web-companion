@@ -24,9 +24,9 @@
 // ONE HULL, ONE DRIVER. Starting a bot on a character any live web session is
 // flying is refused (CHARACTER_IN_USE), and while a bot holds a character the
 // /api/bridge/select guard refuses tabs (CHARACTER_IN_USE_BY_BOT) — the bot's
-// own select passes because its fetch carries `x-evejs-bot-id`. The claim is
-// registered synchronously BEFORE the first await so concurrent starts cannot
-// both win.
+// own select passes with a private claim capability. Validation and holder
+// reconciliation precede the claim; the route releases its caller only after
+// the claim is registered. Concurrent starts recheck after asynchronous reads.
 //
 // LIFECYCLE. A bot ends when its script finishes, hits an error, loses its
 // session, or is stopped; ending always releases the character (logout), so
@@ -518,6 +518,8 @@ function createBotHost(options) {
     expectedScriptRev = null,
     expectedScriptHash = null,
     expectedExpiresAt = null,
+    callerSessionID = null,
+    beforeStart = null,
   }) {
     const isCompanion = kind === "companion";
     let resumingAbandonment = null;
@@ -646,7 +648,7 @@ function createBotHost(options) {
     if (claims.has(characterID)) {
       return { ok: false, code: "BOT_ALREADY_RUNNING", message: "A server bot is already flying this character." };
     }
-    if (isCharacterHeld(characterID)) {
+    if (await isCharacterHeld(characterID, callerSessionID)) {
       return {
         ok: false,
         code: "CHARACTER_IN_USE",
@@ -654,6 +656,10 @@ function createBotHost(options) {
       };
     }
 
+    // Recheck after the authoritative asynchronous ownership read.
+    if (claims.has(characterID)) {
+      return { ok: false, code: "BOT_ALREADY_RUNNING", message: "A server bot is already flying this character." };
+    }
     const botID = crypto.randomUUID();
     const record = {
       botID,
@@ -706,13 +712,13 @@ function createBotHost(options) {
       // is the ONE companion field that is durable, and its comment says why.
       companionReadout: null,
     };
-    // Claim BEFORE the first await — two concurrent starts must not both win,
+    // Claim synchronously after the final check — concurrent starts cannot both win,
     // and the select guard must already know this bot when its select arrives.
     claims.set(characterID, botID);
     records.set(botID, record);
 
     try {
-      const token = auth.createSessionToken(account);
+      const token = auth.createBotSessionToken(account, deadlineMs);
       const store = stack.createClientStore();
       // Same fetch the server itself trusts, plus the bot's name on every
       // request so the select guard can tell the bot's own select from a tab's.
@@ -731,6 +737,9 @@ function createBotHost(options) {
       record.flow = flow;
       record.store = store;
 
+      // Validation, credentials, flow construction and the private claim exist
+      // before the route releases the caller. The hook is internal, never wire data.
+      if (beforeStart) await beforeStart();
       await flow.selectCharacter(characterID);
       const online = store.station.get().online;
       record.characterName = online ? online.characterName : null;

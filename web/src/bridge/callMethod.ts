@@ -7,7 +7,7 @@
 // same-origin cookie as the migration fallback — and pins the bridge session
 // identity to the logged-in account.
 
-import { sessionAuthHeaders, tokenAuthHeaders } from "../app/sessionToken.ts";
+import { getSessionToken, tokenAuthHeaders } from "../app/sessionToken.ts";
 import {
   TransportQueueError,
   bridgeLane,
@@ -50,6 +50,7 @@ export interface CallMethodOptions {
    * whoever last wrote the shared cookie.
    */
   readonly token?: string | null;
+  readonly onAuthRequired?: () => void;
   /** R92 — lane priority; defaults to "read". See app/transport.ts. */
   readonly priority?: RequestPriority;
 }
@@ -114,6 +115,7 @@ export async function callMethod<TResult = JsonValue>(
   options: CallMethodOptions = {},
 ): Promise<BridgeCallOutcome<TResult>> {
   const doFetch = options.fetch ?? globalThis.fetch;
+  const requestToken = "token" in options ? options.token : getSessionToken();
   const body: BridgeCallRequestBody = {
     service,
     method,
@@ -135,7 +137,7 @@ export async function callMethod<TResult = JsonValue>(
       // would silently run as whoever last wrote the cookie. Per-session (token
       // key present) uses this flow's token; otherwise the per-tab global.
       headers: {
-        ...("token" in options ? tokenAuthHeaders(options.token) : sessionAuthHeaders()),
+        ...tokenAuthHeaders(requestToken),
         "content-type": "application/json",
       },
       credentials: "same-origin",
@@ -148,6 +150,7 @@ export async function callMethod<TResult = JsonValue>(
       }),
     );
   } catch (cause) {
+    if (cause instanceof BridgeCallError) throw cause;
     const diagnosis =
       cause instanceof TransportQueueError ? cause.diagnosis.verdict : bridgeLane.diagnose().verdict;
     throw new BridgeCallError(
@@ -175,6 +178,10 @@ export async function callMethod<TResult = JsonValue>(
 
   if (typeof data === "object" && data !== null && (data as { ok?: unknown }).ok === false) {
     const errorBody = data as { error?: unknown; message?: unknown };
+    if (errorBody.error === "AUTH_REQUIRED" &&
+        ("token" in options ? options.token : getSessionToken()) === requestToken) {
+      options.onAuthRequired?.();
+    }
     throw new BridgeCallError(
       typeof errorBody.error === "string" ? errorBody.error : "BRIDGE_BAD_RESPONSE",
       typeof errorBody.message === "string"

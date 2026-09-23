@@ -24,6 +24,9 @@ import {
   type ScriptRunnerSnapshot,
 } from "./scriptRunner.ts";
 
+import { isSessionLost } from "../app/flow.ts";
+import { BridgeCallError } from "../bridge/callMethod.ts";
+
 class SessionLost extends Error {}
 
 function calm(over: Partial<ScriptObservation> = {}): ScriptObservation {
@@ -737,4 +740,30 @@ test("a session change that never settles still ends the run, by heading home", 
 
   const latest = h.progress[h.progress.length - 1]!;
   assert.match(latest.why ?? "", /turned back while a session change/i, "waiting forever is its own way to lose a ship");
+});
+
+
+test("AUTH_REQUIRED ends the run on the first read and Resume cannot retry it", async () => {
+  let reads = 0;
+  let issued = 0;
+  const progress: ScriptRunnerSnapshot[] = [];
+  const runner = createScriptRunner({
+    observe: async () => { reads += 1; throw new BridgeCallError("AUTH_REQUIRED", "Sign in again", 401); },
+    issue: async () => { issued += 1; },
+    refusalReason: String,
+    sleep: async () => {},
+    onProgress: (snapshot) => progress.push(snapshot),
+    isSessionLost,
+    registry,
+    travelHome: home,
+  });
+  runner.start(script([macroStep("a", "undock")]));
+  await runner.run();
+  assert.equal(reads, 1);
+  assert.equal(issued, 0);
+  assert.equal(runner.getStatus(), "error");
+  assert.equal(progress.some((snapshot) => /waiting to try again/i.test(snapshot.phase ?? "")), false);
+  runner.resume();
+  await runner.run();
+  assert.equal(reads, 1);
 });

@@ -78,6 +78,7 @@ function fakeBotHost(log) {
     async start(input) {
       // The full input, not just the characterID — the companion tests below
       // need to see which branch of /api/bots/start actually built it.
+      if (input.beforeStart) await input.beforeStart();
       log.push(["start", input]);
       return {
         ok: true,
@@ -100,12 +101,13 @@ function fakeBotHost(log) {
   };
 }
 
-async function startTestServer(log, suppliedBotHost = null) {
+async function startTestServer(log, suppliedBotHost = null, lifecycle = null) {
   const app = createApp({
     eveStore: fakeStore(),
-    eveGatewayClient: fakeGateway(log),
+    eveGatewayClient: { ...fakeGateway(log), ...lifecycle?.gateway },
     webAuth,
-    botHost: suppliedBotHost || fakeBotHost(log),
+    botHost: lifecycle ? undefined : suppliedBotHost || fakeBotHost(log),
+    botHostLoadStack: lifecycle ? () => lifecycleStack(log, lifecycle) : undefined,
     // The script library is platform-wide, so get() looks up by scriptID alone
     // and every account sees the same record; `authorAccountID` is display-only
     // and grants nothing. AUTHORITY over the hull is still per-account, and the
@@ -129,6 +131,7 @@ async function startTestServer(log, suppliedBotHost = null) {
   const server = app.listen(0, "127.0.0.1");
   activeServers.add(server);
   await once(server, "listening");
+  if (lifecycle) lifecycle.baseUrl = `http://127.0.0.1:${server.address().port}`;
   return { baseUrl: `http://127.0.0.1:${server.address().port}`, app };
 }
 
@@ -311,4 +314,235 @@ test("kind absent defaults to \"script\" — an old caller's request body still 
   const startCall = log.find((row) => row[0] === "start");
   assert.equal(startCall[1].kind, "script");
   assert.equal(startCall[1].scriptID, "s1");
+});
+
+// No EveJS or real client engine: exercise route + actual host + signed auth,
+// replacing the gateway and the gameplay-driving flow only.
+function lifecycleStack(log, options) {
+  let online = null;
+  let running = false;
+  return {
+    decodeScriptValue: (doc) => ({ ok: true, doc }),
+    analyzeBotRunPolicy: () => ({ riskClasses: [], restartSafe: true, containsSubBots: false }),
+    validateBotLaunchGrant: (grant) => grant
+      ? { ok: true, grant }
+      : { ok: false, code: "BOT_GRANT_REQUIRED", message: "Approval required." },
+    createClientStore: () => ({
+      station: { get: () => ({ online }) },
+      customBot: { get: () => ({ status: running ? "running" : "idle" }) },
+      subscribe: () => () => {},
+    }),
+    createAppFlow: (_store, flowOptions) => ({
+      async selectCharacter(characterID) {
+        log.push(["bot-select", characterID, flowOptions.initialSessionToken]);
+        if (options.failStart) throw new Error("Simulated startup refusal");
+        if (options.loopback) {
+          const response = await flowOptions.fetch(`${options.baseUrl}/api/bridge/select`, {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${flowOptions.initialSessionToken}` },
+            body: JSON.stringify({ characterID }),
+          });
+          assert.equal(response.status, 200, JSON.stringify(await response.json()));
+        }
+        online = { characterID, characterName: "Test Pilot" };
+      },
+      async startCustomBot() { running = true; },
+      stopCustomBot() { running = false; },
+      async logout() {
+        if (options.loopback) {
+          await flowOptions.fetch(`${options.baseUrl}/api/logout`, {
+            method: "POST", headers: { authorization: `Bearer ${flowOptions.initialSessionToken}` },
+          });
+        }
+      },
+    }),
+  };
+}
+
+function addOtherHolder(app, token) {
+  const sessionID = webAuth.verifySessionToken(token).sessionID;
+  const held = app.locals.bridgeSessions.get(sessionID);
+  const other = { ...held, bridgeSessionID: "other-holder", streamSubscribers: new Set(), chat: null };
+  app.locals.bridgeSessions.set("other-session", other);
+  return { sessionID, held, other };
+}
+
+for (const state of ["missing", "live", "transport"]) {
+  test(`actual host handoff reconciles ${state} competing ownership safely`, async (t) => {
+    const log = [];
+    const { app, baseUrl } = await startTestServer(log, null, {
+      gateway: {
+        async readFlightStatus(handle) {
+          assert.equal(handle, "other-holder");
+          if (state !== "live") throw Object.assign(new Error(state), {
+            code: state === "missing" ? "SESSION_NOT_FOUND" : "EVE_GATEWAY_TIMEOUT",
+          });
+          return { flight: { characterID: 7001 } };
+        },
+      },
+    });
+    t.after(() => app.locals.botHost.stopAll());
+    const token = await signInAndSelect(baseUrl, 7001);
+    const { sessionID, held, other } = addOtherHolder(app, token);
+    const result = await request(baseUrl, "/api/bots/start", {
+      method: "POST", token, body: { characterID: 7001, scriptID: "s1", grant: GRANT },
+    });
+    if (state === "missing") {
+      assert.equal(result.response.status, 200);
+      assert.equal(app.locals.bridgeSessions.has("other-session"), false);
+      assert.equal(app.locals.bridgeSessions.has(sessionID), false);
+      assert.ok(app.locals.botHost.claimedBy(7001));
+      assert.deepEqual(log.map(([name]) => name), ["release", "bot-select"]);
+    } else {
+      assert.equal(result.response.ok, false);
+      if (state === "live") assert.equal(result.payload.error, "CHARACTER_IN_USE");
+      assert.equal(app.locals.bridgeSessions.get("other-session"), other);
+      assert.equal(app.locals.bridgeSessions.get(sessionID), held);
+      assert.deepEqual(log, []);
+      assert.equal(app.locals.botHost.claimedBy(7001), null);
+    }
+  });
+}
+
+test("actual host preflight failure retains caller; post-release failure restores caller", async (t) => {
+  for (const failStart of [false, true]) {
+    const log = [];
+    const { app, baseUrl } = await startTestServer(log, null, { failStart });
+    t.after(() => app.locals.botHost.stopAll());
+    const token = await signInAndSelect(baseUrl, 7001);
+    const sessionID = webAuth.verifySessionToken(token).sessionID;
+    const before = app.locals.bridgeSessions.get(sessionID);
+    const result = await request(baseUrl, "/api/bots/start", {
+      method: "POST", token, body: { characterID: 7001, scriptID: "s1", grant: failStart ? GRANT : null },
+    });
+    assert.equal(result.response.ok, false);
+    assert.equal(result.payload.error, failStart ? "BOT_START_FAILED" : "BOT_GRANT_REQUIRED");
+    const after = app.locals.bridgeSessions.get(sessionID);
+    assert.equal(after.characterID, 7001);
+    if (!failStart) {
+      assert.equal(after, before);
+      assert.deepEqual(log, []);
+    } else {
+      assert.notEqual(after, before);
+      assert.deepEqual(log.map(([name]) => name), ["release", "bot-select"]);
+    }
+    assert.equal(app.locals.botHost.claimedBy(7001), null);
+  }
+});
+
+test("a transfer reservation blocks browser select while holder verification awaits", async (t) => {
+  let enter;
+  let finish;
+  const entered = new Promise((resolve) => { enter = resolve; });
+  const gate = new Promise((resolve) => { finish = resolve; });
+  const { app, baseUrl } = await startTestServer([], null, {
+    gateway: { async readFlightStatus() { enter(); await gate; return { flight: {} }; } },
+  });
+  t.after(() => app.locals.botHost.stopAll());
+  const token = await signInAndSelect(baseUrl, 7001);
+  addOtherHolder(app, token);
+  const pending = request(baseUrl, "/api/bots/start", {
+    method: "POST", token, body: { characterID: 7001, scriptID: "s1", grant: GRANT },
+  });
+  await entered;
+  try {
+    const selection = await request(baseUrl, "/api/bridge/select", { method: "POST", token, body: { characterID: 7001 } });
+    assert.equal(selection.response.status, 409);
+  } finally { finish(); }
+  assert.equal((await pending).payload.error, "CHARACTER_IN_USE");
+});
+
+
+for (const route of ["/api/bots", "/api/logout"]) {
+  test(`expired signed auth releases its own ownership through ${route}; forged auth cannot`, async (t) => {
+    const log = [];
+    const { app, baseUrl } = await startTestServer(log);
+    const token = await signInAndSelect(baseUrl, 7001);
+    const payload = webAuth.verifySessionToken(token);
+    await request(baseUrl, route, {
+      method: route === "/api/logout" ? "POST" : "GET", token: `${token}forged`,
+    });
+    assert.equal(app.locals.bridgeSessions.has(payload.sessionID), true);
+    assert.deepEqual(log, []);
+    t.mock.method(Date, "now", () => payload.exp + 1);
+    const expired = await request(baseUrl, route, {
+      method: route === "/api/logout" ? "POST" : "GET", token,
+    });
+    assert.equal(expired.response.status, route === "/api/logout" ? 200 : 401);
+    assert.equal(app.locals.bridgeSessions.has(payload.sessionID), false);
+    assert.deepEqual(log, [["release", "bridge-for-7001"]]);
+  });
+}
+
+
+test("real host hands off through private-claim loopback with a 24-hour credential", async (t) => {
+  const log = [];
+  const { app, baseUrl } = await startTestServer(log, null, { loopback: true });
+  t.after(() => app.locals.botHost.stopAll());
+  const token = await signInAndSelect(baseUrl, 7001);
+  const browser = webAuth.verifySessionToken(token);
+  const result = await request(baseUrl, "/api/bots/start", {
+    method: "POST", token, body: { characterID: 7001, scriptID: "s1", grant: { ...GRANT, maxRuntimeMinutes: 1440 } },
+  });
+  assert.equal(result.response.status, 200);
+  const botToken = log.find(([name]) => name === "bot-select")[2];
+  const bot = webAuth.verifySessionToken(botToken);
+  assert.notEqual(bot.sessionID, browser.sessionID);
+  assert.equal(bot.exp, Date.parse(result.payload.bot.expiresAt) + 5 * 60 * 1000);
+  assert.ok(bot.exp - bot.iat > 24 * 60 * 60 * 1000);
+  assert.equal(app.locals.bridgeSessions.has(browser.sessionID), false);
+  assert.equal(app.locals.bridgeSessions.get(bot.sessionID).characterID, 7001);
+  // The browser's post-success UI sync cannot log the bot out.
+  await request(baseUrl, "/api/bridge/release", { method: "POST", token });
+  assert.equal(app.locals.bridgeSessions.has(bot.sessionID), true);
+  assert.ok(app.locals.botHost.claimedBy(7001));
+});
+
+test("ambiguous gateway release failure preserves caller and never selects a bot", async (t) => {
+  const log = [];
+  const { app, baseUrl } = await startTestServer(log, null, {
+    gateway: { async releaseBridgeSession() { throw Object.assign(new Error("timeout"), { code: "EVE_GATEWAY_TIMEOUT" }); } },
+  });
+  t.after(() => app.locals.botHost.stopAll());
+  const token = await signInAndSelect(baseUrl, 7001);
+  const sessionID = webAuth.verifySessionToken(token).sessionID;
+  const held = app.locals.bridgeSessions.get(sessionID);
+  const result = await request(baseUrl, "/api/bots/start", {
+    method: "POST", token, body: { characterID: 7001, scriptID: "s1", grant: GRANT },
+  });
+  assert.equal(result.payload.error, "BOT_START_FAILED");
+  assert.equal(app.locals.bridgeSessions.get(sessionID), held);
+  assert.equal(app.locals.botHost.claimedBy(7001), null);
+  assert.deepEqual(log, []);
+});
+
+
+test("an already pending browser select blocks server transfer until it settles", async (t) => {
+  let gateSelect = false;
+  let enter;
+  let finish;
+  const entered = new Promise((resolve) => { enter = resolve; });
+  const gate = new Promise((resolve) => { finish = resolve; });
+  const log = [];
+  const gateway = fakeGateway(log);
+  const { app, baseUrl } = await startTestServer(log, null, {
+    gateway: { async selectCharacter(...args) {
+      if (gateSelect) { enter(); await gate; }
+      return gateway.selectCharacter(...args);
+    } },
+  });
+  t.after(() => app.locals.botHost.stopAll());
+  const token = await signInAndSelect(baseUrl, 7001);
+  gateSelect = true;
+  const selecting = request(baseUrl, "/api/bridge/select", { method: "POST", token, body: { characterID: 7001 } });
+  await entered;
+  try {
+    const result = await request(baseUrl, "/api/bots/start", {
+      method: "POST", token, body: { characterID: 7001, scriptID: "s1", grant: GRANT },
+    });
+    assert.equal(result.response.status, 409);
+    assert.equal(app.locals.botHost.claimedBy(7001), null);
+    assert.equal(log.some(([name]) => name === "bot-select"), false);
+  } finally { finish(); }
+  assert.equal((await selecting).response.status, 200);
 });

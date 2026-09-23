@@ -66,6 +66,24 @@ const botScripts =
 // bridgeSessionID the gateway minted, held server-side only. The browser
 // never sees the handle; it just gets its character/station state back.
 const bridgeSessions = options.bridgeSessionStore || new Map();
+// Serialize selection/transfer for one character; the private bot claim alone
+// may enter its own reserved transfer through loopback.
+const characterOperations = new Map();
+const sessionOperations = new Map();
+async function isCharacterHeld(characterID, callerSessionID = null) {
+  for (const [sessionID, held] of bridgeSessions) {
+    if (sessionID === callerSessionID || Number(held.characterID) !== Number(characterID)) continue;
+    try {
+      await gateway.readFlightStatus(held.bridgeSessionID, { userid: held.accountID });
+      return true;
+    } catch (error) {
+      if (!error || error.code !== "SESSION_NOT_FOUND") throw error;
+      // Never remove a replacement installed while the verification was in flight.
+      if (bridgeSessions.get(sessionID) === held) forgetBridgeSession(sessionID);
+    }
+  }
+  return false;
+}
 // Short-lived cache for the auth path's account lookup (src/accountCache.js).
 // Without it, every authenticated request costs a second owner call re-reading
 // an unchanged account — half of all measured gateway traffic.
@@ -78,23 +96,14 @@ const botHost =
   options.botHost ||
   botHostModule.createBotHost({
     webAuth: auth,
+    loadStack: options.botHostLoadStack,
     baseUrl: options.botHostBaseUrl || `http://127.0.0.1:${config.port}`,
     // Durable roster: running bots are mirrored here and startServer calls
     // botHost.resume() once listening, so a BFF restart brings them back.
     persistPath: path.join(config.dataDir, "server-bots.json"),
     loadAccount: (username) => store.getAccount(username),
     loadScript: (scriptID) => botScripts.get(scriptID),
-    // ONE HULL, ONE DRIVER, direction 1: a bot may not take a character any
-    // live web session is flying. (Direction 2 — a tab may not take a bot's
-    // character — is the guard in /api/bridge/select.)
-    isCharacterHeld: (characterID) => {
-      for (const held of bridgeSessions.values()) {
-        if (Number(held.characterID) === Number(characterID)) {
-          return true;
-        }
-      }
-      return false;
-    },
+    isCharacterHeld,
     errorLogger,
   });
 app.locals.botHost = botHost;
@@ -245,6 +254,13 @@ function makeRequireAuth({ allowQueryParam = false } = {}) {
   return async function requireAuthenticatedSession(req, res, next) {
     const payload = auth.verifySessionToken(readSessionToken(req, { allowQueryParam }));
     if (!payload) {
+      // An expired but correctly signed credential may release ONLY its own
+      // held session. Forged/invalid tokens convey no cleanup authority.
+      const expired = auth.verifySessionToken(readSessionToken(req, { allowQueryParam }), { allowExpired: true });
+      const held = expired && bridgeSessions.get(expired.sessionID);
+      if (held && Number(held.accountID) === Number(expired.accountID)) {
+        void releaseHeldBridgeSession(expired.sessionID).catch(errorLogger);
+      }
       res.status(401).json({ ok: false, error: "AUTH_REQUIRED" });
       return;
     }
@@ -411,7 +427,12 @@ app.post("/api/login", async (req, res, next) => {
 // same carriers as requireAuth: a tab signing out with its own Bearer token
 // must not release whatever session the shared cookie happens to name.
 app.post("/api/logout", async (req, res) => {
-  const payload = auth.verifySessionToken(readSessionToken(req));
+  // Expiry ends gameplay authority, not authority to release this signed identity.
+  const payload = auth.verifySessionToken(readSessionToken(req), { allowExpired: true });
+  if (payload && sessionOperations.has(payload.sessionID)) {
+    res.status(409).json({ ok: false, error: "CHARACTER_IN_USE", message: "This session is changing characters. Try again shortly." });
+    return;
+  }
   if (payload && payload.sessionID) {
     // Logging out closes the client: best-effort release of the persistent
     // bridge session so the character goes offline (the gateway TTL is the
@@ -557,16 +578,26 @@ function forgetBridgeSession(webSessionID) {
 // the time the gateway is asked, so rethrowing a timeout only shows the user a
 // failed logout for a release that probably landed — and when it truly did
 // not, the gateway's own session TTL retires the live session. Log it; never
-// fail the logout over it.
+// fail the logout over it. Handoff uses confirmed mode instead: an ambiguous
+// release must preserve the handle and abort startup.
 const RELEASE_BEST_EFFORT_CODES = new Set([
   "SESSION_NOT_FOUND",
   "EVE_GATEWAY_TIMEOUT",
   "EVE_GATEWAY_UNREACHABLE",
 ]);
-async function releaseHeldBridgeSession(webSessionID) {
+async function releaseHeldBridgeSession(webSessionID, { confirmed = false } = {}) {
   const held = bridgeSessions.get(webSessionID);
   if (!held) {
     return false;
+  }
+  if (confirmed) {
+    try {
+      await gateway.releaseBridgeSession(held.bridgeSessionID, { userid: Number(held.accountID) });
+    } catch (error) {
+      if (!error || error.code !== "SESSION_NOT_FOUND") throw error;
+    }
+    if (bridgeSessions.get(webSessionID) === held) forgetBridgeSession(webSessionID);
+    return true;
   }
   forgetBridgeSession(webSessionID);
   try {
@@ -791,8 +822,65 @@ function buildStationStatic(stationID) {
 // skipTutorial) to the gateway's session/select route, pins the identity to
 // the signed login session, and keeps the returned bridgeSessionID
 // server-side in its own session store — it must never reach browser JS.
+async function selectHeldCharacter(webSessionID, account, characterID) {
+  // One client session per web login: switching characters releases the
+  // previous persistent session (retail semantics live on the gateway side;
+  // the handler's own refusals pass through as CALL_REFUSED).
+  await releaseHeldBridgeSession(webSessionID);
+  const outcome = await gateway.selectCharacter(
+    [characterID, null, true],
+    null,
+    {
+      userid: Number(account.accountID),
+      userName: String(account.username || ""),
+    },
+  );
+  bridgeSessions.set(webSessionID, {
+    bridgeSessionID: outcome.bridgeSessionID,
+    characterID: Number(outcome.session.characterID) || characterID,
+    accountID: Number(account.accountID),
+    // R55: the character's corporation, so the standings drill-down can pass it
+    // as the composition read's toID (GetStandingCompositions(fromID, corpID)).
+    // Server-held like every other session scalar; never round-trips the browser.
+    corporationID: Number(outcome.session.corporationID) || null,
+    // R3: the docked-entry state the page needs to address inventories/ships
+    // by their game IDs, plus the server-held bound-object handles keyed by a
+    // semantic key (hangar/cargo/ship). Handles live here only — never in
+    // browser JS — exactly like the bridgeSessionID.
+    stationID: Number(outcome.session.stationID) || null,
+    solarSystemID: Number(outcome.session.solarSystemID) || null,
+    activeShipID: Number(outcome.session.shipID) || null,
+    boundHandles: new Map(),
+    // Retail separates the next legal session-mutation cooldown from actual
+    // transition readiness. Epochs invalidate every bound context; the
+    // observed-state barrier below advances phase only after location/scene/
+    // ego/ship postconditions hold.
+    transitionEpoch: 0,
+    transition: null,
+    transitionReservation: null,
+    cooldownUntilMs: 0,
+    // R10 live event channel: the single gateway push WebSocket for this
+    // session (opened lazily when a browser attaches), the SSE responses it
+    // fans out to, and the last cursor seen so a reconnect resumes there.
+    stream: null,
+    streamSubscribers: new Set(),
+    streamCursor: null,
+    streamRetryTimer: null,
+    // R7 chat: the XMPP connection this character speaks Local and Corp on.
+    // Opened right below, as a retail client does at login — see
+    // joinHeldChat.
+    chat: null,
+  });
+  // The character is online; put it in its rooms. Fire-and-forget: a chat
+  // server that is down must never stop a pilot coming online.
+  joinHeldChat(bridgeSessions.get(webSessionID));
+  return outcome;
+}
+
 app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
   const characterID = Number(req.body && req.body.characterID || 0);
+  let reservation = null;
+  let sessionReservation = null;
   try {
     if (!Number.isSafeInteger(characterID) || characterID <= 0) {
       res.status(400).json({
@@ -828,57 +916,22 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
       });
       return;
     }
-    // One client session per web login: switching characters releases the
-    // previous persistent session (retail semantics live on the gateway side;
-    // the handler's own refusals pass through as CALL_REFUSED).
-    await releaseHeldBridgeSession(req.webSessionID);
-    const outcome = await gateway.selectCharacter(
-      [characterID, null, true],
-      null,
-      {
-        userid: Number(req.account.accountID),
-        userName: String(req.account.username || ""),
-      },
-    );
-    bridgeSessions.set(req.webSessionID, {
-      bridgeSessionID: outcome.bridgeSessionID,
-      characterID: Number(outcome.session.characterID) || characterID,
-      accountID: Number(req.account.accountID),
-      // R55: the character's corporation, so the standings drill-down can pass it
-      // as the composition read's toID (GetStandingCompositions(fromID, corpID)).
-      // Server-held like every other session scalar; never round-trips the browser.
-      corporationID: Number(outcome.session.corporationID) || null,
-      // R3: the docked-entry state the page needs to address inventories/ships
-      // by their game IDs, plus the server-held bound-object handles keyed by a
-      // semantic key (hangar/cargo/ship). Handles live here only — never in
-      // browser JS — exactly like the bridgeSessionID.
-      stationID: Number(outcome.session.stationID) || null,
-      solarSystemID: Number(outcome.session.solarSystemID) || null,
-      activeShipID: Number(outcome.session.shipID) || null,
-      boundHandles: new Map(),
-      // Retail separates the next legal session-mutation cooldown from actual
-      // transition readiness. Epochs invalidate every bound context; the
-      // observed-state barrier below advances phase only after location/scene/
-      // ego/ship postconditions hold.
-      transitionEpoch: 0,
-      transition: null,
-      transitionReservation: null,
-      cooldownUntilMs: 0,
-      // R10 live event channel: the single gateway push WebSocket for this
-      // session (opened lazily when a browser attaches), the SSE responses it
-      // fans out to, and the last cursor seen so a reconnect resumes there.
-      stream: null,
-      streamSubscribers: new Set(),
-      streamCursor: null,
-      streamRetryTimer: null,
-      // R7 chat: the XMPP connection this character speaks Local and Corp on.
-      // Opened right below, as a retail client does at login — see
-      // joinHeldChat.
-      chat: null,
-    });
-    // The character is online; put it in its rooms. Fire-and-forget: a chat
-    // server that is down must never stop a pilot coming online.
-    joinHeldChat(bridgeSessions.get(req.webSessionID));
+    if (sessionOperations.has(req.webSessionID)) {
+      res.status(409).json({ ok: false, error: "CHARACTER_IN_USE", message: "This session is changing characters. Try again shortly." });
+      return;
+    }
+    if (characterOperations.has(characterID)) {
+      if (!botHost.authorizesClaim(characterID, req.get(botHostModule.BOT_HEADER))) {
+        res.status(409).json({ ok: false, error: "CHARACTER_IN_USE", message: "This character is changing sessions. Try again shortly." });
+        return;
+      }
+    } else {
+      reservation = Symbol("select");
+      characterOperations.set(characterID, reservation);
+    }
+    sessionReservation = Symbol("select-session");
+    sessionOperations.set(req.webSessionID, sessionReservation);
+    const outcome = await selectHeldCharacter(req.webSessionID, req.account, characterID);
     res.json({
       ok: true,
       character: {
@@ -902,6 +955,9 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
     });
   } catch (error) {
     next(error);
+  } finally {
+    if (sessionReservation && sessionOperations.get(req.webSessionID) === sessionReservation) sessionOperations.delete(req.webSessionID);
+    if (reservation && characterOperations.get(characterID) === reservation) characterOperations.delete(characterID);
   }
 });
 
@@ -909,6 +965,10 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
 // through the same disconnect path a retail socket close runs).
 app.post("/api/bridge/release", requireAuth, async (req, res, next) => {
   try {
+    if (sessionOperations.has(req.webSessionID)) {
+      res.status(409).json({ ok: false, error: "CHARACTER_IN_USE", message: "This session is changing characters. Try again shortly." });
+      return;
+    }
     const released = await releaseHeldBridgeSession(req.webSessionID);
     res.json({ ok: true, released });
   } catch (error) {
@@ -20113,47 +20173,70 @@ app.post("/api/bots/start", requireAuth, async (req, res, next) => {
     // request in the body, and botHost.start() is the one place that decodes
     // and trusts it (decodeFleetCompanionRequestValue).
 
-    // THE HANDOVER IS SERVER-SIDE AND ATOMIC: when the caller's OWN session is
-    // the one flying this character, release it here — then the bot exists the
-    // moment this request answers. The old shape (tab releases itself, THEN
-    // asks the server) left a window where the tab had already fallen to the
-    // login screen while no bot was registered yet, so its bot-flying marks
-    // polled empty until the next tick. Only the caller's own hull moves:
-    // any OTHER session flying the character is still refused by the host's
-    // CHARACTER_IN_USE check below. Identical for a script or a companion —
-    // this is a hull handover, not a behaviour choice.
-    const callerHeld = bridgeSessions.get(req.webSessionID);
-    if (callerHeld && Number(callerHeld.characterID) === characterID) {
-      await releaseHeldBridgeSession(req.webSessionID);
-    }
-    const outcome =
-      kind === "companion"
-        ? await botHost.start({
-            account: req.account,
-            characterID,
-            kind: "companion",
-            request: body.request,
-            grant: body.grant,
-          })
-        : await botHost.start({
-            account: req.account,
-            characterID,
-            kind: "script",
-            scriptID: record.scriptID,
-            scriptName: record.name,
-            scriptRev: record.rev,
-            doc: record.doc,
-            grant: body.grant,
-          });
-    if (!outcome.ok) {
-      res.status(BOT_START_STATUS[outcome.code] || 500).json({
-        ok: false,
-        error: outcome.code,
-        message: outcome.message,
-      });
+    if (characterOperations.has(characterID) || sessionOperations.has(req.webSessionID)) {
+      res.status(409).json({ ok: false, error: "CHARACTER_IN_USE", message: "This character is changing sessions. Try again shortly." });
       return;
     }
-    res.json({ ok: true, bot: outcome.bot });
+    const reservation = Symbol("handoff");
+    characterOperations.set(characterID, reservation);
+    sessionOperations.set(req.webSessionID, reservation);
+    let released = false;
+    const handoff = {
+      callerSessionID: req.webSessionID,
+      beforeStart: async () => {
+        const held = bridgeSessions.get(req.webSessionID);
+        if (held && Number(held.characterID) === characterID) {
+          await releaseHeldBridgeSession(req.webSessionID, { confirmed: true });
+          released = true;
+        }
+      },
+    };
+    try {
+      const outcome =
+        kind === "companion"
+          ? await botHost.start({
+              ...handoff,
+              account: req.account,
+              characterID,
+              kind: "companion",
+              request: body.request,
+              grant: body.grant,
+            })
+          : await botHost.start({
+              ...handoff,
+              account: req.account,
+              characterID,
+              kind: "script",
+              scriptID: record.scriptID,
+              scriptName: record.name,
+              scriptRev: record.rev,
+              doc: record.doc,
+              grant: body.grant,
+            });
+      if (!outcome.ok) {
+        // Startup may fail after release (for example a gateway refusal). Restore
+        // the caller when its identity is still valid and nobody else acquired it.
+        if (released && !bridgeSessions.has(req.webSessionID) && botHost.claimedBy(characterID) === null &&
+            auth.verifySessionToken(readSessionToken(req))) {
+          try {
+            await selectHeldCharacter(req.webSessionID, req.account, characterID);
+          } catch (error) {
+            errorLogger(error);
+            outcome.message = `${outcome.message || "The bot could not start."} Bring this pilot online again; its browser session could not be restored.`;
+          }
+        }
+        res.status(BOT_START_STATUS[outcome.code] || 500).json({
+          ok: false,
+          error: outcome.code,
+          message: outcome.message,
+        });
+        return;
+      }
+      res.json({ ok: true, bot: outcome.bot });
+    } finally {
+      if (sessionOperations.get(req.webSessionID) === reservation) sessionOperations.delete(req.webSessionID);
+      if (characterOperations.get(characterID) === reservation) characterOperations.delete(characterID);
+    }
   } catch (error) {
     next(error);
   }

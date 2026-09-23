@@ -4,6 +4,7 @@
 // is a pure reader of the store; this module owns all fetch/decode logic so
 // it stays framework-agnostic and unit-testable under node:test.
 
+import { clearSessionToken } from "./sessionToken.ts";
 import { getCharacterSelectionData } from "../bridge/characterSelection.ts";
 import {
   getStationGuests,
@@ -1184,9 +1185,10 @@ export interface AppFlow {
 
 /**
  * True when the session the BFF held can no longer act — the character is not
- * online on it. Two codes mean this, and both must unwind the same way (stop the
- * stream, flip the slice offline, so App prunes the pilot rather than leaving a
+ * online on it, or authentication has expired. These codes unwind the flow
+ * (stop the stream and mark it offline), so App prunes the pilot rather than leaving a
  * cockpit whose every read fails):
+ *   • AUTH_REQUIRED — authentication expired; sign in again, never retry gameplay.
  *   • SESSION_NOT_FOUND — the held bridge session is gone (TTL / restart).
  *   • NO_LIVE_SESSION   — the session is held but its character was taken over
  *     by another client (retail takeover) or released, so the gateway reports no
@@ -1197,7 +1199,7 @@ export interface AppFlow {
 export function isSessionLost(error: unknown): boolean {
   return (
     error instanceof BridgeCallError &&
-    (error.code === "SESSION_NOT_FOUND" || error.code === "NO_LIVE_SESSION")
+    (error.code === "AUTH_REQUIRED" || error.code === "SESSION_NOT_FOUND" || error.code === "NO_LIVE_SESSION")
   );
 }
 
@@ -1328,12 +1330,35 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     eventSource?: (url: string) => api.EventSourceLike;
     token?: string | null;
     priority?: RequestPriority;
+    onAuthRequired: () => void;
   } = {
+    onAuthRequired: handleAuthRequired,
     ...(options.baseUrl !== undefined ? { baseUrl: options.baseUrl } : {}),
-    ...(options.fetch !== undefined ? { fetch: options.fetch } : {}),
+    fetch: async (input, init) => {
+      if (authLost && !String(input).endsWith("/api/login")) {
+        throw new BridgeCallError("AUTH_REQUIRED", "Sign in again to carry on.", 401);
+      }
+      return (options.fetch ?? globalThis.fetch)(input, init);
+    },
     ...(options.eventSource !== undefined ? { eventSource: options.eventSource } : {}),
     ...(options.perSessionToken ? { token: options.initialSessionToken ?? null } : {}),
   };
+
+  let authLost = false;
+  function handleAuthRequired(): void {
+    if (authLost) return;
+    authLost = true;
+    stopLiveStream();
+    stopMiningController();
+    stopMissionController();
+    stopCompanionController();
+    stopCustomController();
+    scriptRunner = null; // Resume cannot revive a run whose credential is gone.
+    if (options.perSessionToken) callOptions.token = null;
+    else clearSessionToken();
+    syncedStationID = null;
+    store.apply({ type: "session/logged-out" });
+  }
 
   // R6b — the docked station the station-scoped panels are currently synced to,
   // and a guard so an in-flight relocate is not re-entered. Set on select and
@@ -10965,6 +10990,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
     async login(username, password) {
       const result = await api.login(username, password, callOptions);
+      authLost = false;
       // R107 — in per-session mode capture the token onto our own call options
       // (api.login deliberately did NOT write the global), so every later call
       // and the SSE stream authenticate as THIS character. In single-session
