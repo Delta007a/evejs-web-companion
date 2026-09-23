@@ -1011,6 +1011,12 @@ function sayRepairDidNotHold(when: Condition): string {
 
 /** Drone safety surrounds the existing navigator; postponed navigation keeps its
  * original memory, so scanner rotation and warp accounting advance only on issue. */
+export function activeStepUsesMiningDrones(script: BotScript, mem: ScriptMemory): boolean {
+  if (activeMacroID(script, mem) !== "mine-at-belt") return false;
+  const setting = activeStep(script, mem.position)?.args["drones"];
+  return setting?.kind === "toggle" && setting.enabled;
+}
+
 export function decideScriptAction(
   script: BotScript, obs: ScriptObservation, mem: ScriptMemory,
   registry: MacroRegistry, travelHome: HomeTravelDecider,
@@ -1019,11 +1025,11 @@ export function decideScriptAction(
   if (obs.inWarp === true || obs.docked === true) return base;
   const mining = activeMacroID(script, mem) === "mine-at-belt";
   const step = mining ? activeStep(script, mem.position) : null;
-  const setting = step?.args["drones"];
-  const enabled = setting?.kind === "toggle" && setting.enabled;
+  const enabled = activeStepUsesMiningDrones(script, mem);
   if (!enabled && mem.miningFlight === undefined) return base;
   const leaving = !enabled || base.status !== "running" || base.memory.latched !== null ||
-    base.stepPath !== step?.id || ["warp", "warpScan", "warpBookmark", "startRoute", "startSystemRoute", "dock", "undock"].includes(base.action.kind);
+    activeStep(script, base.memory.position)?.id !== step?.id ||
+    ["warp", "warpScan", "warpBookmark", "startRoute", "startSystemRoute", "dock", "undock"].includes(base.action.kind);
   const rocks = obs.snapshot?.entities.filter(e => !e.isSelf && (e.miningYieldTypeID !== null || e.beltID !== null)) ?? [];
   const picked = base.action.kind === "activate" || base.action.kind === "lock" ? base.action.targetID :
     step === null ? null : base.memory.macroMem[step.id]?.["rockID"];

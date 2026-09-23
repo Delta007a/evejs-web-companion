@@ -29,6 +29,7 @@ import {
   activeMacroID,
   activeStepNeedsTypeNames,
   activeStepToursOreSites,
+  activeStepUsesMiningDrones,
   activeSquadRole,
   watchSquadRole,
   decideScriptAction,
@@ -718,6 +719,10 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
    * fighting free (nav/scriptMacros `fightTheWayOut` needs a grid to read).
    */
   async function sendToStationThenStop(): Promise<void> {
+    if (memory !== null && (memory.miningFlight !== undefined || (script !== null && activeStepUsesMiningDrones(script, memory)))) {
+      pauseWith("Drone return cannot be confirmed while ship reads are failing; travel is blocked.");
+      return;
+    }
     const stationID = stationToSendTo();
     if (stationID === null) {
       pauseWith(READ_GAVE_UP);

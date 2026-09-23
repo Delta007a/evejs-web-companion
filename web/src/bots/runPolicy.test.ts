@@ -45,6 +45,18 @@ test("every interrupt response has exactly one explicit run policy", () => {
   assert.deepEqual(Object.keys(INTERRUPT_RUN_POLICY).sort(), [...INTERRUPT_RESPONSES].sort());
 });
 
+test("opt-in mining drone defense uses upstream combat approval and cannot restart blindly", () => {
+  const plain = step("mine-at-belt");
+  assert.deepEqual(analyzeBotRunPolicy(script([plain])).riskClasses, []);
+  const armed = { ...plain, kind: "macro" as const, macro: "mine-at-belt" as const,
+    args: { drones: { kind: "toggle" as const, enabled: true } } };
+  const result = analyzeBotRunPolicy(script([armed]));
+  assert.deepEqual(result.riskClasses, ["combat", "destructive"]);
+  assert.equal(result.restartSafe, false);
+  assert.deepEqual(result.restartBlockers, ["mine-at-belt"]);
+  assert.equal(validateBotLaunchGrant(null, 1, result).ok, false);
+});
+
 // launch-commodities changes a colony's command centre AND spends money (the
 // server debits planetary export tax on every launch) — both risks are real,
 // and neither is a re-read-and-confirm the way unload-cargo's is, so a resumed

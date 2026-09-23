@@ -64,7 +64,7 @@ function script(program: readonly ProgramNode[]): BotScript {
 }
 
 interface Harness {
-  observeThrows?: () => never;
+  observeThrows?: () => void;
   registry?: MacroRegistry;
   /** Throw from `issue` — the refusal path. Return null to let the call pass. */
   issueThrows?: (action: ScriptAction) => unknown | null;
@@ -487,6 +487,21 @@ test("repeated read failures give up with a plain reason", async () => {
   }
   assert.equal(runner.getStatus(), "paused");
   assert.match(progress.at(-1)?.pauseReason ?? "", /several tries/i);
+});
+
+test("blind mining-drone runs cannot use the emergency travel shortcut", async () => {
+  for (const initiallyReadable of [false, true]) {
+    let reads = 0;
+    const h = harness({
+      observeThrows: () => { if (!initiallyReadable || reads++ > 0) throw new Error("read failed"); },
+      registry: { "mine-at-belt": () => mt({ kind: "wait" }, { kind: "acting" }) },
+    });
+    h.runner.start(script([{ ...macroStep("mine", "mine-at-belt"), args: { drones: { kind: "toggle", enabled: true } } }]));
+    for (let i = 0; i < MAX_READ_FAILURES + 5 && h.runner.getStatus() === "running"; i++) await h.runner.tick();
+    assert.equal(h.runner.getStatus(), "paused");
+    assert.ok(h.issued.every(a => a.kind !== "startRoute"));
+    assert.match(h.progress.at(-1)?.pauseReason ?? "", /Drone return cannot be confirmed/);
+  }
 });
 
 test("reads that give up send the ship to the station the bot is configured to dock at", async () => {

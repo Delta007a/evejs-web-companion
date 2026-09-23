@@ -290,6 +290,11 @@ function visitStep(
   if (!entry.restartSafe) {
     restartBlockers.add(step.macro);
   }
+  if (step.macro === "mine-at-belt" && step.args["drones"]?.kind === "toggle" && step.args["drones"].enabled) {
+    risks.add("combat");
+    risks.add("destructive");
+    restartBlockers.add(step.macro);
+  }
 }
 
 function visitNode(

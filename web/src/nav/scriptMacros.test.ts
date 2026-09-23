@@ -4605,3 +4605,29 @@ test("site rotation waits for mining drones and retains upstream scanner board u
   assert.equal(ready.action.kind, "warpScan");
   assert.equal(ready.memory.board["oreAnomsVisited"], "ABC");
 });
+
+test("a fight-back watch cannot bypass or prevent the mining flight's defensive swap", () => {
+  const step: MacroStep = { ...mineStep, args: { belt: { kind: "belt", belt: { mode: "site" } }, drones: { kind: "toggle", enabled: true } } };
+  const script: BotScript = { format: "evejs-bot-script", version: 1, name: "defense", notes: "", home: { entity: "station", id: 1, name: "Home", systemName: null },
+    interrupts: [{ id: "defend", when: { kind: "hostile-on-grid" }, respond: "fight-back" }], program: [step] };
+  const mining = { itemID: 70, typeID: 100, controlled: true, targetID: 10, activity: "mining", name: null, shieldRatio: 1, armorRatio: 1, hullRatio: 1 };
+  const state: MiningDroneState = { bay: [{ itemID: 8, typeID: 200, quantity: 5 }], out: [mining], maxActive: 2, roles: { 100: "mining", 200: "combat" } };
+  const hostile = obs({ snapshot: snapshot([pirate()]), hostileOnGrid: true, miningDrones: state,
+    combatDroneBayItemIDs: [8], dronesOut: true, combatDroneIDs: [] });
+  let t = decideScriptAction(script, hostile, initialMemory(script), SCRIPT_MACROS, scriptTravelHome);
+  assert.equal(t.action.kind, "recallDrones");
+  t = decideScriptAction(script, { ...hostile, miningDrones: { ...state, out: null } }, t.memory, SCRIPT_MACROS, scriptTravelHome);
+  assert.equal(t.action.kind, "wait", "unconfirmed return cannot launch combat drones");
+  t = decideScriptAction(script, { ...hostile, dronesOut: false, miningDrones: { ...state, out: [] } }, t.memory, SCRIPT_MACROS, scriptTravelHome);
+  assert.equal(t.action.kind, "launchDrones", "the interrupt is not a departure from the mining step");
+  assert.deepEqual(t.action.kind === "launchDrones" && t.action.quantities, [{ itemID: 8, quantity: 2 }]);
+  const combat = { ...mining, itemID: 80, typeID: 200, targetID: 6661, activity: "fighting" };
+  const clear = obs({ snapshot: snapshot([]), hostileOnGrid: false, dronesOut: true,
+    combatDroneIDs: [80], miningDrones: { ...state, bay: [], out: [combat] } });
+  for (let i = 0; i < 2; i++) {
+    t = decideScriptAction(script, clear, t.memory, SCRIPT_MACROS, scriptTravelHome);
+    assert.notEqual(t.action.kind, "recallDrones", "generic stand-down cannot skip three clear observations");
+  }
+  t = decideScriptAction(script, clear, t.memory, SCRIPT_MACROS, scriptTravelHome);
+  assert.equal(t.action.kind, "recallDrones");
+});

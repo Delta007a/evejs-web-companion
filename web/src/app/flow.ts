@@ -9267,7 +9267,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         const droneRoles = await classifyDroneRoles(bay, snapshot, ship?.itemID ?? null);
         const miningOut = decodeDronesInSpace(dronesResult.inSpace);
         const miningTypes = new Set([...bay ?? [], ...miningOut ?? []].flatMap(d => d.typeID === null ? [] : [d.typeID]));
-        await resolveNamesNow([...miningTypes].map(id => ({ kind: "typeGroup" as const, id })));
+        try {
+          await resolveNamesNow([...miningTypes].map(id => ({ kind: "typeGroup" as const, id })));
+        } catch (error) {
+          if (isSessionLost(error)) throw error;
+          // Unknown roles block launches; preserve fresh control/return reads.
+        }
         const miningDrones = { bay, out: miningOut, maxActive: decodeDroneLimits(dronesResult.shipInfo).maxActiveDrones,
           roles: Object.fromEntries([...miningTypes].map(id => [id, droneRoleForGroup(store.names.get().resolved[nameKey("typeGroup", id)])])) };
         const hold = destinationHold(holds);
