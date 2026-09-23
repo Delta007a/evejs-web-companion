@@ -71,3 +71,17 @@ test("EveJS conversation is the authoritative eligibility verdict", () => {
   assert.equal(classifyDistributionAgentConversation({ ...base, agentSays: "Your current standings are not high enough for this agent to issue you a mission yet.", actions: [] }), "ineligible");
   assert.equal(classifyDistributionAgentConversation({ ...base, agentSays: "Hello", actions: [{ actionID: 1, buttonType: 2, label: "Request Mission" }] }), "usable");
 });
+
+test("level 4 preserves corporation, standard-agent, jump and nearest-first constraints", async () => {
+  const probed: number[] = [];
+  const asked: number[] = [];
+  const candidates = [agent(4, 4), agent(3, 4), agent(2, 4), agent(1, 4),
+    agent(5, 4, { corporationID: 999 }), agent(6, 4, { agentTypeID: 3 }), agent(7, 5)];
+  const picked = await selectDistributionAgent({ ...policy(4, true), corporationID: 100, maxJumps: 3,
+    distances: new Map(candidates.map(a => [a.solarSystemID!, a.agentID])) },
+    async level => { asked.push(level); return candidates; },
+    async id => { probed.push(id); return id === 1 ? "unavailable" : "usable"; });
+  assert.deepEqual(asked, [4]);
+  assert.deepEqual(probed, [1, 2]);
+  assert.equal(picked.agent?.agentID, 2);
+});

@@ -1198,3 +1198,29 @@ test("an old delivery finder with no level policy still decodes unchanged", () =
   assert.deepEqual(step.args, {});
   assert.deepEqual(warnings, []);
 });
+
+test("saved private hauling argument names round-trip without importing old runtime wiring", () => {
+  const station = { kind: "station", ref: golden().home };
+  const division = { kind: "corpDivision", division: 1, name: "Division 1" };
+  const program = [
+    { id: "haul", kind: "macro", macro: "haul-all", args: {
+      pickupStation: station, deliveryStation: { ...station, ref: { ...golden().home, id: 60000005 } },
+      pickupCorpDivision: division, deliveryCorpDivision: division,
+      item: { kind: "itemType", typeID: 34, name: "Tritanium" } } },
+    { id: "route", kind: "macro", macro: "route-hauler", args: {
+      stationA: station, stationB: { ...station, ref: { ...golden().home, id: 60000005 } },
+      pickupDivisionA: division, deliveryDivisionB: division,
+      pickupDivisionB: division, deliveryDivisionA: division,
+      transportBay: { kind: "place", place: "cargo" }, returnCargo: { kind: "toggle", enabled: true },
+      itemsAToB: { kind: "itemList", items: [{ match: "type", typeID: 34, name: "Tritanium" }] } } },
+  ];
+  const round = mustAccept(decodeScriptValue({ ...golden(), program })).doc;
+  assert.deepEqual(round.program, program);
+  assert.deepEqual(validateScript(round), []);
+});
+
+test("legacy strict ore delivery is refused rather than silently migrated to generic fallback", () => {
+  const value = { ...golden(), program: [{ id: "deliver", kind: "macro", macro: "deliver-ore",
+    args: { station: { kind: "station", ref: golden().home }, corpDivision: { kind: "corpDivision", division: 1, name: "Corp" } } }] };
+  assert.equal(decodeScriptValue(value).ok, false);
+});
