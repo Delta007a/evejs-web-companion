@@ -162,8 +162,8 @@ export interface RefusalLedger {
   /** A success on this key: the streak is over. */
   clear(key: string): void;
   /**
-   * Something moved, so a hold that had no room may have room now. Forgets every
-   * `refused` streak — and ONLY those.
+   * Something moved, so a hold that had no room may have room now. Forgets the
+   * space-dependent `refused` and `no-room` streaks — and ONLY those.
    *
    * ⚠ WITHOUT THIS, SETTING A CAN ASIDE IS PERMANENT. A can is set aside because
    * it kept refusing, and it kept refusing because the hold was full; once the
@@ -173,7 +173,9 @@ export interface RefusalLedger {
    * few laps and then quietly find nothing to do.
    *
    * `gone` and `unreachable` survive on purpose: emptying a hold does not bring
-   * back a despawned container, and does not close a distance.
+   * back a despawned container, and does not close a distance. `no-room` must be
+   * included: it is the explicit form of the same full-hold condition, and must
+   * stop being authoritative once a successful move has freed hold space.
    */
   forgetRefused(): void;
   /** Consecutive failures on this key, 0 when it is not failing. */
@@ -208,7 +210,7 @@ export function createRefusalLedger(): RefusalLedger {
     },
     forgetRefused() {
       for (const [key, record] of byKey) {
-        if (record.kind === "refused") {
+        if (record.kind === "refused" || record.kind === "no-room") {
           byKey.delete(key);
         }
       }

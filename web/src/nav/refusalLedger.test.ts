@@ -137,6 +137,24 @@ test("something moving forgets every refused streak, so a set-aside can is retri
   assert.equal(shouldSetAside(ledger.records(), "s1", "lootContainer", 80001, 5), false);
 });
 
+test("emptying a hold expires an explicit no-room verdict", () => {
+  const ledger = createRefusalLedger();
+  ledger.note(
+    refusalKey("lc", "lootContainer", 80001),
+    `${NO_ROOM_CODE}: There is no room aboard for what is in that container.`,
+    1,
+    true,
+  );
+  assert.equal(shipHasNoRoom(ledger.records(), "lc", "lootContainer"), true, "full means stop asking");
+
+  ledger.forgetRefused();
+  assert.equal(
+    shipHasNoRoom(ledger.records(), "lc", "lootContainer"),
+    false,
+    "a successful unload makes the old capacity verdict stale",
+  );
+});
+
 test("emptying a hold does NOT bring back a despawned can, or close a distance", () => {
   const ledger = createRefusalLedger();
   const ghost = refusalKey("s1", "lootContainer", 1);

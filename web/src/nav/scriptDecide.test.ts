@@ -1487,3 +1487,26 @@ test("a latched repair trip does not order the scanner read on the site block's 
   const flying = decideScriptAction(s, obs({ shieldRatio: 0.2, docked: false }), initialMemory(s), withShop, home);
   assert.equal(activeStepToursOreSites(s, flying.memory), false);
 });
+
+test("a short wait restarted through a forever-loop wrap gets a fresh step-tick budget", () => {
+  const shortWait: MacroDecider = (_step, _obs, mem) =>
+    mem["started"] === true
+      ? tick({ kind: "wait" }, { kind: "done" })
+      : tick({ kind: "wait" }, { kind: "acting" }, true, { started: true });
+  const loop: ProgramNode = {
+    id: "L",
+    kind: "loop",
+    repeat: { kind: "forever" },
+    body: [macroStep("w", "wait")],
+  };
+  const s = script([loop]);
+  let mem = initialMemory(s);
+
+  for (let i = 0; i < MAX_SILENT_STEP_TICKS + 100; i += 1) {
+    const result = decideScriptAction(s, obs(), mem, { wait: shortWait }, home);
+    assert.equal(result.status, "running", `invocation ${i + 1} completed normally`);
+    assert.equal(result.action.kind, "wait");
+    assert.equal(result.memory.stepTicks, 1, "the wrapped entry is a new invocation");
+    mem = result.memory;
+  }
+});

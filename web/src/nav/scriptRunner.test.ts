@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import type { BotScript, MacroStep, ProgramNode } from "../bots/botScript.ts";
 import type { ScriptObservation } from "./scriptConditions.ts";
 import type { FlightStatus } from "../store/types.ts";
-import { MAX_CONSECUTIVE_REFUSALS } from "./refusalLedger.ts";
+import { MAX_CONSECUTIVE_REFUSALS, NO_ROOM_CODE, shipHasNoRoom } from "./refusalLedger.ts";
 import type {
   HomeTravelDecider,
   MacroDecider,
@@ -255,6 +255,53 @@ test("a fresh run does not inherit the last one's refusals", async () => {
 
   h.runner.start(script([macroStep("a", "deliver-ore")]));
   assert.deepEqual(h.progress[h.progress.length - 1]!.refusals, []);
+});
+
+test("a successful unload expires no-room so the next loop visit can loot again", async () => {
+  const loot: MacroDecider = (step, o) =>
+    shipHasNoRoom(o.refusals, step.id, "lootContainer")
+      ? mt({ kind: "wait" }, { kind: "done" })
+      : mt({ kind: "lootContainer", containerID: 80001 }, { kind: "acting" });
+  let refusedFirstLoot = false;
+  const h = harness({
+    registry: { "loot-containers": loot, "deliver-ore": deliver },
+    issueThrows: (action) => {
+      if (action.kind !== "lootContainer" || refusedFirstLoot) {
+        return null;
+      }
+      refusedFirstLoot = true;
+      return new Error(`${NO_ROOM_CODE}: There is no room aboard for what is in that container.`);
+    },
+  });
+  const loop: ProgramNode = {
+    id: "L",
+    kind: "loop",
+    repeat: { kind: "forever" },
+    body: [macroStep("loot", "loot-containers"), macroStep("haul", "deliver-ore")],
+  };
+  h.setObs(calm({ holdEmpty: false }));
+  h.runner.start(script([loop]));
+
+  await issueTicks(h, 1);
+  const full = h.progress[h.progress.length - 1]!;
+  assert.equal(full.refusals[0]?.kind, "no-room", "the full-hold refusal remains visible and authoritative");
+  assert.match(full.refusals[0]?.words ?? "", /room/i);
+
+  await issueTicks(h, 2);
+  assert.deepEqual(h.issued.map((action) => action.kind), ["lootContainer", "unloadOre"]);
+  assert.deepEqual(
+    h.progress[h.progress.length - 1]!.refusals,
+    [],
+    "the successful unload clears the stale capacity verdict",
+  );
+
+  h.setObs(calm({ holdEmpty: true }));
+  await issueTicks(h, 3);
+  assert.deepEqual(
+    h.issued.map((action) => action.kind),
+    ["lootContainer", "unloadOre", "lootContainer"],
+    "the next loop visit is allowed to loot",
+  );
 });
 
 test("ordinary writes still settle before deciding again", async () => {

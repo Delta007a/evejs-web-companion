@@ -102,9 +102,9 @@ export const MAX_READ_FAILURES = 5;
 
 /**
  * Actions that put items somewhere else, so a hold which had no room may have
- * room now. Their success is the signal that expires every `refused` streak —
- * see `forgetRefused`, without which a can set aside for a full hold would
- * never be tried again after the hold was emptied.
+ * room now. Their success is the signal that expires the space-dependent
+ * `refused` and `no-room` streaks — see `forgetRefused`, without which a can
+ * refused for a full hold would never be tried again after the hold was emptied.
  */
 function freesHoldSpace(action: ScriptAction): boolean {
   return action.kind === "unloadOre"
