@@ -421,7 +421,10 @@ export interface ScriptObservation {
     readonly stationID: number;
     readonly name: string | null;
     readonly stationName: string | null;
+    readonly level: number;
   } | null;
+  /** A completed authoritative search that found no eligible agent. */
+  readonly agentSearchFailure?: string | null;
   /** Jumps from HERE to the offered mission's drop-off (the accept gate). */
   readonly jumpsToDropoff?: number | null;
   /**

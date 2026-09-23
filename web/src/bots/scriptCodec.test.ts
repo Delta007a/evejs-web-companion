@@ -123,6 +123,7 @@ function everyArgKind(): BotScript {
         macro: "find-distribution-agent",
         args: {
           level: { kind: "count", value: 3 },
+          fallback: { kind: "toggle", enabled: true },
           corporation: { kind: "corp", id: 1000035, name: "Caldari Navy" },
         },
       },
@@ -1182,4 +1183,18 @@ test("a load step with an EMPTY selection is a fixable problem, not a refusal", 
   const problems = validateScript(round);
   assert.equal(problems.length, 1);
   assert.match(problems[0]!.sentence, /Pick what this step loads/);
+});
+
+test("an old delivery finder with no level policy still decodes unchanged", () => {
+  const old = golden();
+  const value = {
+    ...old,
+    name: "Old delivery runs",
+    program: [{ id: "find", kind: "macro", macro: "find-distribution-agent", args: {} }],
+  };
+  const { doc, warnings } = mustAccept(decodeScriptValue(value));
+  const step = doc.program[0];
+  assert.ok(step?.kind === "macro");
+  assert.deepEqual(step.args, {});
+  assert.deepEqual(warnings, []);
 });

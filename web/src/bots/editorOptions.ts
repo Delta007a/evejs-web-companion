@@ -53,6 +53,7 @@ export type WidgetKind =
   | "station-picker"
   | "equipment-picker"
   | "agent-picker"
+  | "toggle-select"
   | "count-input"
   | "corp-picker"
   | "fitting-picker"
@@ -82,6 +83,7 @@ export const ARG_KIND_WIDGET: Readonly<Record<Arg["kind"], WidgetKind>> = {
   station: "station-picker",
   equipment: "equipment-picker",
   agent: "agent-picker",
+  toggle: "toggle-select",
   count: "count-input",
   corp: "corp-picker",
   fitting: "fitting-picker",
@@ -114,6 +116,7 @@ export const ARG_KIND_LABEL: Readonly<Record<Arg["kind"], string>> = {
   station: "Station",
   equipment: "Equipment",
   agent: "Agent",
+  toggle: "Enabled",
   count: "Amount",
   corp: "Corporation",
   fitting: "Saved fitting",
@@ -154,7 +157,8 @@ const ARG_KEY_LABEL: Readonly<Record<string, string>> = {
   station: "Station",
   equipment: "Equipment",
   agent: "Agent",
-  level: "Agent level",
+  level: "Preferred mission level",
+  fallback: "Fallback to lower available level",
   maxJumps: "Longest trip (jumps)",
   // A bare "Amount" (the generic label for a count) says nothing about what is
   // being counted, and this one is a percentage of a command centre's hold.
@@ -375,6 +379,7 @@ const ARG_KEY_BOUNDS: Readonly<Record<string, NumericBounds>> = {
  */
 const MACRO_ARG_BOUNDS: Readonly<Partial<Record<MacroID, Readonly<Record<string, NumericBounds>>>>> = {
   "hunt-player": { maxJumps: { min: 1, max: 30 } },
+  "find-distribution-agent": { level: { min: 1, max: 4 } },
 };
 
 /**

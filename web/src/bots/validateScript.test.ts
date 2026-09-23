@@ -45,6 +45,14 @@ test("a complete draft has no problems", () => {
   assert.deepEqual(validateScript(ready()), []);
 });
 
+test("distribution agent level 5 is rejected because current EveJS exposes levels 1 to 4", () => {
+  const draft: BotScript = {
+    ...ready(),
+    program: [{ id: "find", kind: "macro", macro: "find-distribution-agent", args: { level: { kind: "count", value: 5 } } }],
+  };
+  assert.match(validateScript(draft)[0]?.sentence ?? "", /levels 1 to 4/i);
+});
+
 test("a blank name and unbound home are each flagged, and both are blocking", () => {
   const draft = { ...ready(), name: "  ", home: { entity: "station" as const, id: null, name: null, systemName: null } };
   const problems = validateScript(draft);

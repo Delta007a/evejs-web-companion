@@ -1612,8 +1612,15 @@ function makeFindAgent(kindWord: string, finderKind: string): MacroDecider {
           agentStationID: found.stationID,
           agentName: found.name,
           agentStationName: found.stationName,
+          agentLevel: found.level,
         },
       };
+    }
+    if (obs.agentSearchFailure) {
+      return tick(WAIT, obs.agentSearchFailure, "Finding an agent", {
+        kind: "blocked",
+        reason: obs.agentSearchFailure,
+      });
     }
     // Publish the criteria (once) so the flow's next read can run the search.
     return {
@@ -1621,6 +1628,7 @@ function makeFindAgent(kindWord: string, finderKind: string): MacroDecider {
       boardPatch: {
         findKind: finderKind,
         findLevel: countArg(step, "level") ?? 1,
+        findFallback: step.args["fallback"]?.kind === "toggle" && step.args["fallback"].enabled ? 1 : 0,
         findMaxJumps: countArg(step, "maxJumps"),
         findCorpID: (() => {
           const corp = step.args["corporation"];

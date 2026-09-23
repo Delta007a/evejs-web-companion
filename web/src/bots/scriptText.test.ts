@@ -77,6 +77,16 @@ test("every interrupt response has a non-empty sentence", () => {
   }
 });
 
+test("delivery agent text displays preferred level and fallback policy", () => {
+  const enabled: MacroStep = {
+    id: "delivery", kind: "macro", macro: "find-distribution-agent",
+    args: { level: { kind: "count", value: 3 }, fallback: { kind: "toggle", enabled: true } },
+  };
+  assert.match(stepSentence(enabled), /preferred level 3, fallback to lower levels/i);
+  const old: MacroStep = { id: "old", kind: "macro", macro: "find-distribution-agent", args: {} };
+  assert.match(stepSentence(old), /preferred level 1, no lower-level fallback/i);
+});
+
 test("percentages read with their unit", () => {
   assert.match(conditionSentence({ kind: "shield-below", fraction: 0.3 }), /30%/);
   assert.match(conditionSentence({ kind: "ore-hold-at-least", fraction: 0.9 }), /90%/);

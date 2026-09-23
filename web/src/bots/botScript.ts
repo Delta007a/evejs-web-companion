@@ -272,6 +272,7 @@ export type Arg =
    * unset, the block uses the agent the find block published on the run's board. */
   | { readonly kind: "agent"; readonly ref: WorldRef }
   /** A bounded small integer: an agent LEVEL (1–5) or a max-jumps ceiling. */
+  | { readonly kind: "toggle"; readonly enabled: boolean }
   | { readonly kind: "count"; readonly value: number }
   /** A corporation filter for the agent finder; null id = any corporation. */
   | { readonly kind: "corp"; readonly id: number | null; readonly name: string | null }

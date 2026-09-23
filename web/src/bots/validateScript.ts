@@ -242,6 +242,13 @@ function validateStep(step: MacroStep, problems: ScriptProblem[]): void {
     }
   }
 
+  if (step.macro === "find-distribution-agent") {
+    const level = step.args["level"];
+    if (level?.kind === "count" && (!Number.isInteger(level.value) || level.value < 1 || level.value > 4)) {
+      problems.push(blocking(step.id, "Distribution missions are available at levels 1 to 4."));
+    }
+  }
+
   // The move block: moving a thing onto itself is a no-op the player did not mean.
   const fromArg = step.args["from"];
   const toArg = step.args["to"];

@@ -88,13 +88,27 @@ test("find: first tick publishes the search criteria to the board", () => {
 test("find: a match from the finder lands the agent on the board and finishes", () => {
   const t = find(
     step("find-distribution-agent"),
-    obs({ foundAgent: { agentID: AGENT, stationID: AGENT_STATION, name: "Aursa", stationName: "Home" } }),
+    obs({ foundAgent: { agentID: AGENT, stationID: AGENT_STATION, name: "Aursa", stationName: "Home", level: 2 } }),
     {},
     NB,
   );
   assert.equal(t.outcome.kind, "done");
   assert.equal(t.boardPatch?.["agentID"], AGENT);
   assert.equal(t.boardPatch?.["agentStationID"], AGENT_STATION);
+  assert.equal(t.boardPatch?.["agentLevel"], 2);
+});
+
+test("find: old/default delivery runs remain level 1 without fallback", () => {
+  const t = find(step("find-distribution-agent"), obs(), {}, NB);
+  assert.equal(t.boardPatch?.["findLevel"], 1);
+  assert.equal(t.boardPatch?.["findFallback"], 0);
+});
+
+test("find: a completed eligibility search blocks with its clear reason", () => {
+  const reason = "No eligible level 3 distribution agent is available.";
+  const t = find(step("find-distribution-agent"), obs({ agentSearchFailure: reason }), {}, NB);
+  assert.equal(t.outcome.kind, "blocked");
+  assert.equal(t.why, reason);
 });
 
 test("request: no agent anywhere -> blocked with a plain fix", () => {
