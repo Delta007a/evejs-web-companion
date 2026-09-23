@@ -1,3 +1,4 @@
+import { haulingLeg } from "../nav/corporateHauling.ts";
 // C2 — draft validation for the editor. Distinct from the codec: the codec
 // REFUSES an untrusted file whole; this LISTS a live draft's fixable problems,
 // one plain sentence per place, so the editor can show "3 things to fix" under
@@ -50,6 +51,10 @@ function advisory(path: string, sentence: string): ScriptProblem {
 
 /** Plain words for each argument, for "This step needs …". */
 const ARG_LABEL: Readonly<Record<string, string>> = {
+  pickupStation: "a pickup station", deliveryStation: "a delivery station",
+  pickupCorpDivision: "a pickup division", deliveryCorpDivision: "a delivery division",
+  stationA: "station A", stationB: "station B",
+  pickupDivisionA: "a pickup division at A", deliveryDivisionB: "a delivery division at B",
   belt: "a belt to work",
   station: "a station to go to",
   equipment: "mining equipment to run",
@@ -246,6 +251,17 @@ function validateStep(step: MacroStep, problems: ScriptProblem[]): void {
     const level = step.args["level"];
     if (level?.kind === "count" && (!Number.isInteger(level.value) || level.value < 1 || level.value > 4)) {
       problems.push(blocking(step.id, "Distribution missions are available at levels 1 to 4."));
+    }
+  }
+
+  if (step.macro === "haul-all" || step.macro === "route-hauler") {
+    const returning = step.args["returnCargo"];
+    if (!haulingLeg(step) || (returning?.kind === "toggle" && returning.enabled && !haulingLeg(step, true))) {
+      problems.push(blocking(step.id, "Choose different, fully specified corporation hangar locations for each route leg."));
+    }
+    const bay = step.args["transportBay"];
+    if (bay && (bay.kind !== "place" || !["cargo", "ore-hold"].includes(bay.place))) {
+      problems.push(blocking(step.id, "A hauling hold restriction must be cargo or ore hold; omit it for automatic routing."));
     }
   }
 

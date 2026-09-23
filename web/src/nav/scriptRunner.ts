@@ -108,6 +108,7 @@ export const MAX_READ_FAILURES = 5;
  */
 function freesHoldSpace(action: ScriptAction): boolean {
   return action.kind === "unloadOre"
+    || (action.kind === "haulTransfer" && action.to.kind === "corp")
     || action.kind === "unloadHolds"
     || action.kind === "unloadMissionCargo"
     || action.kind === "moveItems"

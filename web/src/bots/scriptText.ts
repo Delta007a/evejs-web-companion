@@ -105,6 +105,8 @@ export function macroName(macro: MacroID): string {
       // one the player typed, or the scanner's ore sites — so the palette
       // name can no longer promise just a belt (see `beltPhrase` above).
       return "Mine at a belt or an ore site";
+    case "haul-all": return "Haul selected corporation cargo";
+    case "route-hauler": return "Run a corporation cargo route";
     case "deliver-ore":
       return "Haul the ore home";
     case "defend-with-drones":
@@ -582,6 +584,8 @@ function macroPhrase(step: MacroStep): string {
       const where = belt !== undefined && belt.kind === "belt" ? beltPhrase(belt.belt) : "a belt you pick";
       return `Fly to ${where}`;
     }
+    case "haul-all": return "Haul selected corporation cargo";
+    case "route-hauler": return "Run a corporation cargo route";
     case "deliver-ore": {
       const station = step.args["station"];
       const where =

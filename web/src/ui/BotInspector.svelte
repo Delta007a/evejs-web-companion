@@ -693,7 +693,7 @@
   {@const bounds = argBounds(step.macro, arg)}
   {#if arg.widget === "corp-division-select"}
     {@const chosenDivision = corpDivisionValue(step, arg.key)}
-    {@const stationArg = argOf(step, "station")}
+    {@const stationArg = argOf(step, ({ pickupCorpDivision: "pickupStation", deliveryCorpDivision: "deliveryStation", pickupDivisionA: "stationA", deliveryDivisionA: "stationA", pickupDivisionB: "stationB", deliveryDivisionB: "stationB" } as Record<string, string>)[arg.key] ?? "station")}
     <div class="inspector-field">
       <span class="inspector-label">
         {arg.label}{#if !arg.required}<span class="inspector-optional"> - optional</span>{/if}
@@ -998,7 +998,7 @@
         </select>
       {:else if arg.widget === "place-select"}
         <select id={fieldId} value={placeValue(step, arg.key)} onchange={(e) => onArg(arg.key, { kind: "place", place: e.currentTarget.value as never })}>
-          {#each PLACE_OPTIONS as place (place.value)}<option value={place.value}>{place.label}</option>{/each}
+          {#each PLACE_OPTIONS.filter(p => arg.key !== "transportBay" || p.value === "cargo" || p.value === "ore-hold") as place (place.value)}<option value={place.value}>{place.label}</option>{/each}
         </select>
       {:else if arg.widget === "character-picker"}
         <select id={fieldId} value={characterValue(step, arg.key)} onchange={(e) => setCharacter(arg.key, e.currentTarget.value)}>

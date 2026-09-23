@@ -92,6 +92,9 @@ export const MACRO_RUN_POLICY: Readonly<Record<MacroID, MacroRunPolicy>> = Objec
   "travel-to-belt": SAFE,
   "mine-at-belt": SAFE,
   "deliver-ore": policy(["inventory"]),
+  // Manifests are run-owned; a restart requires manual cargo reconciliation.
+  "haul-all": policy(["inventory"], false),
+  "route-hauler": policy(["inventory"], false),
   "defend-with-drones": policy(["combat"]),
   "find-distribution-agent": SAFE,
   "request-mission": policy(["mission"]),

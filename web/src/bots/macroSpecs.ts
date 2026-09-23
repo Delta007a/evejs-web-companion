@@ -55,6 +55,30 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
     ],
     untilRequired: true,
   },
+  "haul-all": {
+    args: [
+      { key: "pickupStation", kind: "station", required: true },
+      { key: "pickupCorpDivision", kind: "corpDivision", required: true },
+      { key: "deliveryStation", kind: "station", required: true },
+      { key: "deliveryCorpDivision", kind: "corpDivision", required: true },
+      { key: "item", kind: "itemType", required: false },
+      { key: "transportBay", kind: "place", required: false },
+    ], untilRequired: false,
+  },
+  "route-hauler": {
+    args: [
+      { key: "stationA", kind: "station", required: true },
+      { key: "stationB", kind: "station", required: true },
+      { key: "pickupDivisionA", kind: "corpDivision", required: true },
+      { key: "deliveryDivisionB", kind: "corpDivision", required: true },
+      { key: "itemsAToB", kind: "itemList", required: false },
+      { key: "returnCargo", kind: "toggle", required: false },
+      { key: "pickupDivisionB", kind: "corpDivision", required: false },
+      { key: "deliveryDivisionA", kind: "corpDivision", required: false },
+      { key: "itemsBToA", kind: "itemList", required: false },
+      { key: "transportBay", kind: "place", required: false },
+    ], untilRequired: false,
+  },
   "deliver-ore": {
     args: [
       { key: "station", kind: "station", required: true },

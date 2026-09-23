@@ -150,6 +150,8 @@ export function describeAction(action: ScriptAction): string {
       return `drones ${action.droneIDs.join(",")} onto ${action.targetID}`;
     case "recallDrones":
       return `recall drones ${action.droneIDs.join(",")}`;
+    case "haulTransfer":
+      return `transfer ${action.quantity} units of route cargo`;
     case "unloadOre":
       return action.division === undefined
         ? `unload ore ${action.itemIDs.join(",")}`

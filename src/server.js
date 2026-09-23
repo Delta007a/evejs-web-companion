@@ -2631,7 +2631,20 @@ app.post("/api/bridge/inventory/transfer", requireAuth, async (req, res, next) =
     return;
   }
   try {
-    await readHeldFlight(held, req.webSessionID);
+    const flightRead = await readHeldFlight(held, req.webSessionID);
+    const contract = body.haulContract;
+    if (contract !== undefined && (
+      !contract || !Number.isSafeInteger(contract.stationID) || contract.stationID <= 0 ||
+      !Number.isSafeInteger(contract.typeID) || contract.typeID <= 0 ||
+      !Number.isSafeInteger(contract.sourceQuantity) || contract.sourceQuantity <= 0 ||
+      itemIDs.length !== 1 || !hasQty ||
+      flightRead.flight?.docked !== true || Number(flightRead.flight.stationID) !== contract.stationID ||
+      !((body.from?.kind === "corp" && ["cargo", "shipBay"].includes(body.to?.kind)) ||
+        (body.to?.kind === "corp" && ["cargo", "shipBay"].includes(body.from?.kind)))
+    )) {
+      res.status(409).json({ ok: false, error: "HAUL_CONTRACT_MISMATCH", message: "The ship is not at the route's expected station or the hauling contract is invalid." });
+      return;
+    }
     const from = await resolvePlace(held, req.webSessionID, body.from);
     const to = await resolvePlace(held, req.webSessionID, body.to);
 
@@ -2640,6 +2653,13 @@ app.post("/api/bridge/inventory/transfer", requireAuth, async (req, res, next) =
     // the before-quantity a split is judged against.
     const sourceRowsBefore = await listPlace(held, req.webSessionID, from);
     const sourceByID = new Map(sourceRowsBefore.map((row) => [row.itemID, row]));
+    if (contract !== undefined) {
+      const source = sourceByID.get(itemIDs[0]);
+      if (!source || source.typeID !== contract.typeID || source.quantity !== contract.sourceQuantity || qty > source.quantity) {
+        res.status(409).json({ ok: false, error: "HAUL_SOURCE_CHANGED", message: "Route cargo changed before transfer; refresh and reconcile it." });
+        return;
+      }
+    }
     const missing = itemIDs.filter((itemID) => !sourceByID.has(itemID));
     if (missing.length === itemIDs.length) {
       res.status(409).json({
@@ -2976,6 +2996,7 @@ app.get("/api/bridge/inventory/corp", requireAuth, async (req, res, next) => {
     res.json({
       ok: true,
       available: true,
+      stationID: held.stationID,
       divisions: ordinals.map((division, index) => {
         const settled = settledLists[index];
         return {
@@ -2984,6 +3005,7 @@ app.get("/api/bridge/inventory/corp", requireAuth, async (req, res, next) => {
           // when a corporation never renamed it. A flag number is never shown.
           name: divisionNames[division] || null,
           list: settled.status === "fulfilled" ? settled.value.result : null,
+          volumes: settled.status === "fulfilled" ? readTypeVolumes(settled.value.result) : {},
           error:
             settled.status === "rejected"
               ? String((settled.reason && settled.reason.code) || "READ_FAILED")

@@ -637,6 +637,7 @@
   // only, from localStorage; no token, no live read.
   let knownPilots = $state<readonly { characterID: number; characterName: string }[]>([]);
   onMount(() => {
+    if ($flight.status?.docked) void flow.loadCorpHangar().catch(() => {});
     knownPilots = loadKnownCharacters().map((k) => ({ characterID: k.characterID, characterName: k.characterName }));
     void flow
       .listSavedFittings()
@@ -679,7 +680,7 @@
   // dozen entries and would silently miss the thirteenth.
   const knownItems = $derived.by<readonly { typeID: number; groupID: number | null; name: string }[]>(() => {
     const seen = new Map<number, { groupID: number | null; name: string }>();
-    for (const row of [...$inventory.hangar.rows, ...$inventory.cargo.rows]) {
+    for (const row of [...$inventory.hangar.rows, ...$inventory.cargo.rows, ...$inventory.corp.divisions.flatMap(d => d.rows)]) {
       if (row.typeID > 0 && !seen.has(row.typeID)) {
         const label = $names.resolved[nameKey("type", row.typeID)] ?? null;
         if (label !== null && label.length > 0) {

@@ -939,7 +939,7 @@ test("GET corp reads the office, the division NAMES, and every division's conten
   for (const division of payload.divisions) {
     assert.deepEqual(
       Object.keys(division).sort(),
-      ["division", "error", "list", "name"],
+      ["division", "error", "list", "name", "volumes"],
       "a division descriptor exposes an ordinal and a name — never a flag",
     );
     assert.ok(division.division >= 1 && division.division <= 7);
@@ -1065,4 +1065,39 @@ test("a division the character cannot query reads EMPTY without blanking the oth
   assert.equal(payload.divisions[0].list.items.length, 0, "the role-gated division is empty");
   assert.equal(payload.divisions[0].error, null, "an empty read is not an error");
   assert.equal(payload.divisions[1].list.items.length, 1, "and the rest still show");
+});
+
+for (const [name, contract, expected] of [
+  ["station mismatch", { stationID: STATION_ID + 1, typeID: 34, sourceQuantity: 900 }, "HAUL_CONTRACT_MISMATCH"],
+  ["changed quantity", { stationID: STATION_ID, typeID: 34, sourceQuantity: 901 }, "HAUL_SOURCE_CHANGED"],
+  ["changed type", { stationID: STATION_ID, typeID: 35, sourceQuantity: 900 }, "HAUL_SOURCE_CHANGED"],
+]) {
+  test(`private hauling ${name} refuses before any inventory write`, async () => {
+    const gateway = fakeGateway({ items: fixtureItems() });
+    const { baseUrl } = await startTestServer({ gateway });
+    await selectOnServer(baseUrl);
+    const { response, payload } = await apiRequest(baseUrl, "/api/bridge/inventory/transfer", {
+      method: "POST", body: { itemIDs: [400], qty: 10, from: { kind: "corp", division: 1 }, to: { kind: "cargo" }, haulContract: contract },
+    });
+    assert.equal(response.status, 409);
+    assert.equal(payload.error, expected);
+    assert.equal(gateway.calls.boundCall.some(c => c.method === "Add" || c.method === "MultiAdd"), false);
+    assert.equal(gateway.world.get(400).quantity, 900);
+  });
+}
+
+test("private hauling uses the current corporation transfer binding and explicit split", async () => {
+  const gateway = fakeGateway({ items: fixtureItems() });
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const { response, payload } = await apiRequest(baseUrl, "/api/bridge/inventory/transfer", {
+    method: "POST", body: { itemIDs: [400], qty: 10, from: { kind: "corp", division: 1 }, to: { kind: "cargo" },
+      haulContract: { stationID: STATION_ID, typeID: 34, sourceQuantity: 900 } },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(payload.applied, true);
+  assert.equal(gateway.world.get(400).quantity, 890);
+  const corp = await apiRequest(baseUrl, "/api/bridge/inventory/corp");
+  assert.equal(corp.payload.stationID, STATION_ID);
+  assert.equal(corp.payload.divisions[0].volumes[34], 0.01);
 });

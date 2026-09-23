@@ -1,3 +1,4 @@
+import { createCorporateHauler } from "./corporateHauling.ts";
 // B1 — the macro adapters. Each block is an independent "task": it decides ONE
 // action per tick and confirms by re-reading next tick, composing the SAME
 // proven calls the mining/mission bots fire (undock, warp, orbit, lock,
@@ -6101,6 +6102,8 @@ export const SCRIPT_MACROS: CompleteMacroRegistry = {
   wait: waitBlock,
   "unload-cargo": unloadCargo,
   "load-cargo": loadCargo,
+  "haul-all": createCorporateHauler(rideAutopilotTo),
+  "route-hauler": createCorporateHauler(rideAutopilotTo),
   "salvage-wrecks": salvageWrecks,
   "loot-wrecks": lootWrecks,
   "loot-containers": lootContainers,

@@ -575,6 +575,7 @@ export async function transferItems(
   to: InventoryPlace,
   qty: number | null = null,
   options: ApiOptions = {},
+  haulContract?: { stationID: number; typeID: number; sourceQuantity: number },
 ): Promise<TransferResult> {
   const body: Record<string, JsonValue> = {
     itemIDs: [...itemIDs],
@@ -584,6 +585,7 @@ export async function transferItems(
   if (qty !== null) {
     body.qty = qty;
   }
+  if (haulContract) body.haulContract = haulContract;
   const data = await postJson("/api/bridge/inventory/transfer", body, options);
   return {
     applied: data.applied === true,
@@ -711,6 +713,7 @@ export async function getShipBays(
 
 /** One corporation hangar division as the BFF reports it (rows still raw). */
 export interface RawCorpDivision {
+  readonly volumes?: Readonly<Record<string, number>>;
   readonly division: number;
   readonly name: string | null;
   readonly list: JsonValue;
@@ -718,6 +721,7 @@ export interface RawCorpDivision {
 }
 
 export interface RawCorpHangar {
+  readonly stationID?: number | null;
   readonly available: boolean;
   readonly reason: string | null;
   readonly divisions: readonly RawCorpDivision[];
@@ -733,11 +737,13 @@ export async function loadCorpHangar(options: ApiOptions = {}): Promise<RawCorpH
   const data = await getJson("/api/bridge/inventory/corp", options);
   const divisions = Array.isArray(data.divisions) ? data.divisions : [];
   return {
+    stationID: asNumberOrNull(data.stationID),
     available: data.available === true,
     reason: typeof data.reason === "string" ? data.reason : null,
     divisions: divisions.map((entry) => {
       const row = (entry ?? {}) as Record<string, JsonValue>;
       return {
+        volumes: row.volumes as Record<string, number> | undefined,
         division: Number(row.division) || 0,
         name: typeof row.name === "string" && row.name !== "" ? row.name : null,
         list: row.list ?? null,

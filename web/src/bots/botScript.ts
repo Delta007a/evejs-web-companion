@@ -806,6 +806,8 @@ export type MacroID =
   | "travel-to-system"
   | "travel-to-belt"
   | "mine-at-belt"
+  | "haul-all"
+  | "route-hauler"
   | "deliver-ore"
   | "defend-with-drones"
   | "find-distribution-agent"
@@ -911,6 +913,8 @@ export const MACRO_IDS: readonly MacroID[] = Object.freeze<MacroID[]>([
   "travel-to-system",
   "travel-to-belt",
   "mine-at-belt",
+  "haul-all",
+  "route-hauler",
   "deliver-ore",
   "defend-with-drones",
   "find-distribution-agent",

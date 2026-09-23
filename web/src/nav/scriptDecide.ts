@@ -62,6 +62,7 @@ import {
 // ─── The one action a tick emits ─────────────────────────────────────────────
 
 export type ScriptAction =
+  | { readonly kind: "haulTransfer"; readonly itemID: number; readonly quantity: number; readonly from: import("../store/types.ts").InventoryPlace; readonly to: import("../store/types.ts").InventoryPlace; readonly stationID: number; readonly typeID: number; readonly sourceQuantity: number }
   | { readonly kind: "wait" }
   | { readonly kind: "undock" }
   | { readonly kind: "dock"; readonly stationID: number }

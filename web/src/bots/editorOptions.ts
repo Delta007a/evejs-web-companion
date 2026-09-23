@@ -148,6 +148,21 @@ export const ARG_KIND_LABEL: Readonly<Record<Arg["kind"], string>> = {
  * someone gives it a sharper name.
  */
 const ARG_KEY_LABEL: Readonly<Record<string, string>> = {
+  pickupStation: "Pickup station",
+  deliveryStation: "Delivery station",
+  pickupCorpDivision: "Pickup division",
+  deliveryCorpDivision: "Delivery division",
+  stationA: "Station A",
+  stationB: "Station B",
+  pickupDivisionA: "Pickup division at A",
+  deliveryDivisionB: "Delivery division at B",
+  pickupDivisionB: "Pickup division at B",
+  deliveryDivisionA: "Delivery division at A",
+  itemsAToB: "Cargo from A to B (empty means all)",
+  itemsBToA: "Cargo from B to A (empty means all)",
+  returnCargo: "Carry return cargo",
+  transportBay: "Restrict destination hold (unset uses automatic routing)",
+
   exceptBays: "Bays to leave alone",
   keepItems: "Items to keep aboard",
   items: "What to load",

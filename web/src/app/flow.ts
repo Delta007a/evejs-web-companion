@@ -2255,6 +2255,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       });
       return;
     }
+    try {
+      await resolveNamesNow(reads.divisions.flatMap(d => decodeInventoryRows(d.list).map(r => ({ kind: "type" as const, id: r.typeID }))));
+    } catch (error) {
+      if (isSessionLost(error)) throw error;
+      // Names enrich the picker; a naming failure must not hide inventory.
+    }
     store.apply({
       type: "inventory/corp-loaded",
       available: reads.available,
@@ -8539,12 +8545,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     "fly-to-mission-site",
   ]);
   const CONVO_MACROS = new Set(["request-mission", "accept-mission", "turn-in-mission"]);
-  const CARGO_MACROS = new Set(["accept-mission", "load-mission-cargo", "turn-in-mission", "unload-cargo", "refine-ore", "refit-ship", "move-items", "repair-ship", "sell-item", "jettison-cargo", "load-cargo"]);
+  const CARGO_MACROS = new Set(["accept-mission", "load-mission-cargo", "turn-in-mission", "unload-cargo", "refine-ore", "refit-ship", "move-items", "repair-ship", "sell-item", "jettison-cargo", "load-cargo", "haul-all", "route-hauler"]);
   // Blocks that need the ACTIVE HULL'S BAY LIST, contents included. Kept apart
   // from CARGO_MACROS because the two reads have very different prices: the
   // inventory panel is one call, `/bays` is one capacity call per candidate
   // flag plus a listing. Only a block that actually empties the ship earns it.
-  const BAY_MACROS = new Set(["unload-cargo", "load-cargo"]);
+  const BAY_MACROS = new Set(["unload-cargo", "load-cargo", "haul-all", "route-hauler"]);
   // Blocks that WORK A ROCK, and so are worth running the mining surveyor for.
   // `travel-to-belt` and `compress-ore` are deliberately not here: neither one
   // reads a rock, and a scan they cannot use is a round trip nobody asked for.
@@ -9342,6 +9348,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         let cargo: ScriptObservation["cargo"] = null;
         let stationHangar: ScriptObservation["stationHangar"] = null;
         let shipBays: ScriptObservation["shipBays"] = null;
+        let haulDivisions: ScriptObservation["haulDivisions"] = null;
         let typeNames: ScriptObservation["typeNames"] = null;
         let foundAgent: ScriptObservation["foundAgent"] = null;
         let agentSearchFailure: string | null = null;
@@ -9793,6 +9800,15 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
               shipBays = null;
             }
           }
+          if (macro === "haul-all" || macro === "route-hauler") {
+            try {
+              const corp = await api.loadCorpHangar(callOptions);
+              if (corp.available && corp.stationID === status.stationID) {
+                haulDivisions = Object.fromEntries(corp.divisions.map(d => [d.division,
+                  d.error !== null || d.list === null ? null : decodeInventoryRows(d.list, d.volumes)]));
+              }
+            } catch (error) { if (isSessionLost(error)) throw error; }
+          }
           // Type NAMES, for a block matching items by name pattern — and only
           // for one. Every other block asks the game's own classification, which
           // already rides in on the row; paying for a name lookup on their ticks
@@ -9805,6 +9821,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // in the hangar (bridge/keepAboard.ts).
           if (hint.needsTypeNames === true) {
             const typeIDs = new Set<number>();
+            for (const row of Object.values(haulDivisions ?? {}).flatMap(rows => rows ?? [])) typeIDs.add(row.typeID);
             for (const row of stationHangar ?? []) {
               typeIDs.add(row.typeID);
             }
@@ -9950,6 +9967,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           cargo,
           shipBays,
           stationHangar,
+          haulDivisions,
           typeNames,
           travel,
           foundAgent,
@@ -10268,6 +10286,16 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
               throw lastError;
             }
             return;
+          }
+          case "haulTransfer": {
+            // Always an explicit corp/ship transfer. The generic ore fallback is
+            // deliberately not involved in this private destination contract.
+            const result = await api.transferItems([action.itemID], action.from, action.to, action.quantity, callOptions,
+              { stationID: action.stationID, typeID: action.typeID, sourceQuantity: action.sourceQuantity });
+            if (!result.applied || result.declined.length > 0 || result.notFound.length > 0) {
+              throw new Error("The route transfer was not confirmed; cargo must be reconciled.");
+            }
+            return; // The macro verifies exact quantities on BOTH sides next tick.
           }
           case "loadHolds": {
             // The unload above, run the other way: one transfer per DESTINATION,

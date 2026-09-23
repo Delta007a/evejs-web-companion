@@ -140,6 +140,7 @@ export function pickAdvertisedFleet(
 }
 
 export interface ScriptObservation {
+  readonly haulDivisions?: Readonly<Record<number, readonly import("../store/types.ts").InventoryItemRow[] | null>> | null;
   readonly miningDrones?: MiningDroneState | null;
   /** Transient contention, never a refusal or evidence that a can is empty. */
   readonly claimedContainerIDs?: readonly number[];
