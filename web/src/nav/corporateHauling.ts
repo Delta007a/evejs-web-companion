@@ -24,10 +24,13 @@ const station = (s: MacroStep, key: string) => { const a = s.args[key]; return a
 const division = (s: MacroStep, key: string) => { const a = s.args[key]; return a?.kind === "corpDivision" ? a.division : null; };
 const validID = (n: number | null): n is number => n !== null && Number.isSafeInteger(n) && n > 0;
 const validDivision = (n: number | null): n is number => validID(n) && n <= 7;
-function rules(s: MacroStep, key: string): readonly KeepRule[] {
+function rules(s: MacroStep, key: string): readonly KeepRule[] | null {
   const a = s.args[key];
-  if (a?.kind === "itemType" && a.typeID !== null) return [{ match: "type", typeID: a.typeID }];
-  return a?.kind === "itemList" ? a.items : [];
+  // An omitted filter intentionally means all eligible items. A present but
+  // unresolved pick must never be widened to that same empty rule list.
+  if (a === undefined) return [];
+  if (a.kind === "itemType") return validID(a.typeID) ? [{ match: "type", typeID: a.typeID }] : null;
+  return a.kind === "itemList" ? a.items : null;
 }
 export function haulingLeg(step: MacroStep, reverse = false): Leg | null {
   const all = step.macro === "haul-all";
@@ -35,9 +38,10 @@ export function haulingLeg(step: MacroStep, reverse = false): Leg | null {
   const destination = station(step, all ? "deliveryStation" : reverse ? "stationA" : "stationB");
   const pickup = division(step, all ? "pickupCorpDivision" : reverse ? "pickupDivisionB" : "pickupDivisionA");
   const delivery = division(step, all ? "deliveryCorpDivision" : reverse ? "deliveryDivisionA" : "deliveryDivisionB");
+  const filter = rules(step, all ? "item" : reverse ? "itemsBToA" : "itemsAToB");
   if (!validID(source) || !validID(destination) || !validDivision(pickup) || !validDivision(delivery) ||
-      (source === destination && pickup === delivery)) return null;
-  return { source, destination, pickup, delivery, rules: rules(step, all ? "item" : reverse ? "itemsBToA" : "itemsAToB") };
+      (source === destination && pickup === delivery) || filter === null) return null;
+  return { source, destination, pickup, delivery, rules: filter };
 }
 function rowsAt(o: ScriptObservation, p: Place): readonly InventoryItemRow[] | null {
   if (p.kind === "corp") return o.haulDivisions?.[p.division] ?? null;
@@ -76,7 +80,7 @@ export function createCorporateHauler(ride: (o: ScriptObservation, stationID: nu
     const back = step.args["returnCargo"];
     const bidirectional = step.macro === "route-hauler" && back?.kind === "toggle" && back.enabled;
     const leg = haulingLeg(step, state.reverse);
-    if (!leg || (bidirectional && !haulingLeg(step, true))) return fail("Pick valid corporation divisions at both ends of the route.");
+    if (!leg || (bidirectional && !haulingLeg(step, true))) return fail("Pick valid corporation divisions and resolve any item filter before hauling.");
     const bayArg = step.args["transportBay"];
     if (bayArg && (bayArg.kind !== "place" || !["cargo", "ore-hold"].includes(bayArg.place))) return fail("Choose cargo, ore hold, or leave the hold choice unset for automatic routing.");
     const at = state.delivering ? leg.destination : leg.source;

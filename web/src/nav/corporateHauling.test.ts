@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { SCRIPT_MACROS } from "./scriptMacros.ts";
+import { haulingLeg } from "./corporateHauling.ts";
+import { decodeScriptValue } from "../bots/scriptCodec.ts";
 import type { MacroMemory } from "./scriptDecide.ts";
 import type { MacroStep } from "../bots/botScript.ts";
 import type { ScriptObservation } from "./scriptConditions.ts";
@@ -65,6 +67,30 @@ test("filters use upstream item rules and never select unrelated inventory", () 
   const step: MacroStep={...route,args:{...route.args,itemsAToB:{kind:"itemList",items:[{match:"type",typeID:35,name:"wanted"}]}}};
   const t=driver(step)(obs(1,{1:[row(10,20),row(11,5,35)]},[row(77,3,35)]));
   assert.equal(t.action.kind === "haulTransfer" && t.action.itemID,11);
+});
+
+test("saved haul-all distinguishes omitted, selected and explicitly unresolved item filters", () => {
+  const atPickup = obs(1, { 1: [row(10, 20), row(11, 5, 35)] });
+  const omitted = driver(all)(atPickup);
+  assert.equal(omitted.action.kind === "haulTransfer" && omitted.action.itemID, 10);
+  assert.deepEqual(haulingLeg(all)?.rules, [], "only an omitted filter means all eligible items");
+
+  const selected: MacroStep = { ...all, args: { ...all.args, item: { kind: "itemType", typeID: 35, name: "Selected" } } };
+  const filtered = driver(selected)(atPickup);
+  assert.equal(filtered.action.kind === "haulTransfer" && filtered.action.itemID, 11);
+  assert.deepEqual(haulingLeg(selected)?.rules, [{ match: "type", typeID: 35 }]);
+
+  const saved = decodeScriptValue({ format: "evejs-bot-script", version: 1, name: "Saved haul", notes: "",
+    home: station(1).ref, interrupts: [], program: [{ ...all, args: { ...all.args,
+      item: { kind: "itemType", typeID: null, name: null } } }] });
+  assert.equal(saved.ok, true, "the saved-script codec accepts an unbound picker");
+  if (!saved.ok) return;
+  const unresolved = saved.doc.program[0];
+  assert.ok(unresolved?.kind === "macro");
+  assert.equal(haulingLeg(unresolved), null, "an explicit unresolved filter is never an empty match-all list");
+  const blocked = driver(unresolved)(atPickup);
+  assert.equal(blocked.outcome.kind, "blocked");
+  assert.equal(blocked.action.kind, "wait");
 });
 test("full preferred specialised bay never spills into generic cargo", () => {
   const ore={...row(10,20,1230),categoryID:25,groupID:462};
