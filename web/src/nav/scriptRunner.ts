@@ -205,7 +205,7 @@ export interface ScriptRunnerController {
   start(script: BotScript): void;
   pause(): void;
   resume(): void;
-  stop(): void;
+  stop(): Promise<void>;
   tick(): Promise<void>;
   run(): Promise<void>;
   snapshot(): ScriptRunnerSnapshot;
@@ -276,6 +276,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
    */
   let loggedEnd = false;
   let tickBusy = false;
+  let activeTick: Promise<void> | null = null;
   let lease: { owner: string; system: number; itemID: number } | null = null;
   // Keep even an unacknowledged request: it may have acquired at the BFF before
   // its response was lost, and stop must release that owner's claims too.
@@ -364,6 +365,9 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
   async function tick(): Promise<void> {
     if (tickBusy) return;
     tickBusy = true;
+    let finishTick!: () => void;
+    const completion = new Promise<void>((resolve) => { finishTick = resolve; });
+    activeTick = completion;
     const owner = claimOwner();
     try {
       await tickOnce();
@@ -374,6 +378,8 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         await releaseClaims(owner);
       }
       tickBusy = false;
+      if (activeTick === completion) activeTick = null;
+      finishTick();
     }
   }
 
@@ -833,10 +839,14 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         emit({ ...last, status: "running" });
       }
     },
-    stop(): void {
+    stop(): Promise<void> {
+      const claimedIssue = attemptedClaimOwner !== null ? activeTick : null;
       runToken += 1;
       status = "stopped";
       emit({ ...last, status: "stopped" });
+      // Only a claimed container tick can hold the server session open. Other
+      // bots retain their prompt finalization even if an unrelated call waits.
+      return claimedIssue ?? Promise.resolve();
     },
     tick,
     run,

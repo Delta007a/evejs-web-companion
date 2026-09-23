@@ -47,6 +47,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { pathToFileURL } = require("url");
+const { CONTAINER_LEASE_MS } = require("./lootMemory");
 
 // An unguessable per-run claim capability. The public botID is deliberately NOT
 // accepted by the select guard: account-scoped bot listings expose bot IDs, so
@@ -184,6 +185,8 @@ function createBotHost(options) {
   const now = typeof options.now === "function" ? options.now : () => Date.now();
   const setDeadlineTimeout = options.setDeadlineTimeout || ((callback, delayMs) => setTimeout(callback, delayMs));
   const clearDeadlineTimeout = options.clearDeadlineTimeout || ((timer) => clearTimeout(timer));
+  const stopSettleGraceMs = Number.isFinite(options.stopSettleGraceMs) && options.stopSettleGraceMs >= 0
+    ? options.stopSettleGraceMs : 5_000;
   const nowISO = () => new Date(now()).toISOString();
   // Durability: where the running roster is mirrored (absent = memory-only),
   // and the reads resume() needs to rebuild a bot from its persisted row.
@@ -454,8 +457,10 @@ function createBotHost(options) {
   // and an explicit stop can both land here.
   async function finalize(record) {
     if (record.finalized) {
-      return;
+      return record.finalizePromise;
     }
+    let finished;
+    record.finalizePromise = new Promise((resolve) => { finished = resolve; });
     record.finalized = true;
     record.endedAt = nowISO();
     if (record.deadlineTimer) {
@@ -468,11 +473,8 @@ function createBotHost(options) {
       } catch {}
       record.unsubscribe = null;
     }
-    if (claims.get(record.characterID) === record.botID) {
-      claims.delete(record.characterID);
-    }
-    // The roster on disk must stop naming this bot BEFORE the slow logout —
-    // a crash mid-teardown must not resurrect a bot that already ended.
+    // The roster must stop naming this bot now, while the character claim stays
+    // reserved until its last issued loot action (or bounded lease) is over.
     persistRoster();
     // Now that this record is finalized, keep the ended-run ring within
     // MAX_ENDED_RUNS. Purely an in-memory trim — it never touches the disk
@@ -481,25 +483,52 @@ function createBotHost(options) {
     const flow = record.flow;
     record.flow = null;
     record.store = null;
-    if (flow) {
-      try {
-        // Two different stop switches on the SAME flow object — stopCustomBot
-        // only reaches the scriptRunner, stopFleetCompanion only the companion
-        // controller. Calling the wrong one for this record's kind is a no-op
-        // that leaves the actual loop running, unstoppable, past this point.
-        if (record.kind === "companion") {
-          flow.stopFleetCompanion();
-        } else {
-          flow.stopCustomBot();
-        }
-      } catch {}
-      try {
-        // Releases the bridge session — the character goes offline and the
-        // hull is immediately available to a tab.
-        await flow.logout();
-      } catch (error) {
-        logError(error);
+    let cleaned = false;
+    async function cleanup() {
+      if (cleaned) return;
+      cleaned = true;
+      if (claims.get(record.characterID) === record.botID) claims.delete(record.characterID);
+      if (flow) {
+        try { await flow.logout(); } catch (error) { logError(error); }
       }
+    }
+    function timeout(ms) {
+      let timer;
+      const promise = new Promise((resolve) => {
+        timer = setTimeout(resolve, ms);
+        timer.unref?.();
+      });
+      return { promise, cancel: () => clearTimeout(timer) };
+    }
+    try {
+      let stopped;
+      if (flow) {
+        try {
+          // The custom runner returns its active tick's completion. A companion
+          // has no container claim and retains its ordinary prompt teardown.
+          stopped = record.kind === "companion" ? flow.stopFleetCompanion() : flow.stopCustomBot();
+        } catch (error) { logError(error); }
+      }
+      if (record.kind === "script" && stopped && typeof stopped.then === "function") {
+        const settled = Promise.resolve(stopped).then(() => true, (error) => { logError(error); return true; });
+        const grace = timeout(stopSettleGraceMs);
+        const done = await Promise.race([settled, grace.promise.then(() => false)]);
+        grace.cancel();
+        if (!done) {
+          // An unobservable action must keep both the session and claim until
+          // it settles. If it never does, the BFF's five-minute lease bounds
+          // exclusivity; only then may session cleanup release the claim.
+          const lease = timeout(CONTAINER_LEASE_MS + 1_000);
+          void Promise.race([settled, lease.promise]).then(async () => {
+            lease.cancel();
+            await cleanup();
+          }).catch(logError);
+          return;
+        }
+      }
+      await cleanup();
+    } finally {
+      finished();
     }
   }
 
@@ -802,21 +831,9 @@ function createBotHost(options) {
       return { ok: false, code: "BOT_NOT_FOUND" };
     }
     if (!record.finalized) {
-      if (record.flow) {
-        try {
-          // Same two-switch distinction as finalize() below — stop the
-          // controller this record actually holds, not the script runner by
-          // default.
-          if (record.kind === "companion") {
-            record.flow.stopFleetCompanion();
-          } else {
-            record.flow.stopCustomBot();
-          }
-        } catch {}
-      }
       record.status = "stopped";
-      await finalize(record);
     }
+    await finalize(record);
     return { ok: true, bot: publicBot(record) };
   }
 

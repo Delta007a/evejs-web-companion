@@ -489,6 +489,26 @@ test("repeated read failures give up with a plain reason", async () => {
   assert.match(progress.at(-1)?.pauseReason ?? "", /several tries/i);
 });
 
+test("stopping an unrelated in-flight world call does not wait for container coordination", async () => {
+  let began!: () => void;
+  let complete!: () => void;
+  const issuing = new Promise<void>(resolve => { began = resolve; });
+  const pendingIssue = new Promise<void>(resolve => { complete = resolve; });
+  const runner = createScriptRunner({
+    observe: async () => calm({ holdEmpty: false }),
+    issue: async () => { began(); await pendingIssue; },
+    sleep: async () => {}, onProgress: () => {}, isSessionLost: () => false,
+    refusalReason: error => String(error), registry, travelHome: home,
+  });
+  runner.start(script([macroStep("delivery", "deliver-ore")]));
+  const tick = runner.tick();
+  await issuing;
+  await runner.stop();
+  assert.equal(runner.getStatus(), "stopped");
+  complete();
+  await tick;
+});
+
 test("blind mining-drone runs cannot use the emergency travel shortcut", async () => {
   for (const initiallyReadable of [false, true]) {
     let reads = 0;

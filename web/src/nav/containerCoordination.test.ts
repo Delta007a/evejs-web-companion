@@ -201,11 +201,39 @@ test("a stop during loot retains the claim until the outstanding action finishes
   });
   const pending = one.runner.tick();
   await issuing;
-  one.runner.stop();
+  const drained = one.runner.stop();
+  let stopDrained = false;
+  void drained.then(() => { stopDrained = true; });
   assert.equal(s.authority.claimContainer("two", "run", SYSTEM, A), false);
+  assert.equal(stopDrained, false, "server-facing stop still observes the in-flight issue");
   complete();
-  await pending;
+  await Promise.all([pending, drained]);
+  assert.equal(stopDrained, true);
   assert.equal(s.authority.claimContainer("two", "run", SYSTEM, A), true);
+});
+
+test("an abandoned issue retains exclusivity only through its bounded lease", async () => {
+  const s = setup();
+  let started!: () => void;
+  let complete!: () => void;
+  const issuing = new Promise<void>(resolve => { started = resolve; });
+  const waiting = new Promise<void>(resolve => { complete = resolve; });
+  const one = s.hauler("one", observation([A], 100), { issue: async () => { started(); await waiting; } });
+  const pending = one.runner.tick();
+  await issuing;
+  const drained = one.runner.stop();
+  assert.equal(s.authority.claimContainer("two", "run", SYSTEM, A), false);
+  s.advance(CONTAINER_LEASE_MS);
+  assert.equal(s.authority.claimContainer("two", "run", SYSTEM, A), true);
+  complete();
+  await Promise.all([pending, drained]);
+});
+
+test("stop with no active issue has an immediately settled completion", async () => {
+  const s = setup();
+  const one = s.hauler("one");
+  await one.runner.stop();
+  assert.equal(one.runner.getStatus(), "stopped");
 });
 
 test("an until transition releases the old target before leaving the loot step", async () => {

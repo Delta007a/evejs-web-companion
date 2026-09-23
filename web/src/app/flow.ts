@@ -1128,7 +1128,7 @@ export interface AppFlow {
   /** Resume a paused script from where it stopped. */
   resumeCustomBot(): void;
   /** Stop it (it stops and never calls the bridge again). */
-  stopCustomBot(): void;
+  stopCustomBot(): Promise<void>;
   /** The character's saved-fitting library (for the Bot Builder's fitting picker). */
   listSavedFittings(): Promise<readonly import("../bridge/fittings.ts").SavedFitting[]>;
   /** The character's saved bookmarks (for the Bot Builder's saved-spot picker). */
@@ -7184,11 +7184,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     autopilot?.abort();
   }
 
-  function stopCustomController(): void {
+  function stopCustomController(): Promise<void> {
     customBotGeneration += 1;
-    scriptRunner?.stop();
+    const settled = scriptRunner?.stop() ?? Promise.resolve();
     // Custom travel blocks use the same shared autopilot as missions.
     autopilot?.abort();
+    return settled;
   }
 
   function stopCompanionController(): void {
@@ -11715,7 +11716,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     },
 
     stopCustomBot() {
-      stopCustomController();
+      return stopCustomController();
     },
 
     panicRecallAndDock,

@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { createBotHost, MAX_ENDED_RUNS } = require("./botHost");
+const { createLootMemory, CONTAINER_LEASE_MS } = require("./lootMemory");
 
 // The host is exercised with a FAKE browser stack (the loadStack seam): the
 // real one is the shipping web/src modules, proven live; these tests pin the
@@ -363,6 +364,58 @@ test("stop releases the claim and the character", async () => {
   assert.equal(log.some((row) => row[0] === "logout"), true);
   // The record remains listable for inspection.
   assert.equal(host.list(7).length, 1);
+});
+
+test("server stop keeps container exclusivity through settlement or bounded lease expiry", async () => {
+  let finishIssue;
+  let stopStarted;
+  const pendingIssue = new Promise((resolve) => { finishIssue = resolve; });
+  const stoppingStarted = new Promise((resolve) => { stopStarted = resolve; });
+  const log = [];
+  const authority = createLootMemory();
+  const stackFactory = makeFakeStack(log);
+  const host = makeHost({ log, loadStack: async () => {
+    const stack = await stackFactory();
+    return { ...stack, createAppFlow(store, options) {
+      const flow = stack.createAppFlow(store, options);
+      return { ...flow,
+        stopCustomBot() { stopStarted(); return pendingIssue; },
+        async logout() { authority.releaseClaims("bot-session"); log.push(["logout"]); },
+      };
+    } };
+  } });
+  const started = await host.start(START);
+  assert.equal(authority.claimContainer("bot-session", "run", 30000144, 80001), true);
+  const stopping = host.stop(started.bot.botID, 7);
+  await stoppingStarted;
+  assert.equal(authority.claimContainer("other-session", "run", 30000144, 80001), false);
+  assert.notEqual(host.claimedBy(140000001), null);
+  assert.equal(log.some(([name]) => name === "logout"), false);
+  finishIssue();
+  await stopping;
+  assert.equal(log.some(([name]) => name === "logout"), true);
+  assert.equal(host.claimedBy(140000001), null);
+  assert.equal(authority.claimContainer("other-session", "run", 30000144, 80001), true);
+
+  let clock = 0;
+  const abandonedAuthority = createLootMemory({ now: () => clock });
+  const never = new Promise(() => {});
+  const abandonedStackFactory = makeFakeStack([]);
+  const abandonedHost = makeHost({ stopSettleGraceMs: 0, loadStack: async () => {
+    const stack = await abandonedStackFactory();
+    return { ...stack, createAppFlow(store, options) {
+      const flow = stack.createAppFlow(store, options);
+      return { ...flow, stopCustomBot() { return never; },
+        async logout() { abandonedAuthority.releaseClaims("bot-session"); } };
+    } };
+  } });
+  const abandonedStarted = await abandonedHost.start(START);
+  assert.equal(abandonedAuthority.claimContainer("bot-session", "run", 30000144, 80001), true);
+  await abandonedHost.stop(abandonedStarted.bot.botID, 7); // bounded grace, without awaiting the abandoned issue
+  assert.notEqual(abandonedHost.claimedBy(140000001), null);
+  assert.equal(abandonedAuthority.claimContainer("other-session", "run", 30000144, 80001), false);
+  clock += CONTAINER_LEASE_MS;
+  assert.equal(abandonedAuthority.claimContainer("other-session", "run", 30000144, 80001), true);
 });
 
 test("activeCharacterIDs names exactly the characters bots are flying", async () => {
