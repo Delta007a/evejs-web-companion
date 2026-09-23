@@ -593,7 +593,10 @@ export function decideMiningAction(observation: MiningObservation, plan: MiningP
   if (!observation.status.inSpace || observation.status.docked ||
       isWarping(observation.status.shipMode) || isWarping(observation.measurement?.shipMode ?? null)) return base;
   const leaving = base.action.kind === "warp" || base.action.kind === "dock" ||
-    base.rung === "health-floor" || base.rung === "heading-home" || base.rung === "hold-full" || base.rung === "no-yield-haul";
+    base.rung === "health-floor" || base.rung === "heading-home" || base.rung === "hold-full" || base.rung === "no-yield-haul" ||
+    // An empty pinned belt is a normal end of this run, not a reason to leave
+    // its mining flight on grid. Keep emergency pause/escape decisions separate.
+    base.step === "belt-empty";
   if (!leaving && (base.rung === "pirate-unknown-health" || !plan.useDrones)) return base;
   // Without the grid, absence of a hostile is not established.
   if (observation.snapshot === null && !leaving) {

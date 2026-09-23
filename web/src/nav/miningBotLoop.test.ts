@@ -1622,6 +1622,40 @@ test("mining drones supplement both modules and use their selected asteroid", ()
   assert.deepEqual(flight.action, { kind: "mineDrones", droneIDs: [81], targetID: ROCK_A });
 });
 
+test("an empty pinned belt recalls a mining flight before pausing, but an empty flight pauses immediately", async () => {
+  let rocksRemain = true;
+  let out = [activeDrone(81, 101, ROCK_A, "mining")];
+  const calls: string[] = [];
+  const { deps } = makeDeps({
+    status: () => status(),
+    snapshot: () => snapshot([
+      entity({ itemID: BELT, kind: "celestial", name: "Asteroid Belt 1", position: { x: 500, y: 0, z: 0 } }),
+      ...(rocksRemain ? [rock(ROCK_A, 8000, 5000, "Veldspar")] : []),
+    ], { activeModuleIDs: [LASER_A, LASER_B] }),
+    locked: () => rocksRemain ? [ROCK_A] : [],
+  });
+  const bot = createMiningBot({ ...deps,
+    getDroneState: async () => minerState(out),
+    recallDrones: async () => { calls.push("recall"); },
+  });
+  bot.start(PLAN);
+  assert.equal((await bot.tick()).kind, "wait");
+  rocksRemain = false;
+  assert.equal((await bot.tick()).kind, "wait", "the missing target is released first");
+  assert.equal((await bot.tick()).kind, "recallDrones");
+  assert.equal(bot.snapshot().status, "running");
+  assert.equal((await bot.tick()).kind, "wait", "a recall order is not a return confirmation");
+  assert.equal(bot.snapshot().status, "running");
+  out = [];
+  assert.equal((await bot.tick()).kind, "pause");
+  assert.equal(bot.snapshot().status, "paused");
+  assert.deepEqual(calls, ["recall"]);
+
+  const empty = createMiningBot({ ...deps, getDroneState: async () => minerState() });
+  empty.start(PLAN);
+  assert.equal((await empty.tick()).kind, "pause", "no controlled flight needs no recall wait");
+});
+
 test("asteroid disappearance drops the existing target before drone retasking", () => {
   const obs = droneWorld();
   const missing = { ...obs, snapshot: snapshot([rock(ROCK_B, 4000, 2000, "Scordite")]), drones: minerState([activeDrone(81, 101, ROCK_A, "mining")]) };

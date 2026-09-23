@@ -1510,3 +1510,59 @@ test("a short wait restarted through a forever-loop wrap gets a fresh step-tick 
     mem = result.memory;
   }
 });
+
+test("mining step, counted-loop, and depleted-site endings wait for the controlled flight", () => {
+  const baseStep = macroStep("m", "mine-at-belt");
+  const miningStep = { ...baseStep, args: { ...baseStep.args, drones: { kind: "toggle" as const, enabled: true } } };
+  const siteStep = { ...miningStep, args: { ...miningStep.args, belt: { kind: "belt" as const, belt: { mode: "site" as const } } } };
+  const grid = { ship: { position: { x: 0, y: 0, z: 0 } }, entities: [] } as unknown as ScriptObservation["snapshot"];
+  const drone = { itemID: 81, typeID: 101, targetID: 501, activity: "mining", controlled: true,
+    name: null, shieldRatio: 1, armorRatio: 1, hullRatio: 1 };
+  const droneState = (out: readonly typeof drone[]) => ({ bay: [], out, maxActive: 1, roles: { 101: "mining" as const } });
+  const cases = [
+    { name: "step", program: [miningStep], outcome: { kind: "done" as const }, terminal: "done" },
+    { name: "counted loop", program: [{ id: "L", kind: "loop" as const, repeat: { kind: "times" as const, count: 1 }, body: [miningStep] }], outcome: { kind: "done" as const }, terminal: "done" },
+    { name: "site depleted", program: [siteStep], outcome: { kind: "blocked" as const, reason: "Every ore site is mined out." }, terminal: "warp" },
+  ];
+  for (const c of cases) {
+    const s = script(c.program);
+    const reg = { "mine-at-belt": () => tick({ kind: "wait" }, c.outcome) };
+    const read = (out: readonly typeof drone[]) => obs({ snapshot: grid, miningDrones: droneState(out) });
+    const recalled = decideScriptAction(s, read([drone]), initialMemory(s), reg, home);
+    assert.equal(recalled.action.kind, "recallDrones", c.name);
+    assert.equal(recalled.status, "running", c.name);
+    const waiting = decideScriptAction(s, read([drone]), recalled.memory, reg, home);
+    assert.equal(waiting.action.kind, "wait", c.name);
+    assert.equal(waiting.status, "running", c.name);
+    const returned = decideScriptAction(s, read([]), waiting.memory, reg, home);
+    assert.equal(c.terminal === "done" ? returned.status : returned.action.kind, c.terminal, c.name);
+    assert.equal(decideScriptAction(s, read([]), initialMemory(s), reg, home).action.kind,
+      c.terminal === "done" ? "wait" : "warp", `${c.name} without drones does not wait for recall`);
+  }
+});
+
+test("normal script completion recalls a controlled combat flight even without mining-flight memory", () => {
+  const s = script([macroStep("h", "deliver-ore")]);
+  const grid = { ship: { position: { x: 0, y: 0, z: 0 } }, entities: [] } as unknown as ScriptObservation["snapshot"];
+  const combat = { itemID: 82, typeID: 100, targetID: null, activity: "idle", controlled: true,
+    name: null, shieldRatio: 1, armorRatio: 1, hullRatio: 1 };
+  const read = (out: readonly typeof combat[]) => obs({ snapshot: grid, dronesOut: out.length > 0, miningDrones: {
+    bay: [], out, maxActive: 1, roles: { 100: "combat" },
+  } });
+  const unknown = decideScriptAction(s, obs({ snapshot: grid, dronesOut: true, miningDrones: {
+    bay: [], out: null, maxActive: 1, roles: { 100: "combat" },
+  } }), initialMemory(s), registry, home);
+  assert.equal(unknown.status, "running", "a visible flight cannot be declared returned from a failed control read");
+  const recalled = decideScriptAction(s, read([combat]), unknown.memory, registry, home);
+  assert.equal(recalled.action.kind, "recallDrones");
+  assert.equal(recalled.status, "running");
+  const waiting = decideScriptAction(s, read([combat]), recalled.memory, registry, home);
+  assert.equal(waiting.status, "running");
+  const unreadable = decideScriptAction(s, obs({ snapshot: grid, miningDrones: {
+    bay: [], out: null, maxActive: 1, roles: { 100: "combat" },
+  } }), waiting.memory, registry, home);
+  assert.equal(unreadable.status, "running", "a failed drone read cannot confirm return");
+  const returned = decideScriptAction(s, read([]), unreadable.memory, registry, home);
+  assert.equal(returned.status, "done");
+  assert.equal(decideScriptAction(s, read([]), initialMemory(s), registry, home).status, "done");
+});
