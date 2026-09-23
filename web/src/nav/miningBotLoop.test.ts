@@ -48,6 +48,7 @@ import {
   type MiningPlan,
 } from "./miningBotLoop.ts";
 import { MAX_SILENT_DOCK_ATTEMPTS, MAX_WARP_ATTEMPTS, measureSpace } from "./autopilotLoop.ts";
+import { decodeDroneBay } from "../bridge/drones.ts";
 import type {
   FlightStatus,
   MiningHold,
@@ -1681,7 +1682,13 @@ test("controller dispatches the complete confirmed mining/combat/mining cycle", 
   hostile = true;
   assert.equal((await bot.tick()).kind, "recallDrones");
   assert.equal((await bot.tick()).kind, "wait");
-  drones = minerState();
+  // Returned miners are singleton inventory rows (quantity -1), unlike the
+  // initial stacked bay fixture. The same decoded bay must support both swaps.
+  const returnedBay = [...(decodeDroneBay([
+    { itemID: 8001, typeID: 101, quantity: -1, singleton: true },
+    { itemID: 8002, typeID: 100, quantity: -1, singleton: true },
+  ]) ?? [])];
+  drones = { ...minerState(), bay: returnedBay };
   assert.equal((await bot.tick()).kind, "launch");
   drones = minerState([activeDrone(82, 100)]);
   assert.equal((await bot.tick()).kind, "engageDrones");
@@ -1690,7 +1697,7 @@ test("controller dispatches the complete confirmed mining/combat/mining cycle", 
   await bot.tick(); await bot.tick();
   assert.equal((await bot.tick()).kind, "recallDrones");
   assert.equal((await bot.tick()).kind, "wait");
-  drones = minerState();
+  drones = { ...minerState(), bay: returnedBay };
   assert.equal((await bot.tick()).kind, "launch");
   drones = minerState([activeDrone(83)]);
   assert.equal((await bot.tick()).kind, "mineDrones");

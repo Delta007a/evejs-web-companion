@@ -68,6 +68,16 @@ test("bay stacks decode itemID / typeID / quantity, long-wrapped or plain", () =
   ]);
 });
 
+test("a returned singleton drone is one launchable drone, but an unmarked negative quantity is not", () => {
+  assert.deepEqual(decodeDroneBay([
+    { itemID: 7800003, typeID: 101, quantity: -1, singleton: true },
+    { itemID: 7800004, typeID: 101, quantity: -1 },
+  ] as unknown as JsonValue), [
+    { itemID: 7800003, typeID: 101, quantity: 1 },
+    { itemID: 7800004, typeID: 101, quantity: 0 },
+  ]);
+});
+
 // --- What is in space -------------------------------------------------------
 
 test("an absent in-space list decodes to null — NEVER 'no drones out'", () => {

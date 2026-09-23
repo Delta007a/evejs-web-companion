@@ -17883,6 +17883,9 @@ app.get("/api/bridge/drones", requireAuth, async (req, res, next) => {
             itemID: row.itemID,
             typeID: row.typeID,
             quantity: row.quantity,
+            // Returned drones can be assembled singleton rows (quantity -1).
+            // Carry the inventory authority so the client can count one unit.
+            singleton: row.singleton,
           }))
         : null;
     res.json({

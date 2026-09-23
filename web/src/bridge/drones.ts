@@ -110,7 +110,10 @@ export function decodeDroneBay(raw: JsonValue | undefined): readonly DroneBaySta
     seen.add(itemID);
     const quantity = typeof row.quantity === "boolean" ? null : numberOrNull(row.quantity);
     // An unreadable or malformed quantity must not manufacture a single drone.
-    stacks.push({ itemID, typeID, quantity: quantity !== null && Number.isSafeInteger(quantity) && quantity > 0 ? quantity : 0 });
+    // A returned assembled drone uses the inventory singleton marker (-1).
+    // Only the explicit singleton bit authorizes translating it to one unit.
+    const units = quantity === -1 && row.singleton === true ? 1 : quantity;
+    stacks.push({ itemID, typeID, quantity: units !== null && Number.isSafeInteger(units) && units > 0 ? units : 0 });
   }
   return stacks;
 }
