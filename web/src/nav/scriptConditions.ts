@@ -139,6 +139,8 @@ export function pickAdvertisedFleet(
 }
 
 export interface ScriptObservation {
+  /** Transient contention, never a refusal or evidence that a can is empty. */
+  readonly claimedContainerIDs?: readonly number[];
   readonly inSpace: boolean | null;
   readonly docked: boolean | null;
   readonly inWarp: boolean | null;

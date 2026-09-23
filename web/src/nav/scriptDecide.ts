@@ -607,6 +607,8 @@ export type MacroOutcome =
 export type ScriptBoard = Readonly<Record<string, number | string | null>>;
 
 export interface MacroTick {
+  /** Servicing intent, including approach waits; the runner must lease it. */
+  readonly containerTargetID?: number;
   readonly action: ScriptAction;
   readonly why: string;
   readonly phase: string;
@@ -965,6 +967,7 @@ export function activeStepNeedsTypeNames(script: BotScript, mem: ScriptMemory): 
 export type RunStatus = "running" | "paused" | "done";
 
 export interface ScriptTickResult {
+  readonly containerTargetID?: number;
   readonly action: ScriptAction;
   readonly why: string;
   readonly phase: string;
@@ -2160,6 +2163,7 @@ function runProgram(
 
     return {
       action: tick.action,
+      containerTargetID: tick.containerTargetID,
       why: tick.why,
       phase: tick.phase,
       stepPath: step.id,

@@ -161,6 +161,11 @@ export interface ScriptRunnerSnapshot {
  * deciders (B1). All injected so the loop itself touches no globals.
  */
 export interface ScriptRunnerDeps {
+  /** Shared BFF authority for browser and server runners. */
+  readonly containerClaims?: {
+    acquire(owner: string, system: number, itemID: number, renewOnly: boolean): Promise<boolean>;
+    release(owner: string): Promise<void>;
+  };
   observe(hint: ObserveHint): Promise<ScriptObservation>;
   /**
    * Perform one world call.
@@ -173,7 +178,7 @@ export interface ScriptRunnerDeps {
    * which is what every performer did before this existed and what nearly all
    * still do, means "exactly as asked".
    */
-  issue(action: ScriptAction): Promise<void | string | null>;
+  issue(action: ScriptAction, beforeContainerTransfer?: () => Promise<void>): Promise<void | string | null>;
   sleep(ms: number): Promise<void>;
   onProgress(snapshot: ScriptRunnerSnapshot): void;
   isSessionLost(error: unknown): boolean;
@@ -231,6 +236,7 @@ const IN_A_CAPSULE = "Your ship is gone and you are in a capsule, so the bot sto
 // than any refusal budget. Kept local rather than imported so the script
 // runner does not depend on the autopilot's module.
 const MAX_SESSION_CHANGE_WAITS = 12;
+class ContainerCoordinationUnavailable extends Error {}
 // A breath before the re-issue, matching the autopilot's SETTLE_TRANSPORT.
 const SETTLE_AFTER_SESSION_CHANGE = 2;
 
@@ -267,6 +273,23 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
    * that says a run ended twice is a log nobody can count runs in.
    */
   let loggedEnd = false;
+  let tickBusy = false;
+  let lease: { owner: string; system: number; itemID: number } | null = null;
+  // Keep even an unacknowledged request: it may have acquired at the BFF before
+  // its response was lost, and stop must release that owner's claims too.
+  let attemptedClaimOwner: string | null = null;
+  const claimOwner = (): string => `${runID}:${runToken}`;
+
+  async function releaseClaims(owner: string): Promise<void> {
+    if (lease?.owner === owner) lease = null;
+    if (attemptedClaimOwner === owner) attemptedClaimOwner = null;
+    // Failed cleanup retains exclusivity at the authority until bounded expiry.
+    try { await deps.containerClaims?.release(owner); } catch { /* expires */ }
+  }
+
+  function coordinationWait(): void {
+    emit({ ...last, status: "running", phase: "Looting", why: "Waiting for container coordination." });
+  }
 
   /**
    * ⚠ RULE 4: THE RECORDER NEVER BREAKS THE RUN. A sink that throws — a full
@@ -324,6 +347,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
   }
 
   function emit(next: ScriptRunnerSnapshot): void {
+    if (next.status !== "running" && !tickBusy && attemptedClaimOwner !== null) void releaseClaims(attemptedClaimOwner);
     last = next;
     recordProgress(next);
     deps.onProgress(next);
@@ -336,13 +360,48 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
   }
 
   async function tick(): Promise<void> {
+    if (tickBusy) return;
+    tickBusy = true;
+    const owner = claimOwner();
+    try {
+      await tickOnce();
+    } finally {
+      // A stop during acquire/issue must not free the target until that await
+      // finishes. The old generation can never release a resumed run's claim.
+      if ((owner !== claimOwner() || status !== "running") && attemptedClaimOwner === owner) {
+        await releaseClaims(owner);
+      }
+      tickBusy = false;
+    }
+  }
+
+  async function tickOnce(): Promise<void> {
     const token = runToken;
+    const owner = claimOwner();
     if (status !== "running" || script === null || memory === null) {
       return;
     }
 
     // Settle: let a just-issued action land before deciding again.
     if (settle > 0) {
+      if (lease !== null) {
+        try {
+          const held = await deps.containerClaims!.acquire(owner, lease.system, lease.itemID, true);
+          if (token !== runToken || status !== "running") return;
+          if (!held) {
+            lease = null;
+            settle = 0; // re-observe/re-select before any further action
+            coordinationWait();
+            return;
+          }
+        } catch (error) {
+          if (token === runToken && status === "running") {
+            if (deps.isSessionLost(error)) setError(SESSION_LOST);
+            else coordinationWait();
+          }
+          return;
+        }
+      }
       settle -= 1;
       emit({ ...last, status: "running", phase: SETTLING });
       return;
@@ -414,17 +473,51 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       // running, across four laps" is a fact about the world exactly like a
       // distance is. Handing it over here rather than as a fifth argument keeps
       // every macro reading one thing, and keeps `decideScriptAction` pure.
-      result = decideScriptAction(
-        script,
-        { ...obs, refusals: ledger.records() },
-        memory,
-        deps.registry,
-        deps.travelHome,
-      );
+      const excluded: number[] = [];
+      for (;;) {
+        result = decideScriptAction(
+          script,
+          { ...obs, refusals: ledger.records(), claimedContainerIDs: excluded },
+          memory,
+          deps.registry,
+          deps.travelHome,
+        );
+        const itemID = result.containerTargetID;
+        if (itemID === undefined) {
+          if (attemptedClaimOwner !== null) await releaseClaims(attemptedClaimOwner);
+          break;
+        }
+        const system = obs.snapshot?.solarSystemID;
+        if (!deps.containerClaims || !system) {
+          coordinationWait();
+          return;
+        }
+        let acquired: boolean;
+        try {
+          attemptedClaimOwner = owner;
+          acquired = await deps.containerClaims.acquire(owner, system, itemID, false);
+        } catch (error) {
+          if (token === runToken && status === "running") {
+            if (deps.isSessionLost(error)) setError(SESSION_LOST);
+            else coordinationWait();
+          }
+          return; // transport/ambiguous response is never a game refusal
+        }
+        if (token !== runToken || status !== "running") return;
+        if (acquired) {
+          lease = { owner, system, itemID };
+          break;
+        }
+        // Re-decide from the SAME memory: contention must not spend watchdog
+        // ticks, settle windows, refusal budgets or approach-stall counters.
+        if (excluded.includes(itemID)) throw new Error("Container exclusion ignored");
+        excluded.push(itemID);
+      }
     } catch (error) {
       stopOrHeadHome(`${DECIDE_FAILED} (${String(error)})`);
       return;
     }
+    if (token !== runToken || status !== "running") return;
     memory = result.memory;
 
     if (result.status === "paused") {
@@ -452,7 +545,23 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         stepPath: result.stepPath, interruptID: result.interruptID, phase: result.phase, why: result.why,
       });
       try {
-        const note = await deps.issue(result.action);
+        const beforeContainerTransfer = result.containerTargetID === undefined ? undefined : async () => {
+          if (token !== runToken || status !== "running" || lease?.owner !== owner) {
+            throw new ContainerCoordinationUnavailable();
+          }
+          try {
+            const held = await deps.containerClaims!.acquire(owner, lease.system, lease.itemID, true);
+            if (!held || token !== runToken || status !== "running") throw new ContainerCoordinationUnavailable();
+          } catch (error) {
+            if (token !== runToken || status !== "running") throw new ContainerCoordinationUnavailable();
+            if (deps.isSessionLost(error)) throw error;
+            throw new ContainerCoordinationUnavailable();
+          }
+        };
+        const note = await deps.issue(result.action, beforeContainerTransfer);
+        if (result.action.kind === "lootContainer" && lease?.owner === owner) {
+          await releaseClaims(owner);
+        }
         issuedSuccessfully = true;
         sessionChangeWaits = 0;
         record({
@@ -467,6 +576,10 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
           ledger.forgetRefused();
         }
       } catch (error) {
+        if (error instanceof ContainerCoordinationUnavailable) {
+          if (token === runToken && status === "running") coordinationWait();
+          return;
+        }
         if (deps.isSessionLost(error)) {
           setError(SESSION_LOST);
           return;
@@ -636,6 +749,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
    * anywhere would loop here forever, never pausing and never telling anyone.
    */
   function stopOrHeadHome(reason: string, result?: ReturnType<typeof decideScriptAction>): void {
+    if (attemptedClaimOwner !== null) void releaseClaims(attemptedClaimOwner);
     if (memory !== null && memory.latched === null) {
       memory = { ...memory, latched: { interruptID: null, reason } };
       emit({ ...last, status: "running", phase: "Heading home", why: reason, pauseReason: null });
@@ -680,6 +794,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
 
   return {
     start(next: BotScript): void {
+      if (!tickBusy && attemptedClaimOwner !== null) void releaseClaims(attemptedClaimOwner);
       runToken += 1;
       script = next;
       memory = initialMemory(next);

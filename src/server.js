@@ -18,7 +18,7 @@ const botHostModule = require("./botHost");
 const { createAccountCache } = require("./accountCache");
 const { createBeltMemory } = require("./beltMemory");
 const { createSquadBoard } = require("./squadBoard");
-const { createLootMemory } = require("./lootMemory");
+const { createLootMemory, CONTAINER_LEASE_MS } = require("./lootMemory");
 const { createBotLogStore } = require("./botLogStore");
 const {
   isBridgeWritePair,
@@ -546,6 +546,7 @@ app.post("/api/bridge/call", requireAuth, async (req, res, next) => {
 // and attached browsers are told the channel ended rather than being left on a
 // silent stream.
 function forgetBridgeSession(webSessionID) {
+  lootMemory.releaseClaims(webSessionID);
   const held = bridgeSessions.get(webSessionID);
   if (!held) {
     return false;
@@ -19966,6 +19967,45 @@ app.post("/api/bots/belt-memory", requireAuth, (req, res, next) => {
 // `DoDestinyUpdate`, the one notification the web gateway suppresses. A pilot
 // therefore learns a wreck is empty by flying to it. This route is how it only
 // has to happen once per wreck instead of once per wreck per pilot.
+// Same authority for browser and headless runners. These routes only mutate
+// local bookkeeping; they never call the gateway. Session loss also releases
+// every claim via forgetBridgeSession above.
+app.post("/api/bots/loot-memory/claim", requireAuth, (req, res, next) => {
+  try {
+    const { runID, system, itemID, renewOnly } = req.body || {};
+    if (typeof runID !== "string" || !runID.length || runID.length > 160
+      || !Number.isSafeInteger(system) || system <= 0
+      || !Number.isSafeInteger(itemID) || itemID <= 0
+      || (renewOnly !== undefined && typeof renewOnly !== "boolean")) {
+      res.status(400).json({ ok: false, error: "INVALID_CONTAINER_CLAIM" });
+      return;
+    }
+    const held = requireHeldBridgeSession(req, res);
+    if (!held) return;
+    if (held.solarSystemID !== system) {
+      res.status(409).json({ ok: false, error: "CONTAINER_SYSTEM_MISMATCH" });
+      return;
+    }
+    res.json({ ok: true, acquired: lootMemory.claimContainer(req.webSessionID, runID, system, itemID, renewOnly), leaseMs: CONTAINER_LEASE_MS });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/bots/loot-memory/release", requireAuth, (req, res, next) => {
+  try {
+    const { runID } = req.body || {};
+    if (typeof runID !== "string" || !runID.length || runID.length > 160) {
+      res.status(400).json({ ok: false, error: "INVALID_CONTAINER_CLAIM" });
+      return;
+    }
+    lootMemory.releaseClaims(req.webSessionID, runID);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/bots/loot-memory", requireAuth, (req, res, next) => {
   try {
     const system = Number(req.query.system) || 0;

@@ -47,6 +47,12 @@ const DEFAULT_TTL_MS = 2 * 60 * 60 * 1000;
 // a single wasted approach, which is exactly what the memory was saving.
 const DEFAULT_MAX_PER_SYSTEM = 4000;
 
+// A two-second runner renews on every decision AND settle tick. Five minutes
+// covers the client's 65s request deadline plus queues/reads between renewals;
+// multi-transfer actions also renew before each write. Approach
+// duration itself is unlimited while ticks continue. No timers or persistence.
+const CONTAINER_LEASE_MS = 300_000;
+
 function normalizeID(value) {
   const numeric = Number(value);
   return Number.isSafeInteger(numeric) && numeric > 0 ? numeric : 0;
@@ -69,6 +75,38 @@ function createLootMemory(options = {}) {
   // systemID -> Map<itemID, expiresAtMs>. Insertion order is the age order a
   // Map already keeps, which is what makes the cap above cost nothing.
   const systems = new Map();
+  const claims = new Map();
+
+  function pruneClaims() {
+    for (const [key, claim] of claims) {
+      if (claim.expiresAt <= now()) claims.delete(key);
+    }
+  }
+
+  function releaseClaims(sessionID, runID) {
+    for (const [key, claim] of claims) {
+      if (claim.sessionID === sessionID && (runID === undefined || claim.runID === runID)) {
+        claims.delete(key);
+      }
+    }
+  }
+
+  // Synchronous check-and-set in the BFF event loop: no read/await/write race.
+  // The session comes from authentication, the run distinguishes pause/restart
+  // generations. Item IDs identify actual objects, never names or type IDs.
+  function claimContainer(sessionID, runID, systemID, itemID, renewOnly = false) {
+    const system = normalizeID(systemID);
+    const item = normalizeID(itemID);
+    if (!sessionID || !runID || !system || !item) throw new Error("Invalid container claim");
+    pruneClaims();
+    const key = `${system}:${item}`;
+    const current = claims.get(key);
+    const owned = current?.sessionID === sessionID && current?.runID === runID;
+    if ((current && !owned) || (renewOnly && !owned)) return false;
+    releaseClaims(sessionID, runID); // one servicing target per run
+    claims.set(key, { sessionID, runID, expiresAt: now() + CONTAINER_LEASE_MS });
+    return true;
+  }
 
   function prune(itemMap) {
     const cutoff = now();
@@ -127,7 +165,7 @@ function createLootMemory(options = {}) {
     return [...itemMap.keys()];
   }
 
-  return { markEmptied, emptiedItemIDs };
+  return { markEmptied, emptiedItemIDs, claimContainer, releaseClaims };
 }
 
-module.exports = { createLootMemory };
+module.exports = { createLootMemory, CONTAINER_LEASE_MS };

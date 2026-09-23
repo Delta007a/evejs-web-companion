@@ -47,7 +47,9 @@ function makeFakeFetch(
     const method = (init && init.method) || "GET";
     const body = init && typeof init.body === "string" ? JSON.parse(init.body) : {};
     requests.push({ path, method, body });
-    const outcome = responder(path, method, body);
+    const outcome = path === "/api/bots/loot-memory/claim"
+      ? { status: 200, body: { ok: true, acquired: true, leaseMs: 300_000 } }
+      : responder(path, method, body);
     return {
       ok: outcome.status >= 200 && outcome.status < 300,
       status: outcome.status,
@@ -200,6 +202,14 @@ test("a custom bot's loot-containers step dispatches openContainer + transferIte
   const opened = requests.find((r) => r.path === `/api/bridge/inventory/container/${CONTAINER_ID}`);
   assert.ok(opened, "it read the container's contents");
   assert.equal(opened.method, "GET");
+
+  const claims = requests.filter((r) => r.path === "/api/bots/loot-memory/claim");
+  assert.equal(claims[0]?.body.itemID, CONTAINER_ID);
+  assert.equal(claims[0]?.body.system, SOLAR_SYSTEM_ID);
+  assert.equal(claims[0]?.body.renewOnly, false);
+  assert.equal(claims.filter((r) => r.body.renewOnly === true).length, 2, "renew before open and transfer");
+  assert.ok(requests.indexOf(claims[0]!) < requests.indexOf(opened));
+  assert.ok(requests.some((r) => r.path === "/api/bots/loot-memory/release"), "release after successful loot");
 
   const transfer = requests.find((r) => r.path === "/api/bridge/inventory/transfer");
   assert.ok(transfer, "it moved the loot into cargo");

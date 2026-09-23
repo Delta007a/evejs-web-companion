@@ -1848,6 +1848,28 @@ export async function rememberBeltDry(
   await postJson("/api/bots/belt-memory", { system, beltName, groupID }, options);
 }
 
+/** Atomic acquisition/renewal at the BFF's shared loot-memory authority. */
+export async function claimContainer(
+  runID: string, system: number, itemID: number, renewOnly: boolean,
+  options: ApiOptions = {},
+): Promise<boolean> {
+  const started = Date.now();
+  const data = await postJson("/api/bots/loot-memory/claim", { runID, system, itemID, renewOnly }, options);
+  // An old BFF, malformed response or transport failure is NOT ownership.
+  if (data.ok !== true || typeof data.acquired !== "boolean") throw new Error("Container claim unavailable");
+  // A suspended browser can receive a response after its lease expired. Keep
+  // at least half the server's lease for the next operation, without clock sync.
+  if (data.acquired && (typeof data.leaseMs !== "number" || !Number.isFinite(data.leaseMs)
+    || data.leaseMs <= 0 || Date.now() - started >= data.leaseMs / 2)) {
+    throw new Error("Container claim response expired");
+  }
+  return data.acquired;
+}
+
+export async function releaseContainerClaims(runID: string, options: ApiOptions = {}): Promise<void> {
+  await postJson("/api/bots/loot-memory/release", { runID }, options);
+}
+
 /**
  * Which wrecks and cans in `solarSystemID` somebody has already emptied, from
  * the BFF's shared loot memory (src/lootMemory.js). In-process, never

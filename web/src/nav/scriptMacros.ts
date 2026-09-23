@@ -2545,6 +2545,10 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
   const cans = containersOnGrid(snapshot).filter(
     (c) => !shouldSetAside(obs.refusals, step.id, "lootContainer", c.itemID, MAX_BLOCK_ATTEMPTS),
   );
+  const available = cans.filter((c) => !obs.claimedContainerIDs?.includes(c.itemID));
+  if (cans.length > 0 && available.length === 0) {
+    return tick(WAIT, "Other haulers are servicing these containers.", "Looting", ACTING, true, { ...mem, emptyChecks: 0 });
+  }
   if (cans.length === 0) {
     // A can that has not shown up in THIS tick's snapshot is not proof the
     // grid never had one — landing on a belt and checking for containers on
@@ -2564,10 +2568,14 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
   // eventual "done" once every can here really is emptied.
   const memClean: MacroMemory = { ...mem, emptyChecks: 0 };
   const measurement = measureSpace(snapshot);
-  const target = nearest(cans, measurement);
+  const target = nearest(available, measurement);
   if (target === null) {
     return tick(WAIT, "Nothing reachable to loot.", "Looting", ACTING, true, memClean);
   }
+  const servicing = (...args: Parameters<typeof tick>): MacroTick => ({
+    ...tick(...args),
+    ...(args[3].kind === "acting" ? { containerTargetID: target.itemID } : {}),
+  });
   const dist = measurement?.distances.get(target.itemID) ?? Number.POSITIVE_INFINITY;
   // ⚠ THE SERVER'S RANGE CHECK BEATS OUR MEASUREMENT. A bind that came back
   // "cannot reach" means the gateway's own scene/range test said no, whatever
@@ -2579,17 +2587,17 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
     if (!unreachable && num(memClean, "approaching") === target.itemID) {
       const stall = closeInStall(measurement?.shipMode ?? null, memClean);
       if (stall.step === "reorder") {
-        return tick({ kind: "approach", targetID: target.itemID }, STALL_REORDER_WHY, "Looting", ACTING, true, stall.mem);
+        return servicing({ kind: "approach", targetID: target.itemID }, STALL_REORDER_WHY, "Looting", ACTING, true, stall.mem);
       }
       if (stall.step === "unstick") {
-        return tick({ kind: "stopShip" }, STALL_UNSTICK_WHY, "Looting", ACTING, true, stall.mem);
+        return servicing({ kind: "stopShip" }, STALL_UNSTICK_WHY, "Looting", ACTING, true, stall.mem);
       }
       if (stall.step === "stuck") {
         return tick(WAIT, STALL_STUCK_WHY, "Looting", { kind: "blocked", reason: STALL_STUCK_REASON });
       }
-      return tick(WAIT, "Flying to the container.", "Looting", ACTING, true, stall.mem);
+      return servicing(WAIT, "Flying to the container.", "Looting", ACTING, true, stall.mem);
     }
-    return tick(
+    return servicing(
       { kind: "approach", targetID: target.itemID },
       unreachable ? "Too far to reach it, closing in." : "Heading for the container.",
       "Looting",
@@ -2600,7 +2608,7 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
   }
   // No `tries` counter here any more: the ledger counts, across laps, and
   // `shouldSetAside` above is what takes a hopeless can out of the list.
-  return tick(
+  return servicing(
     { kind: "lootContainer", containerID: target.itemID },
     "Taking what's inside.",
     "Looting",

@@ -8927,11 +8927,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     from: { readonly kind: "container"; readonly itemID: number },
     bays: readonly ShipBay[],
     freeFor: (bay: string | null) => number | null,
+    beforeTransfer?: () => Promise<void>,
   ): Promise<{ readonly planned: number; readonly moved: number }> {
     let moved = 0;
     let planned = 0;
     let lastError: unknown = null;
     for (const transfer of planLootTransfers(rows, bays, freeFor)) {
+      // Ownership/lifecycle failures must escape, never become a bay refusal.
+      await beforeTransfer?.();
       planned += 1;
       try {
         await api.transferItems(
@@ -8994,6 +8997,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     containerID: number,
     bays: readonly ShipBay[],
     shipID: number | null,
+    beforeTransfer?: () => Promise<void>,
   ): Promise<LootOutcome> {
     // Room is asked for BY NAME, and only for the freight bays this hull has —
     // a handful of capacity calls rather than the twenty-seven a full bay read
@@ -9004,6 +9008,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     const keys = bays
       .filter((entry) => entry.present === true && FREIGHT_BAYS.has(entry.key))
       .map((entry) => entry.key);
+    await beforeTransfer?.();
     const [contents, roomRead] = await Promise.all([
       api.openContainer(containerID, callOptions),
       shipID === null
@@ -9027,6 +9032,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       { kind: "container", itemID: containerID },
       bays,
       freeFor,
+      beforeTransfer,
     );
     if (outcome.moved >= rows.length) {
       // Every stack it had, this ship took: it is empty NOW, which is the same
@@ -9196,14 +9202,19 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
      * arithmetic and the per-bay transfers are one implementation, so a bot and
      * a player pressing "Take everything" cannot fill different holds.
      */
-    const lootFrom = async (containerID: number): Promise<void> => {
+    const lootFrom = async (containerID: number, beforeTransfer?: () => Promise<void>): Promise<void> => {
       await lootIntoShip(
         containerID,
         await activeShipBays(),
         capabilityCache.peek().shipID ?? store.inventory.get().activeShipID,
+        beforeTransfer,
       );
     };
     return {
+      containerClaims: {
+        acquire: (owner, system, itemID, renewOnly) => api.claimContainer(owner, system, itemID, renewOnly, callOptions),
+        release: (owner) => api.releaseContainerClaims(owner, callOptions),
+      },
       observe: async (hint) => {
         const [flightStep, spaceResult, targetsResult, holdsResult, dronesResult] = await Promise.all([
           api.getFlightStatus(callOptions),
@@ -10009,7 +10020,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           myCorporationID: store.station.get().online?.corporationID ?? null,
         };
       },
-      issue: async (action) => {
+      issue: async (action, beforeContainerTransfer) => {
         switch (action.kind) {
           case "wait":
             return;
@@ -10349,7 +10360,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           case "lootContainer": {
             // Same shape as lootWreck — the server applies no ownership check to
             // a container, so nothing here needs to either.
-            await lootFrom(action.containerID);
+            await lootFrom(action.containerID, beforeContainerTransfer);
             return;
           }
           case "placeBuyOrder":
