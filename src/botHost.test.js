@@ -439,7 +439,8 @@ test("manual Stop and deadline expiry share one pending drone recovery", async (
   assert.equal(h.log.filter(([name]) => name === "logout").length, 1);
 });
 
-test("all four duration presets arm the same graceful expiry path", async () => {
+test("all four duration presets arm the same graceful expiry path", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
   for (const minutes of [60, 240, 720, 1440]) {
     const h = await timedFlightHarness("none");
     await h.host.start({ ...START, grant: { ...START.grant, maxRuntimeMinutes: minutes } });

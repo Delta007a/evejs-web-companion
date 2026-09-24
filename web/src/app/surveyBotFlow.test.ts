@@ -132,7 +132,7 @@ function onlineStore(): ReturnType<typeof createClientStore> {
 
 function responder(path: string, body: Record<string, unknown>): { status: number; body: unknown } {
   if (path === "/api/bridge/flight/status") return { status: 200, body: flightBody(false) };
-  if (path === "/api/bridge/space/snapshot") return { status: 200, body: beltSpaceBody() };
+  if (path === "/api/bridge/space/snapshot" || path === "/api/bridge/script/observation") return { status: 200, body: beltSpaceBody() };
   if (path === "/api/bridge/fitting") return { status: 200, body: fittingBody() };
   if (path === "/api/names") return { status: 200, body: namesBody(body) };
   if (path === "/api/bridge/targets") return { status: 200, body: { ok: true, targetIDs: [], notifications: [] } };
@@ -164,6 +164,11 @@ test("a mine-at-belt block runs the surveyor, and what it saw reaches the rock r
   flow.stopCustomBot();
 
   const scans = requests.filter((request) => request.path === "/api/bridge/mining/scan");
+  assert.equal(requests.filter(r => r.path === "/api/bridge/script/observation").length, 1);
+  assert.equal(requests.filter(r => r.path === "/api/bridge/space/snapshot" || r.path === "/api/bridge/drones").length, 0,
+    "the real script observation no longer issues the old paired reads");
+  assert.deepEqual(store.get().space.snapshot?.ship?.activeModuleIDs, []);
+  assert.equal(store.get().space.snapshot?.ship?.mode, "STOP");
   assert.equal(scans.length, 1, "the block that works a rock pressed the surveyor once");
   assert.equal(scans[0]?.method, "GET", "a survey scan is a read, and needs no confirmation");
 
@@ -173,6 +178,8 @@ test("a mine-at-belt block runs the surveyor, and what it saw reaches the rock r
   // rock-choosing decision downstream actually reads.
   const rock = store.get().space.snapshot?.entities.find((row) => row.itemID === ROCK_ID);
   assert.equal(rock?.remainingQuantity, 4200);
+  assert.equal(rock?.position.x, 6000);
+  assert.equal(rock?.radius, 100);
 });
 
 test("a block that works no rock never pays for a scan", async () => {

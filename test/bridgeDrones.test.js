@@ -86,7 +86,8 @@ function fakeStore() {
 }
 
 function fakeStaticData() {
-  return { getStation() { return null; }, getTypeName(id) { return `Type ${id}`; } };
+  return { getStation() { return null; }, getTypeName(id) { return `Type ${id}`; },
+    getTypeDogmaAttribute(_id, _attr, fallback) { return fallback; } };
 }
 
 function packedRow(fields) {
@@ -308,6 +309,7 @@ async function startTestServer(options = {}) {
     eveGatewayClient: options.gateway || fakeGateway(),
     webAuth: fakeAuth(),
     staticData: fakeStaticData(),
+    bridgeSessionStore: options.sessions,
     errorLogger() {},
   });
   const server = app.listen(0, "127.0.0.1");
@@ -368,7 +370,7 @@ test("the drones read is the bay, the snapshot and ShipGetInfo — and no new ca
 
   // The bay, by ITEM and TYPE only.
   assert.equal(payload.bay.length, 2);
-  assert.deepEqual(Object.keys(payload.bay[0]).sort(), ["itemID", "quantity", "typeID"]);
+  assert.deepEqual(Object.keys(payload.bay[0]).sort(), ["itemID", "quantity", "singleton", "typeID"]);
   // R7d: the bay's flagID and the ship's locationID are on the decoded row and
   // NEITHER may leave the BFF.
   assert.equal(payload.bay[0].flagID, undefined, "the bay's flagID must not reach the browser");
@@ -748,4 +750,141 @@ test("⚠ there is NO assist, guard, unanchor or abandon route", async () => {
     });
     assert.notEqual(response.status, 200, `/api/bridge/drones/${route} must not exist`);
   }
+});
+
+// Observation consolidation: real BFF routes, counted at the gateway authority.
+test("script observation uses one snapshot for scene and drone projections, with fresh bay/limits", async () => {
+  const { gateway, baseUrl } = await inSpace();
+  await apiRequest(baseUrl, "/api/bridge/space/snapshot");
+  await apiRequest(baseUrl, "/api/bridge/drones");
+  assert.equal(gateway.calls.snapshot.length, 2, "old paired observation costs two reads");
+  gateway.calls.snapshot.length = 0;
+  const read = gateway.readSpaceSnapshot.bind(gateway);
+  const notification = { event: "OnDamageMessage", args: [1] };
+  gateway.readSpaceSnapshot = async (...args) => {
+    const outcome = await read(...args);
+    return { space: { ...outcome.space, sampledAtMs: gateway.calls.snapshot.length,
+      ship: { ...outcome.space.ship, mode: "STOP", activeModuleIDs: [77],
+        radius: 60, position: { x: 0, y: 0, z: 0 } } }, notifications: [notification] };
+  };
+  gateway.state.space.set(81, { ...gateway.droneRow(81), typeID: 10246,
+    droneActivity: "mining", targetEntityID: ROCK_ID, shieldRatio: 0.7 });
+  gateway.state.extraEntities = [
+    { itemID: ROCK_ID, kind: "asteroid", typeID: 1230, remainingQuantity: 50,
+      radius: 100, position: { x: 6000, y: 0, z: 0 } },
+    { itemID: 99, kind: "container", radius: 10, position: { x: 1500, y: 0, z: 0 } },
+  ];
+  const { getScriptObservation } = await import("../web/src/app/api.ts");
+  const options = { fetch: (url, init) => ORIGINAL_FETCH(baseUrl + url,
+    { ...init, headers: { ...init.headers, cookie: `evejs_web_poc=${COOKIE_TOKEN}` } }) };
+  const result = await getScriptObservation(options);
+  assert.equal(gateway.calls.snapshot.length, 1);
+  assert.equal(result.space.sampledAtMs, 1);
+  const raw = result.space.entities.find(d => d.itemID === 81);
+  assert.deepEqual(result.inSpace[0], { itemID: raw.itemID, typeID: raw.typeID, name: raw.name,
+    controlled: true, reconnectCandidate: false, activity: raw.droneActivity, targetID: raw.targetEntityID,
+    shieldRatio: raw.shieldRatio, armorRatio: raw.armorRatio, hullRatio: raw.hullRatio });
+  assert.deepEqual(result.space.ship.activeModuleIDs, [77]);
+  assert.equal(result.space.entities.find(e => e.itemID === ROCK_ID).remainingQuantity, 50);
+  assert.equal(result.space.entities.find(e => e.itemID === 99).position.x, 1500);
+  assert.equal(result.space.ship.mode, "STOP");
+  assert.deepEqual(result.notifications, [notification], "one drain, no duplication or reordering");
+  assert.equal(result.bay.length, 2);
+  assert.ok(result.shipInfo);
+  gateway.state.bay.clear();
+  gateway.state.hideShipAttributes = true;
+  const next = await getScriptObservation(options);
+  assert.equal(gateway.calls.snapshot.length, 2, "next observation must read afresh");
+  assert.equal(next.space.sampledAtMs, 2);
+  assert.deepEqual(next.bay, []);
+  assert.notDeepEqual(next.shipInfo, result.shipInfo, "limits are not cached with the scene");
+});
+
+test("combined observation preserves controlled, owned lost, other-hull and foreign distinctions", async () => {
+  const { gateway, baseUrl } = await inSpace();
+  gateway.state.extraEntities = [
+    gateway.droneRow(1),
+    { ...gateway.droneRow(2), controllerID: null },
+    { ...gateway.droneRow(3), controllerID: 123 },
+    { ...gateway.droneRow(4), ownerID: 123, controllerID: 123 },
+    { ...gateway.droneRow(5), ownerID: 123 },
+    { ...gateway.droneRow(6), controllerID: undefined },
+  ];
+  const { payload } = await apiRequest(baseUrl, "/api/bridge/script/observation");
+  assert.deepEqual(payload.inSpace.map(d => [d.itemID, d.controlled, d.reconnectCandidate]),
+    [[1, true, false], [2, false, true], [3, false, false], [5, true, false], [6, false, null]]);
+  const ordinary = await apiRequest(baseUrl, "/api/bridge/drones");
+  assert.deepEqual(payload.inSpace, ordinary.payload.inSpace);
+});
+
+test("combined observation distinguishes unreadable, empty and failed authority", async () => {
+  const { gateway, baseUrl } = await inSpace();
+  const read = gateway.readSpaceSnapshot.bind(gateway);
+  gateway.readSpaceSnapshot = async (...args) => {
+    const result = await read(...args);
+    return { ...result, space: { ...result.space, entities: null } };
+  };
+  assert.equal((await apiRequest(baseUrl, "/api/bridge/script/observation")).payload.inSpace, null);
+  gateway.readSpaceSnapshot = read;
+  assert.deepEqual((await apiRequest(baseUrl, "/api/bridge/script/observation")).payload.inSpace, []);
+  gateway.state.snapshotFails = true;
+  const failed = await apiRequest(baseUrl, "/api/bridge/script/observation");
+  assert.equal(failed.payload.ok, false);
+  assert.notEqual(failed.response.status, 200);
+});
+
+test("observation cannot supply post-mutation verification or subsequent recovery reads", async () => {
+  const { gateway, baseUrl } = await inSpace();
+  await apiRequest(baseUrl, "/api/bridge/script/observation");
+  const before = gateway.calls.snapshot.length;
+  const launch = await apiRequest(baseUrl, "/api/bridge/drones/launch", {
+    method: "POST", body: { drones: [{ itemID: BAY_DRONE_ID }] },
+  });
+  assert.equal(gateway.calls.snapshot.length - before, 2, "launch retains both authority reads");
+  assert.equal(launch.payload.launched.length, 1);
+  await apiRequest(baseUrl, "/api/bridge/drones/recall", {
+    method: "POST", body: { droneIDs: [BAY_DRONE_ID] },
+  });
+  assert.equal(gateway.calls.snapshot.length - before, 3, "recall has its own post-command read");
+  for (let i = 0; i < 3; i++) await apiRequest(baseUrl, "/api/bridge/drones");
+  assert.equal(gateway.calls.snapshot.length - before, 6, "lifecycle confirmation endpoint never reuses observation");
+});
+
+for (const change of ["session", "character", "ship", "scene"]) {
+  test(`pending observation is rejected across a ${change} transition`, async () => {
+    const sessions = new Map();
+    const gateway = fakeGateway();
+    const { baseUrl } = await startTestServer({ gateway, sessions });
+    await apiRequest(baseUrl, "/api/bridge/select", { method: "POST", body: { characterID: CHARACTER_ID } });
+    const entered = Promise.withResolvers();
+    const release = Promise.withResolvers();
+    const read = gateway.readSpaceSnapshot.bind(gateway);
+    gateway.readSpaceSnapshot = async (...args) => {
+      const value = await read(...args);
+      entered.resolve();
+      await release.promise;
+      return value;
+    };
+    const pending = apiRequest(baseUrl, "/api/bridge/script/observation");
+    await entered.promise;
+    const held = sessions.get(SESSION_ID);
+    if (change === "session") sessions.set(SESSION_ID, { ...held, bridgeSessionID: "replacement" });
+    if (change === "character") held.characterID++;
+    if (change === "ship") held.activeShipID++;
+    if (change === "scene") held.transitionEpoch++;
+    release.resolve();
+    const { response, payload } = await pending;
+    assert.equal(response.status, 409);
+    assert.equal(payload.error, "OBSERVATION_SCOPE_CHANGED");
+    assert.equal(payload.space, undefined);
+    assert.equal(gateway.calls.snapshot.length, 1);
+  });
+}
+
+test("observation session loss retains standalone space-read cleanup semantics", async () => {
+  const { gateway, baseUrl } = await inSpace();
+  gateway.readSpaceSnapshot = async () => { throw Object.assign(new Error("gone"), { code: "SESSION_NOT_FOUND" }); };
+  assert.notEqual((await apiRequest(baseUrl, "/api/bridge/script/observation")).response.status, 200);
+  gateway.readSpaceSnapshot = async () => assert.fail("a lost held session must not reach authority again");
+  assert.notEqual((await apiRequest(baseUrl, "/api/bridge/script/observation")).response.status, 200);
 });

@@ -103,6 +103,7 @@ function harness(docked: boolean, options: { readonly minersOffline?: boolean } 
   function respond(path: string, body: Record<string, unknown>): unknown {
     if (path === "/api/bridge/flight/status") return flightBody(docked);
     if (path === "/api/bridge/space/snapshot") return spaceBody();
+    if (path === "/api/bridge/script/observation") return { ...(spaceBody() as object), bay: [], inSpace: [], shipInfo: null };
     if (path === "/api/bridge/fitting") {
       return fittingBody(options.minersOffline ? { offline: STRIP_MINER_ITEM_IDS } : {});
     }
