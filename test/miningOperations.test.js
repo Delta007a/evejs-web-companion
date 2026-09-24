@@ -1,0 +1,268 @@
+"use strict";
+
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+const { createBeltMemory } = require("../src/beltMemory");
+const { createMiningOperationStore } = require("../src/miningOperationStore");
+const { createMiningTargetBoard } = require("../src/miningTargetBoard");
+const { createMiningOperations, auditMiningScript } = require("../src/miningOperations");
+
+function clock(start = 1_000_000) {
+  let value = start;
+  return { now: () => value, advance: (ms) => { value += ms; } };
+}
+
+function member(characterID, role, automationID = `script-${characterID}`) {
+  return { characterID, characterName: `Pilot ${characterID}`, accountName: `account-${characterID}`, role, automationID };
+}
+
+function definition(operationID, members, unloadPolicy = "SELF_UNLOAD", targetClasses = ["BELT"]) {
+  return {
+    operationID,
+    name: `Operation ${operationID}`,
+    area: { anchorSystemID: 30000142, anchorSystemName: "Jita", reach: "CURRENT_SYSTEM", targetClasses },
+    targetPolicy: "ANY_ELIGIBLE",
+    unloadPolicy,
+    members,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+function harness(definitions, options = {}) {
+  const byID = new Map(definitions.map((row) => [row.operationID, row]));
+  const c = options.clock || clock();
+  const board = createMiningTargetBoard({ now: c.now, leaseMs: options.leaseMs || 1_000 });
+  const belts = createBeltMemory({ now: c.now, ttlMs: options.beltTtlMs || 10_000 });
+  const operations = createMiningOperations({
+    store: {
+      get: (id) => byID.get(String(id)) || null,
+      list: () => [...byID.values()],
+      remove: (id) => byID.delete(String(id)),
+    },
+    targetBoard: board,
+    beltMemory: belts,
+    now: c.now,
+  });
+  return { operations, board, belts, clock: c };
+}
+
+function startAll(h, operationID, classes = ["BELT"]) {
+  const def = h.operations.definition(operationID);
+  assert.equal(h.operations.begin(operationID, classes).ok, true);
+  for (const row of def.members) h.operations.memberStarted(operationID, row.characterID, `bot-${row.characterID}`);
+  h.operations.finishLaunch(operationID);
+}
+
+function belt(name = "Asteroid Belt 1") {
+  return { targetType: "BELT", systemID: 30000142, systemName: "Jita", targetName: name };
+}
+
+function anomaly(name = "ABC-123") {
+  return { targetType: "ORE_ANOMALY", systemID: 30000142, systemName: "Jita", targetName: name };
+}
+
+test("operation definitions save, reload, and retain stable automation references without copying scripts", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mining-operations-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const store = createMiningOperationStore({ dataDir: dir, uuid: () => "op-1", now: () => "2026-01-01T00:00:00.000Z" });
+  const saved = store.save(definition(undefined, [member(1, "MINER")], "SELF_UNLOAD"));
+  assert.equal(saved.operationID, "op-1");
+  assert.deepEqual(saved.members[0], member(1, "MINER"));
+  assert.equal(Object.hasOwn(saved.members[0], "script"), false);
+  const reloaded = createMiningOperationStore({ dataDir: dir }).get("op-1");
+  assert.deepEqual(reloaded, saved);
+});
+
+test("operation validation preserves all explicit roles and requires policy-compatible membership", () => {
+  const value = definition("roles", [member(1, "MINER"), member(2, "HAULER"), member(3, "DEFENDER")], "HAULER_SERVICE");
+  const normalized = require("../src/miningOperationStore").normalizeDefinition(value, null, () => "now", () => "roles");
+  assert.deepEqual(normalized.members.map((row) => row.role), ["MINER", "HAULER", "DEFENDER"]);
+  assert.throws(() => require("../src/miningOperationStore").normalizeDefinition(
+    definition("bad", [member(1, "MINER")], "HAULER_SERVICE"), null, () => "now", () => "bad",
+  ), /HAULER/);
+});
+
+test("multiple independent operations share one target board and only one atomically reserves a target", () => {
+  const a = definition("a", [member(1, "MINER")]);
+  const b = definition("b", [member(2, "MINER")]);
+  const h = harness([a, b]);
+  startAll(h, "a");
+  startAll(h, "b");
+  assert.equal(h.operations.reserveCandidate("a", 1, belt()).acquired, true);
+  const denied = h.operations.reserveCandidate("b", 2, belt());
+  assert.equal(denied.acquired, false);
+  assert.equal(denied.reason, "CLAIMED");
+  assert.equal(h.board.list()[0].claimedByOperationID, "a");
+});
+
+test("one operation exposes exactly one current target to every member", () => {
+  const def = definition("one", [member(1, "MINER"), member(2, "MINER")]);
+  const h = harness([def]);
+  startAll(h, "one");
+  h.operations.reserveCandidate("one", 1, belt("Belt III"));
+  assert.equal(h.operations.assignment("one", 1).currentTarget.targetName, "Belt III");
+  assert.equal(h.operations.assignment("one", 2).currentTarget.targetName, "Belt III");
+  assert.equal(h.operations.reserveCandidate("one", 2, belt("Belt IV")).target.targetName, "Belt III");
+});
+
+test("abandoned claims expire, while depleted evidence survives lease and claim release", () => {
+  const c = clock();
+  const board = createMiningTargetBoard({ now: c.now, leaseMs: 100 });
+  const first = board.reserve("a", belt());
+  c.advance(101);
+  assert.equal(board.reserve("b", belt()).acquired, true);
+  board.markDepleted("b", first.target.targetKey, { source: "scanner/grid" }, true);
+  c.advance(101);
+  const row = board.get(first.target.targetKey);
+  assert.equal(row.state, "DEPLETED");
+  assert.equal(row.claimedByOperationID, null);
+  assert.deepEqual(row.depletionEvidence, { source: "scanner/grid" });
+});
+
+test("an operation that misses its heartbeat never keeps acting on a claim it lost", () => {
+  const h = harness([definition("lost", [member(1, "MINER")])], { leaseMs: 100 });
+  startAll(h, "lost");
+  h.operations.reserveCandidate("lost", 1, belt());
+  h.clock.advance(101);
+  const assignment = h.operations.assignment("lost", 1);
+  assert.equal(assignment.currentTarget, null);
+  assert.equal(assignment.state, "DEGRADED");
+  assert.equal(h.operations.runtimeFor("lost").history.at(-1).kind, "TARGET_CLAIM_LOST");
+});
+
+test("belt depletion is written through existing belt memory and its TTL clears the board projection", () => {
+  const h = harness([definition("a", [member(1, "MINER")])], { beltTtlMs: 100 });
+  startAll(h, "a");
+  const reserved = h.operations.reserveCandidate("a", 1, belt());
+  h.operations.activateTarget("a", 1, reserved.target.targetKey);
+  h.operations.depleteTarget("a", 1, reserved.target.targetKey, { empty: true });
+  h.operations.markReady("a", 1);
+  assert.equal(h.belts.dryBelts("Jita")[0].beltName, "Asteroid Belt 1");
+  assert.equal(h.board.get(reserved.target.targetKey).state, "DEPLETED");
+  h.clock.advance(101);
+  assert.equal(h.operations.reserveCandidate("a", 1, belt()).acquired, true, "belt memory's expiry owns respawn eligibility");
+});
+
+test("a confirmed anomaly disappearance can be reclaimed only after that scanner label reappears", () => {
+  const def = definition("site", [member(1, "MINER")], "SELF_UNLOAD", ["ORE_ANOMALY"]);
+  const h = harness([def]);
+  startAll(h, "site", ["ORE_ANOMALY"]);
+  const reserved = h.operations.reserveCandidate("site", 1, anomaly());
+  h.operations.depleteTarget("site", 1, reserved.target.targetKey, { scannerDisappeared: true });
+  h.operations.markReady("site", 1);
+  assert.equal(h.board.get(reserved.target.targetKey).state, "DEPLETED");
+  assert.equal(h.operations.reserveCandidate("site", 1, anomaly()).acquired, true);
+});
+
+test("successful multi-member launch becomes traveling and an honest member failure becomes degraded", () => {
+  const def = definition("launch", [member(1, "MINER"), member(2, "MINER")]);
+  const h = harness([def]);
+  assert.equal(h.operations.begin("launch", ["BELT"]).ok, true);
+  h.operations.memberStarted("launch", 1, "bot-1");
+  h.operations.memberFailed("launch", 2, "pilot already controlled");
+  assert.equal(h.operations.finishLaunch("launch").state, "DEGRADED");
+  assert.equal(h.operations.runtimeFor("launch").members.get(2).reason, "pilot already controlled");
+});
+
+test("HAULER_SERVICE depletion waits for every miner dump but creates a normal logistics tail", () => {
+  const def = definition("haul", [member(1, "MINER"), member(2, "MINER"), member(3, "HAULER"), member(4, "HAULER")], "HAULER_SERVICE");
+  const h = harness([def]);
+  startAll(h, "haul");
+  const reserved = h.operations.reserveCandidate("haul", 1, belt());
+  h.operations.activateTarget("haul", 1, reserved.target.targetKey);
+  h.operations.depleteTarget("haul", 1, reserved.target.targetKey, { partialDumpConfirmed: true });
+  let runtime = h.operations.runtimeFor("haul");
+  assert.equal(runtime.currentTarget.state, "DRAINING");
+  assert.deepEqual(runtime.rendezvous.ready, [1]);
+  assert.deepEqual(runtime.drainingTargets[0].pendingHaulers, [3, 4]);
+  h.operations.depleteTarget("haul", 2, reserved.target.targetKey, { partialDumpConfirmed: true });
+  runtime = h.operations.runtimeFor("haul");
+  assert.equal(runtime.currentTarget, null, "main body may now select and relocate");
+  assert.equal(runtime.drainingTargets.length, 1, "haulers remain behind independently");
+});
+
+test("haulers independently finish the old target then catch up to the new current target", () => {
+  const def = definition("tail", [member(1, "MINER"), member(2, "HAULER"), member(3, "HAULER")], "HAULER_SERVICE");
+  const h = harness([def]);
+  startAll(h, "tail");
+  const old = h.operations.reserveCandidate("tail", 1, belt("Belt I"));
+  h.operations.depleteTarget("tail", 1, old.target.targetKey, { partialDumpConfirmed: true });
+  assert.equal(h.operations.finishDrain("tail", 2, old.target.targetKey), true);
+  assert.equal(h.board.get(old.target.targetKey).state, "DRAINING");
+  assert.equal(h.operations.finishDrain("tail", 3, old.target.targetKey), true);
+  assert.equal(h.board.get(old.target.targetKey).state, "DEPLETED");
+  const next = h.operations.reserveCandidate("tail", 1, belt("Belt II"));
+  assert.equal(next.acquired, true);
+  assert.equal(h.operations.assignment("tail", 2).logisticsTarget, null);
+  assert.equal(h.operations.assignment("tail", 2).currentTarget.targetName, "Belt II");
+});
+
+test("SELF_UNLOAD rendezvous waits for required miners and a failed miner cannot deadlock it", () => {
+  const def = definition("self", [member(1, "MINER"), member(2, "MINER"), member(3, "MINER")]);
+  const h = harness([def]);
+  startAll(h, "self");
+  const target = h.operations.reserveCandidate("self", 1, belt()).target;
+  h.operations.depleteTarget("self", 1, target.targetKey, { empty: true });
+  h.operations.markReady("self", 1);
+  h.operations.markReady("self", 2);
+  assert.ok(h.operations.runtimeFor("self").rendezvous, "third miner is still unloading");
+  h.operations.memberFailed("self", 3, "offline");
+  assert.equal(h.operations.runtimeFor("self").rendezvous, null);
+  assert.equal(h.operations.runtimeFor("self").currentTarget, null);
+  assert.equal(h.operations.runtimeFor("self").state, "DEGRADED");
+});
+
+test("stop is idempotent, releases live claims, and never erases depletion", () => {
+  const def = definition("stop", [member(1, "MINER")]);
+  const h = harness([def]);
+  startAll(h, "stop");
+  const target = h.operations.reserveCandidate("stop", 1, belt()).target;
+  h.operations.depleteTarget("stop", 1, target.targetKey, {});
+  h.operations.beginStop("stop");
+  assert.equal(h.operations.finishStop("stop", []).state, "STOPPED");
+  assert.equal(h.operations.finishStop("stop", []).state, "STOPPED");
+  assert.equal(h.board.get(target.targetKey).state, "DEPLETED");
+});
+
+test("blocked graceful stop remains STOPPING and is never reported STOPPED", () => {
+  const def = definition("blocked", [member(1, "MINER")]);
+  const h = harness([def]);
+  startAll(h, "blocked");
+  h.operations.beginStop("blocked");
+  const runtime = h.operations.finishStop("blocked", [{ characterID: 1, message: "Drone return not confirmed" }]);
+  assert.equal(runtime.state, "STOPPING");
+  assert.equal(runtime.stopFailures.length, 1);
+});
+
+test("reload reconciliation trusts botHost association but not a stale current target", () => {
+  const def = definition("recover", [member(1, "MINER")]);
+  const h = harness([def]);
+  h.operations.list([{ operationID: "recover", characterID: 1, botID: "bot-1", status: "running", phase: "Mining", why: null, startedAt: "now", endedAt: null }]);
+  const runtime = h.operations.runtimeFor("recover");
+  assert.equal(runtime.state, "DEGRADED");
+  assert.equal(runtime.currentTarget, null);
+  assert.equal(runtime.history[0].kind, "RECOVERED_UNKNOWN");
+});
+
+test("adjacent and unsupported target candidates are modeled but never invented or reserved", () => {
+  const def = definition("area", [member(1, "MINER")], "SELF_UNLOAD", ["BELT", "ICE", "GAS"]);
+  const h = harness([def]);
+  startAll(h, "area", ["BELT"]);
+  assert.equal(h.operations.reserveCandidate("area", 1, { ...belt(), systemID: 30000144 }).reason, "OUTSIDE_EXECUTABLE_AREA");
+  assert.equal(h.operations.reserveCandidate("area", 1, { ...belt(), targetType: "ICE" }).reason, "TARGET_CLASS_NOT_EXECUTABLE");
+  assert.equal(h.board.list().length, 0);
+});
+
+test("saved automation audit detects executable target seams and rejects resource preferences", () => {
+  const macro = (id, args = {}) => ({ kind: "macro", id, macro: id, args });
+  const beltDoc = { program: [macro("mine-at-belt", { belt: { kind: "belt", belt: { mode: "nearest" } } }), macro("jettison-ore")] };
+  const siteDoc = { program: [macro("warp-to-ore-anomaly"), macro("mine-at-belt", { belt: { kind: "belt", belt: { mode: "site" } }, ores: { kind: "oreList", ores: [{ groupID: 1 }] } })] };
+  assert.deepEqual(auditMiningScript(beltDoc).targetClasses, ["BELT"]);
+  assert.deepEqual(auditMiningScript(siteDoc).targetClasses, ["ORE_ANOMALY"]);
+  assert.equal(auditMiningScript(siteDoc).hasOrePreference, true);
+});

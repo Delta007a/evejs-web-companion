@@ -624,6 +624,62 @@ function isAtBeltForTravel(belt: SpaceEntity, measurement: SpaceMeasurement | nu
     distance < beltWarpFloorMeters(measurement.shipRadius, belt.radius);
 }
 
+const OPERATION_EMPTY_CONFIRM_READS = 3;
+const OPERATION_DUMP_MAX_ATTEMPTS = 5;
+const OPERATION_DRAIN_CLEAR_BOARD_KEY = "miningDrainGridClear";
+
+function miningOperationTargetKey(
+  targetType: "BELT" | "ORE_ANOMALY",
+  systemID: number,
+  targetName: string,
+): string {
+  return `${targetType}:${systemID}:${targetName}`;
+}
+
+/**
+ * Operation-only belt travel. Null means this is an ordinary saved script and
+ * the original macro below remains the sole authority. A hauler always prefers
+ * its logistics tail over the new fleet target, which is what permits the main
+ * body to relocate while the old grid is still being drained.
+ */
+function operationTravelToBelt(obs: ScriptObservation, mem: MacroMemory): MacroTick | null {
+  const operation = obs.miningOperation ?? null;
+  if (operation === null || operation.role !== "HAULER") return null;
+  const target = operation.logisticsTarget ?? operation.currentTarget;
+  if (target === null) {
+    return tick(WAIT, "Waiting for the operation to choose its next target.", "Waiting for target", ACTING, false, mem);
+  }
+  if (target.targetType !== "BELT") {
+    return tick(WAIT, "This hauler automation can only rendezvous at asteroid belts.", "Unsupported target", {
+      kind: "blocked",
+      reason: "Ore-anomaly hauling needs an operation-aware scanner travel block; v0.1 only launches HAULER_SERVICE on belts.",
+    });
+  }
+  const recall = recallBeforeLeaving(obs, mem, "Following the mining operation", null);
+  if (recall !== null) return recall;
+  const ride = rideAutopilotToSystem(obs, target.systemID, "Following the mining operation");
+  if (ride !== null) return ride;
+  if (obs.inWarp === true) {
+    return tick(WAIT, "In warp — nothing decided mid-warp.", "Flying to the belt", ACTING, false, mem);
+  }
+  const snapshot = obs.snapshot ?? null;
+  if (obs.inSpace !== true || snapshot === null) {
+    return tick(WAIT, "Waiting for the ship to be out in space.", "Getting ready", ACTING, false, mem);
+  }
+  const measurement = measureSpace(snapshot);
+  const belt = snapshot.entities.find((entity) => /belt/i.test(entity.name ?? "") && entity.name === target.targetName) ?? null;
+  if (belt === null) {
+    return tick(WAIT, `The operation target ${target.targetName} is not visible in this system.`, "Target unavailable", {
+      kind: "blocked",
+      reason: "The operation's exact belt cannot be resolved from the current system data.",
+    });
+  }
+  if (isAtBeltForTravel(belt, measurement)) {
+    return tick(WAIT, operation.logisticsTarget === null ? "Caught up with the fleet." : "At the draining target.", "Arrived", { kind: "done" });
+  }
+  return tick({ kind: "warp", targetID: belt.itemID }, `Warping to ${target.targetName}.`, "Following the mining operation", ACTING, false, mem);
+}
+
 // ── undock ───────────────────────────────────────────────────────────────────
 const undock: MacroDecider = (_step, obs) => {
   const docked = obs.flightStatus?.docked ?? null;
@@ -641,7 +697,9 @@ const undock: MacroDecider = (_step, obs) => {
 // it. No rocks, no locking: just the trip, for a hauler heading out to pick up
 // a jetcan without ever sitting down to mine. Reuses mine-at-belt's own
 // beltTarget/isChosenBelt (below) so "pin a belt" behaves identically in both.
-const travelToBelt: MacroDecider = (step, obs) => {
+const travelToBelt: MacroDecider = (step, obs, mem) => {
+  const operationTick = operationTravelToBelt(obs, mem);
+  if (operationTick !== null) return operationTick;
   const snapshot = obs.snapshot ?? null;
   if (obs.inWarp === true) {
     return tick(WAIT, "In warp — nothing decided mid-warp.", "Flying to the belt", ACTING, false, {});
@@ -728,7 +786,164 @@ const travelToBelt: MacroDecider = (step, obs) => {
 //         out a NEW rock field every site, so a ladder would retire Arkonor
 //         forever the first time one site happened to lack it. See
 //         `mineAtBeltSite`.
+function operationMineAtTarget(
+  step: MacroStep,
+  obs: ScriptObservation,
+  mem: MacroMemory,
+): MacroTick | null {
+  const operation = obs.miningOperation ?? null;
+  if (operation === null || operation.role !== "MINER") return null;
+
+  const target = operation.currentTarget;
+  if (target === null) {
+    if (isSiteMode(step)) {
+      return tick(WAIT, "Waiting for the ore-site travel block to reserve a target.", "Waiting for target", ACTING, false, mem);
+    }
+    const ride = rideAutopilotToSystem(obs, operation.area.anchorSystemID, "Assembling in the anchor system");
+    if (ride !== null) return ride;
+    const snapshot = obs.snapshot ?? null;
+    if (obs.inSpace !== true || snapshot === null) {
+      return tick(WAIT, "Waiting for the ship to be out in space.", "Getting ready", ACTING, false, mem);
+    }
+    const dry = new Set((obs.dryBelts ?? []).filter((row) => row.all).map((row) => row.beltName));
+    const unavailable = new Set(obs.unavailableMiningTargetKeys ?? []);
+    const systemID = obs.flightStatus?.solarSystemID ?? operation.area.anchorSystemID;
+    const systemName = obs.systemName ?? operation.area.anchorSystemName;
+    const candidate = snapshot.entities
+      .filter((entity) => /belt/i.test(entity.name ?? "") && entity.name !== null)
+      .filter((entity) => !dry.has(entity.name!))
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+      .find((entity) => !unavailable.has(miningOperationTargetKey("BELT", systemID, entity.name!)));
+    if (candidate === undefined || candidate.name === null || systemName === null) {
+      return tick(WAIT, "No unclaimed, non-depleted belt is currently available.", "Waiting for target", ACTING, false, mem);
+    }
+    return tick({
+      kind: "reserveMiningTarget",
+      targetType: "BELT",
+      systemID,
+      systemName,
+      targetName: candidate.name,
+    }, `Reserving ${candidate.name} for the operation.`, "Selecting target", ACTING, false, mem);
+  }
+
+  const wantedType = isSiteMode(step) ? "ORE_ANOMALY" : "BELT";
+  if (target.targetType !== wantedType) {
+    return tick(WAIT, `The operation is working ${target.targetName}; this block is for ${wantedType === "BELT" ? "belts" : "ore sites"}.`, "Waiting for matching target", ACTING, false, mem);
+  }
+
+  if (target.state === "DEPLETED" || target.state === "DRAINING") {
+    if (operation.unloadPolicy === "SELF_UNLOAD") {
+      const recall = recallBeforeLeaving(obs, mem, "Returning to unload", null);
+      if (recall !== null) return recall;
+      return tick(WAIT, "The target is depleted; unloading through the saved automation.", "Returning to unload", { kind: "done" });
+    }
+    if (operation.rendezvous?.thisMemberReady === true) {
+      return tick(WAIT, "Partial hold is clear; waiting for the other miners.", "Ready to relocate", ACTING, false, mem);
+    }
+    const recall = recallBeforeLeaving(obs, mem, "Clearing depleted target", null);
+    if (recall !== null) return recall;
+    const items = freightHoldItemIDs(obs.holds ?? null);
+    if (items.length > 0) {
+      const attempts = num(mem, "operationDumpAttempts") ?? 0;
+      if (attempts >= OPERATION_DUMP_MAX_ATTEMPTS) {
+        return tick(WAIT, "The partial ore dump could not be confirmed.", "Dump blocked", {
+          kind: "blocked",
+          reason: "The miner still has ore after five confirmed jettison attempts, so it will not silently leave custody behind.",
+        });
+      }
+      return tick(
+        { kind: "jettison", itemIDs: items },
+        "Dumping every remaining ore stack for the logistics tail.",
+        "Clearing depleted target",
+        ACTING,
+        false,
+        { ...mem, operationDumpAttempts: attempts + 1 },
+      );
+    }
+    return tick(
+      { kind: "depleteMiningTarget", targetKey: target.targetKey, evidence: { emptyGridReads: OPERATION_EMPTY_CONFIRM_READS, partialDumpConfirmed: true } },
+      "This miner is clear of the depleted target.",
+      "Ready to relocate",
+      ACTING,
+      false,
+      mem,
+    );
+  }
+
+  const ride = rideAutopilotToSystem(obs, target.systemID, "Following the operation target");
+  if (ride !== null) return ride;
+  if (obs.inWarp === true) {
+    return tick(WAIT, "In warp — nothing decided mid-warp.", "Following the operation target", ACTING, false, mem);
+  }
+  const snapshot = obs.snapshot ?? null;
+  if (obs.inSpace !== true || snapshot === null) {
+    return tick(WAIT, "Waiting for the ship to be out in space.", "Getting ready", ACTING, false, mem);
+  }
+  const measurement = measureSpace(snapshot);
+  const rocks = snapshot.entities.filter(isMineableRock);
+  if (wantedType === "BELT") {
+    const belt = snapshot.entities.find((entity) => /belt/i.test(entity.name ?? "") && entity.name === target.targetName) ?? null;
+    if (belt === null) {
+      return tick(WAIT, `The reserved belt ${target.targetName} is not visible here.`, "Target unavailable", {
+        kind: "blocked",
+        reason: "The operation's exact belt cannot be resolved from current-system data.",
+      });
+    }
+    if (!isAtBeltForTravel(belt, measurement)) {
+      const recall = recallBeforeLeaving(obs, mem, "Following the operation target", belt.itemID);
+      if (recall !== null) return recall;
+      return tick({ kind: "warp", targetID: belt.itemID }, `Warping to ${target.targetName}.`, "Following the operation target", ACTING, false, mem);
+    }
+  }
+  if (target.state === "RESERVED") {
+    return tick({ kind: "activateMiningTarget", targetKey: target.targetKey }, "The fleet has arrived at its reserved target.", "Starting mining", ACTING, false, mem);
+  }
+  if (rocks.length > 0) {
+    return mineWithRocks(step, obs, mem, snapshot, rocks, measurement);
+  }
+
+  const emptyReads = (num(mem, "operationEmptyReads") ?? 0) + 1;
+  if (emptyReads < OPERATION_EMPTY_CONFIRM_READS) {
+    return tick(WAIT, "No rock is visible yet — confirming before declaring the shared target depleted.", "Confirming depletion", ACTING, false, {
+      ...mem,
+      operationEmptyReads: emptyReads,
+    });
+  }
+  const recall = recallBeforeLeaving(obs, mem, "Clearing depleted target", null);
+  if (recall !== null) return recall;
+  if (operation.unloadPolicy === "HAULER_SERVICE") {
+    const items = freightHoldItemIDs(obs.holds ?? null);
+    if (items.length > 0) {
+      const attempts = num(mem, "operationDumpAttempts") ?? 0;
+      if (attempts >= OPERATION_DUMP_MAX_ATTEMPTS) {
+        return tick(WAIT, "The partial ore dump could not be confirmed.", "Dump blocked", {
+          kind: "blocked",
+          reason: "The miner still has ore after five confirmed jettison attempts, so it will not silently leave custody behind.",
+        });
+      }
+      return tick(
+        { kind: "jettison", itemIDs: items },
+        "The target is depleted; dumping every remaining ore stack before relocation.",
+        "Clearing depleted target",
+        ACTING,
+        false,
+        { ...mem, operationEmptyReads: emptyReads, operationDumpAttempts: attempts + 1 },
+      );
+    }
+  }
+  return tick(
+    { kind: "depleteMiningTarget", targetKey: target.targetKey, evidence: { emptyGridReads: emptyReads, partialDumpConfirmed: operation.unloadPolicy === "HAULER_SERVICE" } },
+    "The operation target is confirmed depleted.",
+    operation.unloadPolicy === "SELF_UNLOAD" ? "Returning to unload" : "Ready to relocate",
+    ACTING,
+    false,
+    mem,
+  );
+}
+
 const mineAtBelt: MacroDecider = (step, obs, mem, board) => {
+  const operationTick = operationMineAtTarget(step, obs, mem);
+  if (operationTick !== null) return operationTick;
   const snapshot = obs.snapshot ?? null;
   if (obs.inWarp === true) {
     return tick(WAIT, "In warp — nothing decided mid-warp.", "Flying to the belt", ACTING, false, mem);
@@ -1301,6 +1516,26 @@ const deliverOre: MacroDecider = (step, obs, mem, board) => {
       reason: "This step needs a station to unload at.",
     });
   }
+  const operation = obs.miningOperation ?? null;
+  const drainTarget = operation?.role === "HAULER" ? operation.logisticsTarget : null;
+  const drainGridClear = drainTarget !== null && String(board[OPERATION_DRAIN_CLEAR_BOARD_KEY] ?? "") === drainTarget.targetKey;
+  if (
+    drainTarget !== null &&
+    drainGridClear &&
+    obs.holds !== null &&
+    obs.holds !== undefined &&
+    freightHoldItemIDs(obs.holds).length === 0 &&
+    obs.flightStatus?.docked !== true
+  ) {
+    return tick(
+      { kind: "miningDrainComplete", targetKey: drainTarget.targetKey },
+      "The old target is clear; catching up to the fleet.",
+      "Logistics tail complete",
+      ACTING,
+      false,
+      mem,
+    );
+  }
   if (obs.flightStatus?.docked === true && obs.flightStatus.stationID === target) {
     // The FREIGHT holds, not every hold. On a hull with an ore hold the cargo
     // hold is not where the ore is, and emptying it here put the ship's spare
@@ -1322,6 +1557,36 @@ const deliverOre: MacroDecider = (step, obs, mem, board) => {
         "Unloading",
         ACTING,
       );
+    }
+    if (drainTarget !== null && drainGridClear) {
+      return tick(
+        { kind: "miningDrainComplete", targetKey: drainTarget.targetKey },
+        "The old target's load is ashore; catching up to the fleet.",
+        "Logistics tail complete",
+        ACTING,
+        false,
+        mem,
+      );
+    }
+    if (drainTarget !== null) {
+      return tick(WAIT, "This load is ashore; returning to finish the old target.", "Continuing logistics tail", { kind: "done" });
+    }
+    if (
+      operation?.role === "MINER" &&
+      operation.unloadPolicy === "SELF_UNLOAD" &&
+      operation.rendezvous?.kind === "SELF_UNLOAD"
+    ) {
+      if (!operation.rendezvous.thisMemberReady) {
+        return tick(
+          { kind: "miningMemberReady" },
+          "The hold is empty; this miner is ready for fleet rendezvous.",
+          "Ready for rendezvous",
+          ACTING,
+          false,
+          mem,
+        );
+      }
+      return tick(WAIT, "Ready; waiting for the required miners before the fleet chooses another target.", "Rendezvous", ACTING, false, mem);
     }
     return tick(WAIT, "The ore is unloaded.", "Done hauling", { kind: "done" });
   }
@@ -2526,6 +2791,12 @@ const CONTAINER_SETTLE_TICKS = 30; // ~2s/tick elsewhere in this file -> roughly
 // loop the block forever.
 const lootContainers: MacroDecider = (step, obs, mem) => {
   const snapshot = obs.snapshot ?? null;
+  const logisticsTarget = obs.miningOperation?.role === "HAULER"
+    ? obs.miningOperation.logisticsTarget
+    : null;
+  const clearDrainProof = <T extends MacroTick>(result: T): T => logisticsTarget === null
+    ? result
+    : withBoardPatch(result, { [OPERATION_DRAIN_CLEAR_BOARD_KEY]: "" }) as T;
   if (obs.inWarp === true) {
     return tick(WAIT, "In warp — nothing decided mid-warp.", "Looting", ACTING, false, mem);
   }
@@ -2540,12 +2811,12 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
   // the transfer decide, as it always did.
   const freeM3 = holdsFreeM3(obs.holds ?? null);
   if (freeM3 !== null && freeM3 <= 0) {
-    return tick(WAIT, "The ship is full, so it is time to unload.", "Looting", { kind: "done" });
+    return clearDrainProof(tick(WAIT, "The ship is full, so it is time to unload.", "Looting", { kind: "done" }));
   }
   // Once is enough: see the note in loot-wrecks. Nothing about the next can will
   // be different while the hold that turned this one down is still full.
   if (shipHasNoRoom(obs.refusals, step.id, "lootContainer")) {
-    return tick(WAIT, "Nothing aboard will take any more, so it is time to unload.", "Looting", { kind: "done" });
+    return clearDrainProof(tick(WAIT, "Nothing aboard will take any more, so it is time to unload.", "Looting", { kind: "done" }));
   }
   // Set-aside now comes from the RUN's refusal ledger rather than a `skipped`
   // list in step memory. The list was dropped every time the block was left, so
@@ -2570,7 +2841,10 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
     if (emptyChecks <= CONTAINER_SETTLE_TICKS) {
       return tick(WAIT, "Checking the grid for containers.", "Looting", ACTING, true, { ...mem, emptyChecks });
     }
-    return tick(WAIT, "Every container here is emptied.", "Looting", { kind: "done" });
+    const done = tick(WAIT, "Every container here is emptied.", "Looting", { kind: "done" });
+    return logisticsTarget === null
+      ? done
+      : withBoardPatch(done, { [OPERATION_DRAIN_CLEAR_BOARD_KEY]: logisticsTarget.targetKey });
   }
   // A can IS present this tick — the settle window above was for nothing, and
   // any leftover count from an earlier blip must not linger and delay the
@@ -3691,7 +3965,85 @@ function warpToAnomalyOfKind(
 }
 
 const warpToAnomaly: MacroDecider = warpToAnomalyOfKind("combat", COMBAT_FLAVOUR);
-const warpToOreAnomaly: MacroDecider = warpToAnomalyOfKind("ore", ORE_FLAVOUR);
+const warpToOreAnomalyBase: MacroDecider = warpToAnomalyOfKind("ore", ORE_FLAVOUR);
+const warpToOreAnomaly: MacroDecider = (step, obs, mem, board) => {
+  const operation = obs.miningOperation ?? null;
+  if (operation === null || operation.role !== "MINER") {
+    return warpToOreAnomalyBase(step, obs, mem, board);
+  }
+  const target = operation.currentTarget;
+  if (target === null) {
+    const ride = rideAutopilotToSystem(obs, operation.area.anchorSystemID, "Assembling in the anchor system");
+    if (ride !== null) return ride;
+    const anomalies = obs.anomalies ?? null;
+    if (anomalies === null) {
+      return tick(WAIT, "Reading the anchor system's onboard scanner.", "Selecting target", ACTING, false, mem);
+    }
+    const systemID = obs.flightStatus?.solarSystemID ?? operation.area.anchorSystemID;
+    const systemName = obs.systemName ?? operation.area.anchorSystemName;
+    const unavailable = new Set(obs.unavailableMiningTargetKeys ?? []);
+    const candidate = anomalies
+      .filter((site) => site.kind === "ore" && site.archetypeID !== 28)
+      .sort((a, b) => a.label.localeCompare(b.label))
+      .find((site) => !unavailable.has(miningOperationTargetKey("ORE_ANOMALY", systemID, site.label)));
+    if (candidate === undefined || systemName === null) {
+      return tick(WAIT, "No unclaimed executable ore anomaly is visible in this system.", "Waiting for target", ACTING, false, mem);
+    }
+    return tick({
+      kind: "reserveMiningTarget",
+      targetType: "ORE_ANOMALY",
+      systemID,
+      systemName,
+      targetName: candidate.label,
+    }, `Reserving ore anomaly ${candidate.label} for the operation.`, "Selecting target", ACTING, false, mem);
+  }
+  if (target.targetType !== "ORE_ANOMALY") {
+    return tick(WAIT, `The operation is working ${target.targetName}, which is not an ore anomaly.`, "Waiting for matching target", ACTING, false, mem);
+  }
+  if (target.state === "DEPLETED" || target.state === "DRAINING") {
+    return tick(WAIT, "The previous ore site is depleted; completing its unload barrier.", "Relocating", { kind: "done" });
+  }
+  const ride = rideAutopilotToSystem(obs, target.systemID, "Following the operation target");
+  if (ride !== null) return ride;
+  const exact = (obs.anomalies ?? []).filter((site) => site.label === target.targetName && site.kind === "ore" && site.archetypeID !== 28);
+  if (obs.inWarp !== true && obs.anomalies !== null && obs.anomalies !== undefined && exact.length === 0) {
+    const missingReads = (num(mem, "operationMissingReads") ?? 0) + 1;
+    if (missingReads < OPERATION_EMPTY_CONFIRM_READS) {
+      return tick(WAIT, "The reserved ore anomaly is absent from the scanner — confirming before releasing it.", "Confirming site disappearance", ACTING, false, {
+        ...mem,
+        operationMissingReads: missingReads,
+      });
+    }
+    return tick(
+      { kind: "depleteMiningTarget", targetKey: target.targetKey, evidence: { scannerDisappeared: true, scannerMissingReads: missingReads } },
+      "The operation's ore anomaly has disappeared from the current-system scanner.",
+      "Target depleted",
+      ACTING,
+      false,
+      mem,
+    );
+  }
+  const decided = warpToOreAnomalyBase(
+    step,
+    { ...obs, anomalies: exact },
+    mem,
+    { ...board, [ORE_FLAVOUR.boardKey]: "" },
+  );
+  if (decided.outcome.kind === "done" && target.state === "RESERVED") {
+    return {
+      ...tick(
+        { kind: "activateMiningTarget", targetKey: target.targetKey },
+        "The fleet has arrived at its reserved ore anomaly.",
+        "Starting mining",
+        ACTING,
+        false,
+        mem,
+      ),
+      boardPatch: { [ORE_FLAVOUR.boardKey]: target.targetName },
+    };
+  }
+  return decided;
+};
 
 // ── refit-ship ───────────────────────────────────────────────────────────────
 // The "reship and go" block, docked only: find the saved fitting BY NAME (the id

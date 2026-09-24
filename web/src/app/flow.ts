@@ -8724,6 +8724,16 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   // Blocks that fly to a cosmic anomaly, and so pay for the scanner read. Both
   // kinds are here: each one filters the SAME list down to the sites it wants.
   const ANOMALY_MACROS = new Set(["warp-to-anomaly", "warp-to-ore-anomaly"]);
+  // These blocks consume only the BFF's stored operation assignment. The read
+  // rides the existing script observation cadence; it never starts a poller or
+  // asks for another space snapshot.
+  const MINING_OPERATION_MACROS = new Set([
+    "mine-at-belt",
+    "warp-to-ore-anomaly",
+    "travel-to-belt",
+    "loot-containers",
+    "deliver-ore",
+  ]);
   const FLEET_MANAGEMENT_MACROS = new Set([
     "create-fleet",
     "invite-to-fleet",
@@ -9330,6 +9340,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     // hitting the BFF on every tick.
     const BELT_MEMORY_CACHE_MS = 10_000;
     let beltMemoryCache: { system: string; at: number; rows: readonly DryBelt[] } | null = null;
+    // A non-operation run proves that fact once. Operation runs keep reading so
+    // the same lightweight call renews the bounded target lease and observes
+    // target changes made by another member.
+    let miningOperationProbe: "unknown" | "member" | "none" = "unknown";
+    const unavailableMiningTargets = new Map<string, number>();
     // The hunt's jump-distance table, computed once per home system (a full
     // breadth-first sweep over the gate graph is too much to redo every tick).
     let huntDistanceAnchor: number | null = null;
@@ -9461,6 +9476,26 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // ── Mission reads, gated by the active block (see MISSION_MACROS). Every
         // read is best-effort: a failure lands as null (unreadable, never "no").
         const macro = hint.activeMacro;
+        let miningOperation: ScriptObservation["miningOperation"] = null;
+        if (
+          macro !== null &&
+          (miningOperationProbe === "member" || MINING_OPERATION_MACROS.has(macro)) &&
+          miningOperationProbe !== "none"
+        ) {
+          try {
+            miningOperation = await api.readMiningOperationAssignment(callOptions);
+            miningOperationProbe = miningOperation === null ? "none" : "member";
+          } catch {
+            // Ordinary scripts have no operation capability and stop probing.
+            // A known member treats a transient read failure as unknown for this
+            // tick, then retries on the next existing observation.
+            miningOperation = null;
+          }
+        }
+        const operationNow = Date.now();
+        for (const [key, retryAt] of unavailableMiningTargets) {
+          if (retryAt <= operationNow) unavailableMiningTargets.delete(key);
+        }
         const targetGroupNames = await classifyTargetGroups(
           snapshot,
           origin,
@@ -9659,6 +9694,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
                 : [{
                     label: site.targetID,
                     kind: siteKind(site.fields["scanStrengthAttribute"], site.fields["archetypeID"]),
+                    archetypeID:
+                      typeof site.fields["archetypeID"] === "number"
+                        ? site.fields["archetypeID"]
+                        : null,
                     // The row's own `position`, carried so a refused warp can be
                     // told apart from standing in the site already. A row
                     // without one stays null — never an origin, which would
@@ -10148,6 +10187,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           agentSearchFailure,
           jumpsToDropoff,
           anomalies,
+          miningOperation,
+          unavailableMiningTargetKeys: [...unavailableMiningTargets.keys()],
           scannerOperations,
           localPlayers,
           dscanHitIDs,
@@ -10391,6 +10432,34 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             await api.rememberBeltDry(action.systemName, action.beltName, action.groupID, callOptions);
             // The next tick must see this mark, not the cached list from before it.
             beltMemoryCache = null;
+            return;
+          case "reserveMiningTarget":
+            if (!await api.reserveMiningOperationTarget({
+              targetType: action.targetType,
+              systemID: action.systemID,
+              systemName: action.systemName,
+              targetName: action.targetName,
+            }, callOptions)) {
+              unavailableMiningTargets.set(
+                `${action.targetType}:${action.systemID}:${action.targetName}`,
+                Date.now() + 35_000,
+              );
+            }
+            return;
+          case "activateMiningTarget":
+            await api.activateMiningOperationTarget(action.targetKey, callOptions);
+            return;
+          case "depleteMiningTarget":
+            await api.depleteMiningOperationTarget(action.targetKey, action.evidence, callOptions);
+            // The belt board is a projection of the same authority; force the
+            // next ordinary belt-memory read to see the mark immediately.
+            beltMemoryCache = null;
+            return;
+          case "miningMemberReady":
+            await api.markMiningOperationMemberReady(callOptions);
+            return;
+          case "miningDrainComplete":
+            await api.finishMiningOperationDrain(action.targetKey, callOptions);
             return;
           case "agentButton": {
             // The same call the mission bot presses buttons with; the fresh

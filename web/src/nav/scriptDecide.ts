@@ -205,6 +205,22 @@ export type ScriptAction =
    * by other pilots running the same bot, possibly in other systems.
    */
   | { readonly kind: "rememberBeltDry"; readonly systemName: string; readonly beltName: string; readonly groupID: number | null }
+  /** Stored Mining Operation coordination. None of these actions reads space. */
+  | {
+      readonly kind: "reserveMiningTarget";
+      readonly targetType: "BELT" | "ORE_ANOMALY";
+      readonly systemID: number;
+      readonly systemName: string;
+      readonly targetName: string;
+    }
+  | { readonly kind: "activateMiningTarget"; readonly targetKey: string }
+  | {
+      readonly kind: "depleteMiningTarget";
+      readonly targetKey: string;
+      readonly evidence: Readonly<Record<string, string | number | boolean | null>>;
+    }
+  | { readonly kind: "miningMemberReady" }
+  | { readonly kind: "miningDrainComplete"; readonly targetKey: string }
   /**
    * Tell the BFF's SHARED squad board which ship this pilot is on, so the fleet
    * can concentrate its fire (`targetID` null clears the call). Like

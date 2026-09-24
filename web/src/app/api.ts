@@ -50,6 +50,7 @@ import type {
   ScannerOperationsSnapshot,
   ScannerProbeOperation,
 } from "../scanner/scannerCenter.ts";
+import type { MiningOperationAssignment, MiningOperationTarget, MiningTargetType } from "../nav/scriptConditions.ts";
 
 export interface LoginResult {
   readonly accountID: number;
@@ -1856,6 +1857,167 @@ export async function rememberBeltDry(
   await postJson("/api/bots/belt-memory", { system, beltName, groupID }, options);
 }
 
+/** Read this exact hosted bot's stored Mining Operation assignment. No space read. */
+export async function readMiningOperationAssignment(
+  options: ApiOptions = {},
+): Promise<MiningOperationAssignment | null> {
+  const data = await getJson("/api/mining-operations/assignment/current", options);
+  const value = data.assignment;
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as unknown as MiningOperationAssignment)
+    : null;
+}
+
+export interface MiningTargetCandidate {
+  readonly targetType: MiningTargetType;
+  readonly systemID: number;
+  readonly systemName: string;
+  readonly targetName: string;
+}
+
+export async function reserveMiningOperationTarget(
+  candidate: MiningTargetCandidate,
+  options: ApiOptions = {},
+): Promise<boolean> {
+  const data = await postJson(
+    "/api/mining-operations/target/reserve",
+    candidate as unknown as JsonValue,
+    options,
+  );
+  return data.acquired === true;
+}
+
+export async function activateMiningOperationTarget(targetKey: string, options: ApiOptions = {}): Promise<void> {
+  await postJson("/api/mining-operations/target/activate", { targetKey }, options);
+}
+
+export async function depleteMiningOperationTarget(
+  targetKey: string,
+  evidence: Readonly<Record<string, JsonValue>> = {},
+  options: ApiOptions = {},
+): Promise<void> {
+  await postJson("/api/mining-operations/target/depleted", { targetKey, evidence }, options);
+}
+
+export async function markMiningOperationMemberReady(options: ApiOptions = {}): Promise<void> {
+  await postJson("/api/mining-operations/member/ready", {}, options);
+}
+
+export async function finishMiningOperationDrain(targetKey: string, options: ApiOptions = {}): Promise<void> {
+  await postJson("/api/mining-operations/member/drain-complete", { targetKey }, options);
+}
+
+export interface MiningOperationMemberDefinition {
+  readonly characterID: number;
+  readonly characterName: string;
+  readonly accountName: string;
+  readonly role: "MINER" | "HAULER" | "DEFENDER";
+  readonly automationID: string;
+}
+
+export interface MiningOperationDefinition {
+  readonly operationID?: string;
+  readonly name: string;
+  readonly area: {
+    readonly anchorSystemID: number;
+    readonly anchorSystemName: string | null;
+    readonly reach: "CURRENT_SYSTEM" | "CURRENT_AND_ADJACENT";
+    readonly targetClasses: readonly MiningTargetType[];
+  };
+  readonly targetPolicy: "ANY_ELIGIBLE";
+  readonly unloadPolicy: "HAULER_SERVICE" | "SELF_UNLOAD";
+  readonly members: readonly MiningOperationMemberDefinition[];
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
+}
+
+export interface MiningOperationRuntime {
+  readonly operationID: string;
+  readonly state: string;
+  readonly currentTarget: MiningOperationTarget | null;
+  readonly members: readonly (MiningOperationMemberDefinition & {
+    readonly runtimeState: string;
+    readonly phase: string | null;
+    readonly reason: string | null;
+    readonly botID: string | null;
+  })[];
+  readonly logisticsTail: readonly {
+    readonly target: MiningOperationTarget;
+    readonly pendingHaulers: readonly number[];
+  }[];
+  readonly rendezvous: {
+    readonly kind: "MINER_CLEARANCE" | "SELF_UNLOAD";
+    readonly target: MiningOperationTarget;
+    readonly required: readonly number[];
+    readonly ready: readonly number[];
+  } | null;
+  readonly history: readonly {
+    readonly kind: string;
+    readonly at: string;
+    readonly target: MiningOperationTarget | null;
+    readonly evidence: unknown;
+  }[];
+  readonly startedAt: string | null;
+  readonly stoppedAt: string | null;
+  readonly stopFailures: readonly { readonly characterID: number; readonly message: string }[];
+}
+
+export interface MiningOperationsPayload {
+  readonly operations: readonly {
+    readonly definition: MiningOperationDefinition & { readonly operationID: string };
+    readonly runtime: MiningOperationRuntime;
+  }[];
+  readonly targetBoard: readonly MiningOperationTarget[];
+  readonly capabilities: {
+    readonly targetClasses: Readonly<Record<MiningTargetType, { readonly executable: boolean; readonly note: string }>>;
+    readonly reach: Readonly<Record<string, { readonly executable: boolean; readonly note?: string }>>;
+    readonly defender: { readonly executable: boolean; readonly note: string };
+    readonly operationOwnedContainers: { readonly executable: boolean; readonly note: string };
+  };
+}
+
+function miningOperationsPayload(data: Record<string, JsonValue>): MiningOperationsPayload {
+  return {
+    operations: (Array.isArray(data.operations) ? data.operations : []) as unknown as MiningOperationsPayload["operations"],
+    targetBoard: (Array.isArray(data.targetBoard) ? data.targetBoard : []) as unknown as MiningOperationsPayload["targetBoard"],
+    capabilities: (data.capabilities && typeof data.capabilities === "object" && !Array.isArray(data.capabilities)
+      ? data.capabilities
+      : { targetClasses: {}, reach: {}, defender: {}, operationOwnedContainers: {} }) as unknown as MiningOperationsPayload["capabilities"],
+  };
+}
+
+/** Command Center read: definitions, botHost projection and target board only. */
+export async function loadMiningOperations(options: ApiOptions = {}): Promise<MiningOperationsPayload> {
+  return miningOperationsPayload(await getJson("/api/mining-operations", options));
+}
+
+export async function saveMiningOperation(
+  definition: MiningOperationDefinition,
+  options: ApiOptions = {},
+): Promise<MiningOperationsPayload> {
+  return miningOperationsPayload(await postJson("/api/mining-operations", definition as unknown as JsonValue, options));
+}
+
+export async function deleteMiningOperation(operationID: string, options: ApiOptions = {}): Promise<MiningOperationsPayload> {
+  return miningOperationsPayload(await postJson(`/api/mining-operations/${encodeURIComponent(operationID)}/delete`, {}, options));
+}
+
+export async function startMiningOperation(
+  operationID: string,
+  grants: Readonly<Record<string, BotLaunchGrant>>,
+  options: ApiOptions = {},
+): Promise<MiningOperationsPayload> {
+  return miningOperationsPayload(await postJson(
+    `/api/mining-operations/${encodeURIComponent(operationID)}/start`,
+    { grants: grants as unknown as JsonValue },
+    options,
+  ));
+}
+
+export async function stopMiningOperation(operationID: string, options: ApiOptions = {}): Promise<MiningOperationsPayload> {
+  return miningOperationsPayload(await postJson(`/api/mining-operations/${encodeURIComponent(operationID)}/stop`, {}, options));
+}
+
 /** Atomic acquisition/renewal at the BFF's shared loot-memory authority. */
 export async function claimContainer(
   runID: string, system: number, itemID: number, renewOnly: boolean,
@@ -3338,6 +3500,9 @@ export interface ServerBot {
    * `scriptID` happens to be the literal "companion".
    */
   readonly kind: "companion" | "script";
+  /** Stable Mining Operation association; null for an ordinary hosted bot. */
+  readonly operationID?: string | null;
+  readonly operationRole?: "MINER" | "HAULER" | "DEFENDER" | null;
   /**
    * The companion badge's facts, or null.
    *
@@ -3378,6 +3543,11 @@ function asServerBot(value: JsonValue): ServerBot {
     // Anything that is not the companion literal is a script, matching the
     // host's own default for a roster row written before `kind` existed.
     kind: row.kind === "companion" ? "companion" : "script",
+    operationID: typeof row.operationID === "string" ? row.operationID : null,
+    operationRole:
+      row.operationRole === "MINER" || row.operationRole === "HAULER" || row.operationRole === "DEFENDER"
+        ? row.operationRole
+        : null,
     companion: asServerBotCompanion(row.companion),
   };
 }

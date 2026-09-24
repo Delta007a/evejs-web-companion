@@ -239,6 +239,14 @@ function createBotHost(options) {
             maxRuntimeMinutes: record.maxRuntimeMinutes,
             expiresAt: record.expiresAt,
             startedAt: record.startedAt,
+            // Mining Operations persist only this stable association. Their
+            // current target and lifecycle are deliberately reconstructed;
+            // they are not trusted from this restart roster. Ordinary roster
+            // rows retain their established wire/disk shape.
+            ...(record.operationID ? {
+              operationID: record.operationID,
+              operationRole: record.operationRole,
+            } : {}),
           };
           if (record.kind === "companion") {
             // THE DIVERGENCE FROM A SCRIPT (docs/fleet-companion-handoff.md,
@@ -300,6 +308,8 @@ function createBotHost(options) {
       scriptName: record.scriptName,
       scriptRev: record.scriptRev,
       scriptHash: record.scriptHash,
+      operationID: record.operationID,
+      operationRole: record.operationRole,
       restartSafe: record.restartSafe,
       riskClasses: record.riskClasses,
       maxRuntimeMinutes: record.maxRuntimeMinutes,
@@ -554,6 +564,8 @@ function createBotHost(options) {
     expectedExpiresAt = null,
     callerSessionID = null,
     beforeStart = null,
+    operationID = null,
+    operationRole = null,
   }) {
     const isCompanion = kind === "companion";
     let resumingAbandonment = null;
@@ -706,6 +718,8 @@ function createBotHost(options) {
       scriptName: recordScriptName,
       scriptRev: normalizedRev,
       scriptHash: normalizedHash,
+      operationID: typeof operationID === "string" && operationID.length > 0 ? operationID : null,
+      operationRole: ["MINER", "HAULER", "DEFENDER"].includes(operationRole) ? operationRole : null,
       restartSafe: runPolicy.restartSafe === true,
       riskClasses: [...runPolicy.riskClasses],
       maxRuntimeMinutes: grantVerdict.grant.maxRuntimeMinutes,
@@ -879,6 +893,21 @@ function createBotHost(options) {
     return rows;
   }
 
+  /** Internal, authenticated callers use this to reconcile cross-account operations. */
+  function listAll() {
+    return [...records.values()].map(publicBot);
+  }
+
+  /** The operation association carried by this exact running bot capability. */
+  function operationForClaim(characterID, secret) {
+    if (!authorizesClaim(characterID, secret)) return null;
+    const botID = claims.get(Number(characterID));
+    const record = botID ? records.get(botID) : null;
+    return record?.operationID
+      ? { operationID: record.operationID, operationRole: record.operationRole }
+      : null;
+  }
+
   /** The RUNNING bot claiming this character, or null — the select guard. */
   function claimedBy(characterID) {
     return claims.get(characterID) || null;
@@ -994,6 +1023,8 @@ function createBotHost(options) {
       scriptName: String(row.scriptName || "Untitled bot"),
       scriptRev: Number(row.scriptRev || 0),
       scriptHash: String(row.scriptHash || ""),
+      operationID: typeof row.operationID === "string" ? row.operationID : null,
+      operationRole: ["MINER", "HAULER", "DEFENDER"].includes(row.operationRole) ? row.operationRole : null,
       restartSafe: false,
       riskClasses: Array.isArray(row.riskClasses) ? row.riskClasses.map(String) : [],
       maxRuntimeMinutes: Number(row.maxRuntimeMinutes || 0),
@@ -1089,6 +1120,8 @@ function createBotHost(options) {
                 expectedScriptRev: row.scriptRev,
                 expectedScriptHash: row.scriptHash,
                 expectedExpiresAt: row.expiresAt,
+                operationID: row.operationID ?? null,
+                operationRole: row.operationRole ?? null,
               })
             : await start({
                 account,
@@ -1103,6 +1136,8 @@ function createBotHost(options) {
                 expectedScriptRev: row.scriptRev,
                 expectedScriptHash: row.scriptHash,
                 expectedExpiresAt: row.expiresAt,
+                operationID: row.operationID ?? null,
+                operationRole: row.operationRole ?? null,
               });
         if (!outcome.ok) {
           recordResumeFailure(row, outcome.message || outcome.code);
@@ -1126,8 +1161,10 @@ function createBotHost(options) {
     start,
     stop,
     list,
+    listAll,
     claimedBy,
     authorizesClaim,
+    operationForClaim,
     activeCharacterIDs,
     activeBots,
     sampleAllVitals,

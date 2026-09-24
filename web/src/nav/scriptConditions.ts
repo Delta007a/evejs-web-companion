@@ -55,6 +55,8 @@ import type { PropulsionModule } from "./propulsion.ts";
 export interface ScannedAnomaly {
   readonly label: string;
   readonly kind: ExplorationSiteKind;
+  /** Raw scanner archetype, retained so operation policy can keep ICE disabled. */
+  readonly archetypeID?: number | null;
   /**
    * Where the site sits in this solar system, in metres — the scanner row's own
    * `position`, not a guess. Optional, and `null` when the row carried none.
@@ -72,6 +74,42 @@ export interface DryBelt {
   readonly beltName: string;
   readonly all: boolean;
   readonly families: readonly number[];
+}
+
+export type MiningOperationRole = "MINER" | "HAULER" | "DEFENDER";
+export type MiningTargetType = "BELT" | "ORE_ANOMALY" | "ICE" | "GAS";
+
+export interface MiningOperationTarget {
+  readonly targetKey: string;
+  readonly targetType: MiningTargetType;
+  readonly systemID: number;
+  readonly systemName: string | null;
+  readonly targetName: string;
+  readonly state: "AVAILABLE" | "RESERVED" | "ACTIVE" | "DRAINING" | "DEPLETED";
+  readonly claimedByOperationID: string | null;
+}
+
+/** Stored BFF coordination only. Reading this never reads the game world. */
+export interface MiningOperationAssignment {
+  readonly operationID: string;
+  readonly operationName: string;
+  readonly role: MiningOperationRole;
+  readonly unloadPolicy: "HAULER_SERVICE" | "SELF_UNLOAD";
+  readonly area: {
+    readonly anchorSystemID: number;
+    readonly anchorSystemName: string | null;
+    readonly reach: "CURRENT_SYSTEM" | "CURRENT_AND_ADJACENT";
+    readonly targetClasses: readonly MiningTargetType[];
+  };
+  readonly state: string;
+  readonly currentTarget: MiningOperationTarget | null;
+  readonly logisticsTarget: MiningOperationTarget | null;
+  readonly rendezvous: {
+    readonly kind: "MINER_CLEARANCE" | "SELF_UNLOAD";
+    readonly required: readonly number[];
+    readonly ready: readonly number[];
+    readonly thisMemberReady: boolean;
+  } | null;
 }
 
 /**
@@ -200,6 +238,10 @@ export interface ScriptObservation {
    * unreadable — treated as "nothing known", never as "all dry".
    */
   readonly dryBelts?: readonly DryBelt[] | null;
+  /** This hosted runner's BFF-side Mining Operation assignment, if any. */
+  readonly miningOperation?: MiningOperationAssignment | null;
+  /** Run-local backoff after another operation won an atomic reservation. */
+  readonly unavailableMiningTargetKeys?: readonly string[];
   /** True when a PLAYER's ship on this grid has locked this ship. */
   readonly targetedByPlayer?: boolean | null;
   /** The lowest health, 0..1, among YOUR drones out in space; null with none out. */

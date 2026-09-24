@@ -728,6 +728,25 @@ test("the running roster is mirrored to disk and cleared when the bot ends", asy
   assert.equal(readRosterFile(rosterPath).length, 0);
 });
 
+test("a Mining Operation association follows the exact hosted claim and persists without runtime target state", async () => {
+  const rosterPath = tempRosterPath();
+  const host = makeHost({ persistPath: rosterPath });
+  const started = await host.start({ ...START, operationID: "op-1", operationRole: "MINER" });
+  assert.equal(started.ok, true);
+  assert.equal(started.bot.operationID, "op-1");
+  assert.equal(started.bot.operationRole, "MINER");
+  assert.deepEqual(host.operationForClaim(START.characterID, "private-claim-capability"), {
+    operationID: "op-1",
+    operationRole: "MINER",
+  });
+  assert.equal(host.operationForClaim(START.characterID, "wrong-capability"), null);
+  const row = readRosterFile(rosterPath)[0];
+  assert.equal(row.operationID, "op-1");
+  assert.equal(row.operationRole, "MINER");
+  assert.equal("currentTarget" in row, false);
+  await host.stopAll();
+});
+
 test("resume restarts a persisted bot on a fresh host (the restart path)", async () => {
   const rosterPath = tempRosterPath();
   const before = makeHost({ persistPath: rosterPath });

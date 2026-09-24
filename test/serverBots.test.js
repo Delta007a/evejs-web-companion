@@ -160,7 +160,12 @@ async function signInAndSelect(baseUrl, characterID) {
     body: { username: FARMER.username, password: "x" },
   });
   const token = login.payload.sessionToken;
-  await request(baseUrl, "/api/bridge/select", { method: "POST", token, body: { characterID } });
+  const selected = await request(baseUrl, "/api/bridge/select", { method: "POST", token, body: { characterID } });
+  await request(baseUrl, "/api/bridge/drone-recovery/ready", {
+    method: "POST",
+    token,
+    body: { checkID: selected.payload.droneRecoveryCheckID },
+  });
   return token;
 }
 
