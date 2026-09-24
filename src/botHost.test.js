@@ -296,8 +296,158 @@ test("the approved runtime deadline stops, logs out, and releases the character 
   assert.equal(row.status, "stopped");
   assert.match(row.why, /approved run time ended/i);
   assert.equal(host.claimedBy(START.characterID), null);
+  assert.ok(log.some(([name]) => name === "gracefulStopCustomBot"));
   assert.ok(log.some(([name]) => name === "stopCustomBot"));
   assert.ok(log.some(([name]) => name === "logout"));
+});
+
+async function timedFlightHarness(activity) {
+  const { recallFlightBeforeManualStop } = await import("../web/src/nav/miningDroneFlight.ts");
+  const log = [];
+  let deadline;
+  let currentOut = activity === "unreadable" ? null : activity === "none" ? [] : [{
+    itemID: 81, typeID: activity === "fighting" ? 100 : 101,
+    controlled: true, activity, targetID: null,
+  }];
+  let firstRead;
+  let firstRecall;
+  let continueRead;
+  const readStarted = new Promise(resolve => { firstRead = resolve; });
+  const recallIssued = new Promise(resolve => { firstRecall = resolve; });
+  const readGate = new Promise(resolve => { continueRead = resolve; });
+  let cleanupDeadline = null;
+  const factory = makeFakeStack(log);
+  const host = makeHost({ log,
+    setDeadlineTimeout(callback, delayMs) {
+      deadline = { callback, delayMs, unref() {} };
+      return deadline;
+    },
+    clearDeadlineTimeout() {},
+    loadStack: async () => {
+      const stack = await factory();
+      return { ...stack, createAppFlow(store, options) {
+        const flow = stack.createAppFlow(store, options);
+        return { ...flow, async gracefulStopCustomBot(deadlineMs) {
+          log.push(["gracefulStopCustomBot"]);
+          cleanupDeadline = deadlineMs;
+          store._set({ customBot: { ...IDLE_SLICE, status: "paused", phase: "Recalling drones" } });
+          await recallFlightBeforeManualStop({
+            read: async () => {
+              firstRead();
+              return currentOut === null ? null : { bay: null, out: currentOut, maxActive: null, roles: {} };
+            },
+            recall: async ids => { log.push(["recallDrones", [...ids]]); firstRecall(); },
+            sleep: async () => { if (currentOut !== null) await readGate; },
+            deadlineMs,
+          });
+        } };
+      } };
+    },
+  });
+  return {
+    host, log, get deadline() { return deadline; }, get cleanupDeadline() { return cleanupDeadline; },
+    readStarted, recallIssued,
+    returned() { currentOut = []; continueRead(); },
+    unreadable() { currentOut = null; continueRead(); },
+  };
+}
+
+for (const [role, activity] of [["mining", "mining"], ["combat", "fighting"]]) {
+  test(`timed expiry recalls ${role} drones before logout and claim release`, async () => {
+    const h = await timedFlightHarness(activity);
+    const started = await h.host.start(START);
+    const expiry = h.deadline.callback();
+    await h.recallIssued;
+    assert.deepEqual(h.log.find(([name]) => name === "recallDrones"), ["recallDrones", [81]]);
+    assert.notEqual(h.host.claimedBy(START.characterID), null);
+    assert.equal(h.log.some(([name]) => name === "logout"), false);
+    assert.equal(h.host.list(7)[0].status, "paused");
+    const followUp = h.host.stop(started.bot.botID, 7);
+    h.returned();
+    const [outcome, repeated] = await Promise.all([expiry, followUp]);
+    assert.equal(outcome.ok, true);
+    assert.equal(repeated.ok, true);
+    assert.equal(h.log.filter(([name]) => name === "gracefulStopCustomBot").length, 1);
+    assert.equal(outcome.bot.status, "stopped");
+    assert.match(outcome.bot.why, /approved run time ended/i);
+    assert.equal(h.host.claimedBy(START.characterID), null);
+    assert.equal(h.log.filter(([name]) => name === "logout").length, 1);
+    assert.equal(started.bot.botID, outcome.bot.botID);
+  });
+}
+
+test("timed expiry waits for an already-returning flight without a duplicate recall", async () => {
+  const h = await timedFlightHarness("returning");
+  await h.host.start(START);
+  const expiry = h.deadline.callback();
+  await h.readStarted;
+  assert.equal(h.log.some(([name]) => name === "recallDrones"), false);
+  assert.notEqual(h.host.claimedBy(START.characterID), null);
+  h.returned();
+  assert.equal((await expiry).ok, true);
+  assert.equal(h.log.filter(([name]) => name === "logout").length, 1);
+});
+
+test("timed expiry with an empty flight finalizes without waiting", async () => {
+  const h = await timedFlightHarness("none");
+  await h.host.start(START);
+  const outcome = await h.deadline.callback();
+  assert.equal(outcome.ok, true);
+  assert.equal(h.log.some(([name]) => name === "recallDrones"), false);
+  assert.equal(h.log.filter(([name]) => name === "logout").length, 1);
+});
+
+test("unreadable drone authority blocks timed expiry without logout", async () => {
+  const h = await timedFlightHarness("unreadable");
+  await h.host.start(START);
+  const outcome = await h.deadline.callback();
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.code, "DRONE_RETURN_UNCONFIRMED");
+  assert.equal(outcome.bot.status, "paused");
+  assert.match(outcome.bot.why, /expiry cleanup blocked/i);
+  assert.notEqual(h.host.claimedBy(START.characterID), null);
+  assert.equal(h.log.some(([name]) => name === "logout"), false);
+});
+
+test("a drone read failing after recall leaves timed cleanup blocked and owned", async () => {
+  const h = await timedFlightHarness("mining");
+  await h.host.start(START);
+  const expiry = h.deadline.callback();
+  await h.recallIssued;
+  h.unreadable();
+  const outcome = await expiry;
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.bot.status, "paused");
+  assert.notEqual(h.host.claimedBy(START.characterID), null);
+  assert.equal(h.log.some(([name]) => name === "logout"), false);
+});
+
+test("manual Stop and deadline expiry share one pending drone recovery", async () => {
+  const h = await timedFlightHarness("mining");
+  const started = await h.host.start(START);
+  const manual = h.host.stop(started.bot.botID, 7);
+  await h.recallIssued;
+  assert.equal(h.cleanupDeadline(), null);
+  const expiry = h.deadline.callback();
+  const repeated = h.host.stop(started.bot.botID, 7);
+  assert.equal(h.cleanupDeadline(), Date.parse(started.bot.expiresAt) + 3 * 60 * 1000);
+  assert.equal(h.log.filter(([name]) => name === "gracefulStopCustomBot").length, 1);
+  assert.equal(h.log.some(([name]) => name === "logout"), false);
+  h.returned();
+  const results = await Promise.all([manual, expiry, repeated]);
+  assert.ok(results.every(result => result.ok));
+  assert.equal(h.log.filter(([name]) => name === "logout").length, 1);
+});
+
+test("all four duration presets arm the same graceful expiry path", async () => {
+  for (const minutes of [60, 240, 720, 1440]) {
+    const h = await timedFlightHarness("none");
+    await h.host.start({ ...START, grant: { ...START.grant, maxRuntimeMinutes: minutes } });
+    assert.equal(h.deadline.delayMs, minutes * 60_000);
+    assert.equal((await h.deadline.callback()).ok, true);
+    assert.equal(h.log.filter(([name]) => name === "gracefulStopCustomBot").length, 1);
+    assert.equal(h.log.filter(([name]) => name === "logout").length, 1);
+  }
 });
 
 test("a second bot may not take a claimed character", async () => {

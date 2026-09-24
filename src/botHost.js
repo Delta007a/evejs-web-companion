@@ -94,6 +94,11 @@ const VITALS_SAMPLE_MS = 15_000;
 // restart (see persistRoster below).
 const MAX_ENDED_RUNS = 20;
 
+// webAuth keeps a bot token valid for five minutes beyond the approved run.
+// Stop issuing recall reads after three minutes: one bridge request can take
+// 65 seconds, leaving time for that request and session logout to complete.
+const EXPIRY_DRONE_CLEANUP_MS = 3 * 60 * 1000;
+
 // The browser stack, imported once per process and shared by every bot. Kept
 // lazy so `require("./botHost")` stays cheap and the BFF boots even if the
 // web sources are absent (the routes then fail per-start, not at boot).
@@ -723,6 +728,7 @@ function createBotHost(options) {
       unsubscribe: null,
       claimSecret: createClaimSecret(),
       deadlineTimer: null,
+      expiryRequested: false,
       // The roster row's authority for a companion (see persistRoster's
       // comment) — null for a script, which is authored by the library instead.
       companionRequest: isCompanion ? decodedRequest : null,
@@ -804,9 +810,11 @@ function createBotHost(options) {
         if (record.finalized) {
           return;
         }
-        record.status = "stopped";
-        record.why = "The approved run time ended, so the server stopped this bot.";
-        void finalize(record);
+        record.deadlineTimer = null;
+        record.expiryRequested = true;
+        // The ordinary Stop and this timer share one in-progress operation.
+        // Neither may finalize the runner before its controlled flight returns.
+        return stop(record.botID, record.accountID).catch(logError);
       }, remainingMs);
       if (typeof record.deadlineTimer.unref === "function") {
         record.deadlineTimer.unref();
@@ -830,30 +838,34 @@ function createBotHost(options) {
     if (!record || record.accountID !== Number(accountID)) {
       return { ok: false, code: "BOT_NOT_FOUND" };
     }
-    if (record.manualStopPromise) return record.manualStopPromise;
+    if (record.gracefulStopPromise) return record.gracefulStopPromise;
     const pending = (async () => {
-      // Manual Stop is the only teardown that must recover the flight first.
-      // Deadline expiry, process shutdown and session failure still finalize
-      // through their existing forced path.
+      // User Stop and natural expiry recover the flight before teardown.
+      // Process shutdown and session failure retain their forced path.
       if (!record.finalized && record.kind === "script" && record.flow) {
         try {
-          await record.flow.gracefulStopCustomBot();
+          // The closure also covers a manual Stop already in flight when the
+          // deadline timer fires: that same recall loop gains the expiry bound.
+          await record.flow.gracefulStopCustomBot(() => record.expiryRequested
+            ? Date.parse(record.expiresAt) + EXPIRY_DRONE_CLEANUP_MS : null);
         } catch (error) {
           const reason = error && error.message ? String(error.message) : "Drone return could not be confirmed; Stop is paused.";
+          const blocked = record.expiryRequested ? `Approved run time ended; expiry cleanup blocked. ${reason}` : reason;
           record.status = "paused";
           record.phase = "Stop blocked";
-          record.why = reason;
-          record.pauseReason = reason;
+          record.why = blocked;
+          record.pauseReason = blocked;
           persistRoster();
-          return { ok: false, code: "DRONE_RETURN_UNCONFIRMED", message: reason, bot: publicBot(record) };
+          return { ok: false, code: "DRONE_RETURN_UNCONFIRMED", message: blocked, bot: publicBot(record) };
         }
       }
       if (!record.finalized) record.status = "stopped";
+      if (record.expiryRequested) record.why = "The approved run time ended, so the server stopped this bot after drone recovery.";
       await finalize(record);
       return { ok: true, bot: publicBot(record) };
     })();
-    record.manualStopPromise = pending;
-    try { return await pending; } finally { if (record.manualStopPromise === pending) record.manualStopPromise = null; }
+    record.gracefulStopPromise = pending;
+    try { return await pending; } finally { if (record.gracefulStopPromise === pending) record.gracefulStopPromise = null; }
   }
 
   function list(accountID) {

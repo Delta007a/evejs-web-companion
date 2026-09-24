@@ -1132,8 +1132,8 @@ export interface AppFlow {
   resumeCustomBot(): void;
   /** Stop it (it stops and never calls the bridge again). */
   stopCustomBot(): Promise<void>;
-  /** User Stop, including server-hosted scripts; rejects while recall is unconfirmed. */
-  gracefulStopCustomBot(): Promise<void>;
+  /** User Stop or timed expiry; rejects while drone return is unconfirmed. */
+  gracefulStopCustomBot(cleanupDeadlineMs?: () => number | null): Promise<void>;
   /** The character's saved-fitting library (for the Bot Builder's fitting picker). */
   listSavedFittings(): Promise<readonly import("../bridge/fittings.ts").SavedFitting[]>;
   /** The character's saved bookmarks (for the Bot Builder's saved-spot picker). */
@@ -7214,11 +7214,15 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     }
   }
 
-  async function confirmDronesHomeForManualStop(): Promise<void> {
+  async function confirmDronesHomeForManualStop(cleanupDeadlineMs?: () => number | null): Promise<void> {
     await recallFlightBeforeManualStop({
       read: async () => {
         const flight = decodeFlightStatus((await api.getFlightStatus(callOptions)).flight);
         if (flight.docked) return { bay: [], out: [], maxActive: 0, roles: {} };
+        // One authority read can take 65 seconds. Do not begin the second read
+        // after the timed-run cleanup window has closed.
+        const deadline = cleanupDeadlineMs?.() ?? null;
+        if (deadline !== null && Date.now() >= deadline) return null;
         const raw = await api.getDrones(callOptions);
         const out = decodeDronesInSpace(raw.inSpace);
         // The ordinary decoder treats an absent `controlled` flag as false for
@@ -7230,6 +7234,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       },
       recall: async ids => { await api.recallDrones(ids, callOptions); },
       sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+      deadlineMs: cleanupDeadlineMs,
     });
   }
 
@@ -7251,7 +7256,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     return miningManualStop;
   }
 
-  function gracefulStopCustomBot(): Promise<void> {
+  function gracefulStopCustomBot(cleanupDeadlineMs?: () => number | null): Promise<void> {
     if (customManualStop !== null) return customManualStop;
     const controller = scriptRunner;
     if (controller === null) return Promise.resolve();
@@ -7260,7 +7265,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       autopilot?.abort();
       try {
         await settleIssuedWork(controller.beginGracefulStop());
-        await confirmDronesHomeForManualStop();
+        await confirmDronesHomeForManualStop(cleanupDeadlineMs);
         await stopCustomController();
       } catch (error) {
         controller.blockManualStop(error instanceof Error ? error.message : "Drone return could not be confirmed; Stop is paused.");

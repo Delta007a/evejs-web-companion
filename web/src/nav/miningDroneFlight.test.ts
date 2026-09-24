@@ -184,6 +184,19 @@ test("manual Stop fails closed after bounded unreadable drone observations", asy
   assert.equal(reads, MANUAL_STOP_RECALL_OBSERVATIONS);
 });
 
+test("timed cleanup stops retrying before the bot credential margin is spent", async () => {
+  let clock = 100;
+  let recalls = 0;
+  await assert.rejects(recallFlightBeforeManualStop({
+    read: async () => state([drone(81)], 1),
+    recall: async () => { recalls++; },
+    sleep: async () => { clock = 201; },
+    deadlineMs: () => 200,
+    now: () => clock,
+  }), /Stop is paused/);
+  assert.equal(recalls, 1);
+});
+
 
 test("unknown reads interrupt the consecutive clear-grid confirmation", () => {
   const tick = driver();

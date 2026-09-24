@@ -128,15 +128,23 @@ export function decideMiningDroneFlight(
   return result(action);
 }
 
-/** The manual Stop path uses the same recall/return authority as travel. */
+/** Graceful Stop (manual or timed) uses the same recall/return authority as travel. */
 export async function recallFlightBeforeManualStop(deps: {
   read(): Promise<MiningDroneState | null>;
   recall(ids: readonly number[]): Promise<void>;
   sleep(ms: number): Promise<void>;
+  /** Server expiry may shorten the retry window to fit its credential margin. */
+  deadlineMs?(): number | null;
+  now?(): number;
 }): Promise<void> {
   let memory = freshDroneMemory();
   let lastFailure: unknown = null;
+  const deadlineReached = () => {
+    const deadline = deps.deadlineMs?.() ?? null;
+    return deadline !== null && (deps.now?.() ?? Date.now()) >= deadline;
+  };
   for (let observation = 0; observation < MANUAL_STOP_RECALL_OBSERVATIONS; observation++) {
+    if (deadlineReached()) break;
     let state: MiningDroneState | null = null;
     try { state = await deps.read(); } catch (error) { lastFailure = error; }
     // An already-returning flight has received its recall order. Wait for the
@@ -147,6 +155,7 @@ export async function recallFlightBeforeManualStop(deps: {
     const decision = decideMiningDroneFlight(state, memory, null, null, true);
     memory = decision.memory;
     if (state?.out != null && state.out.every(d => !d.controlled) && memory.returning.length === 0) return;
+    if (deadlineReached()) break;
     if (decision.action?.kind === "recallDrones") {
       try { await deps.recall(decision.action.droneIDs); } catch (error) { lastFailure = error; }
     }
