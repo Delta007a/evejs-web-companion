@@ -13,13 +13,52 @@ export interface RequirementRow {
 
 export interface MinerStage {
   readonly id: string;
+  readonly supportPolicyKey: string;
   readonly fitName: string;
   readonly hullTypeID: number;
+  readonly fitting: StageFittingState;
   readonly hard: readonly RequirementRow[];
   readonly support: readonly RequirementRow[];
   readonly skillQualification: QualificationState;
   readonly equipmentReadiness: QualificationState;
   readonly equipmentReason: string;
+}
+
+export interface StageFittingSelection {
+  readonly scope: "CORPORATION";
+  readonly ownerID: number;
+  readonly fittingID: number;
+  readonly acceptedSavedDate?: string;
+  readonly acceptedFingerprint?: string;
+}
+
+export interface StageFittingState {
+  readonly status: "READY" | "UNCONFIGURED" | "INVALID_FIT" | "UNKNOWN" | "REVIEW_REQUIRED";
+  readonly fittingID?: number;
+  readonly name?: string;
+  readonly reason?: string;
+  readonly acceptedFingerprint?: string | null;
+  readonly acceptedSavedDate?: string | null;
+  readonly currentFingerprint?: string;
+  readonly currentSavedDate?: string;
+}
+
+export interface CorporationSavedFitting {
+  readonly fittingID: number;
+  readonly ownerID: number;
+  readonly shipTypeID: number | null;
+  readonly name: string;
+  readonly savedDate: string | null;
+  readonly fingerprint: string | null;
+  readonly items: readonly { readonly typeID: number; readonly flagID: number; readonly quantity: number }[];
+  readonly invalid: boolean;
+  readonly reason: string | null;
+}
+
+export interface MinerTrainingRead {
+  readonly report: MinerReport;
+  readonly corporationID: number;
+  readonly fittings: readonly CorporationSavedFitting[];
 }
 
 export type PlanEta =

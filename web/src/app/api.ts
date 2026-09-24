@@ -31,7 +31,7 @@ import {
   type RequestPriority,
 } from "./transport.ts";
 import type { JsonValue } from "../bridge/wire.ts";
-import type { MinerReport, TrainingCharacter } from "../training/types.ts";
+import type { MinerTrainingRead, StageFittingSelection, TrainingCharacter } from "../training/types.ts";
 import type {
   AgentRow,
   IndustryActivity,
@@ -4464,14 +4464,21 @@ export async function loadTrainingCharacters(options: ApiOptions = {}): Promise<
 }
 
 /** Gateway-owned skills plus static EveJS prerequisite closure, without a held session. */
-export async function loadMinerTraining(characterID: number, options: ApiOptions = {}): Promise<MinerReport> {
-  const data = await getJson(`/api/pilot-training/miner?characterID=${encodeURIComponent(characterID)}`, options);
-  const report = data.report as unknown as MinerReport | null;
+export async function loadMinerTraining(
+  characterID: number,
+  selections: Readonly<Record<string, StageFittingSelection>> = {},
+  options: ApiOptions = {},
+): Promise<MinerTrainingRead> {
+  const query = new URLSearchParams({ characterID: String(characterID), selections: JSON.stringify(selections) });
+  const data = await getJson(`/api/pilot-training/miner?${query}`, options);
+  const report = data.report as unknown as MinerTrainingRead["report"] | null;
   if (!report || report.role !== "MINER" || !Array.isArray(report.stages) ||
-      !report.previews || report.pilot?.characterID !== characterID) {
+      !report.previews || report.pilot?.characterID !== characterID ||
+      !Number.isSafeInteger(data.corporationID) || !Array.isArray(data.fittings)) {
     throw new BridgeCallError("BRIDGE_BAD_RESPONSE", "Training qualification read is incomplete.", 502);
   }
-  return report;
+  return { report, corporationID: data.corporationID as number,
+    fittings: data.fittings as unknown as MinerTrainingRead["fittings"] };
 }
 
 // --- R28 Skills: the character sheet and the training queue -------------------

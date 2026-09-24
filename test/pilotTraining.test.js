@@ -11,12 +11,14 @@ const {
 
 const NOW = 1_800_000_000_000;
 const REQ = [[182, 277], [183, 278], [184, 279], [1285, 1286], [1289, 1287], [1290, 1288]];
+const TYPES = { VENTURE: [32880, 483, 2464], PIONEER: [89240, 483, 10246], PROCURER: [17480, 17482, 15508] };
+const accepted = Object.fromEntries(Object.entries(TYPES).map(([id, typeIDs]) => [id, { status: "READY", typeIDs, name: `${id} test fitting` }]));
 
 function fixture(edges = {}) {
   edges = { 32880: [[11, 1]], 89240: [[11, 2]], 17480: [[11, 3]], ...edges };
   const skillIDs = new Set([11, 12, 13, 14, 3436, 3386, 22578, 3438, 3418, 3449, 3419, 3426, 3413, 3417, 24241, 3416, 3429, 3450, 3431, 3410, 33699, 3425, 3327, 3453]);
   for (const pairs of Object.values(edges)) for (const [id] of pairs) skillIDs.add(id);
-  const equipmentIDs = new Set(STAGES.flatMap((stage) => [stage.hull, ...stage.modules, ...stage.drones.map(([typeID]) => typeID)]));
+  const equipmentIDs = new Set(Object.values(TYPES).flat());
   return {
     getType(id) { return skillIDs.has(id) || equipmentIDs.has(id) ? { typeID: id } : null; },
     getSkillType(id) { return skillIDs.has(id) ? { typeID: id, name: `Skill ${id}` } : null; },
@@ -75,7 +77,7 @@ test("trained, training, queued, missing and unknown are distinct", () => {
 
 test("Venture to Pioneer FAST delta differs from BALANCED and intentional V MASTERY", () => {
   const data = fixture({ 32880: [[11, 1]], 89240: [[11, 2], [12, 1]], 17480: [[11, 3]] });
-  const report = buildMinerReport(data, sheet({ 11: 1 }), { characterID: 7, account: "BMiner4" });
+  const report = buildMinerReport(data, sheet({ 11: 1 }), { characterID: 7, account: "BMiner4" }, accepted);
   assert.equal(report.currentStage, "VENTURE");
   assert.equal(report.stages[0].skillQualification, "READY");
   assert.equal(report.stages[1].skillQualification, "NOT_READY");
@@ -87,27 +89,27 @@ test("Venture to Pioneer FAST delta differs from BALANCED and intentional V MAST
 
 test("a queued or training hull prerequisite never qualifies its stage", () => {
   const data = fixture();
-  const queued = buildMinerReport(data, sheet({}, [{ typeID: 11, toLevel: 1, endTimeMs: NOW + 1000 }]));
+  const queued = buildMinerReport(data, sheet({}, [{ typeID: 11, toLevel: 1, endTimeMs: NOW + 1000 }]), {}, accepted);
   assert.equal(queued.stages[0].hard.find((row) => row.typeID === 11).state, "TRAINING");
   assert.equal(queued.stages[0].skillQualification, "NOT_READY");
   const later = buildMinerReport(data, sheet({}, [
     { typeID: 12, toLevel: 1, endTimeMs: NOW + 1000 },
     { typeID: 11, toLevel: 1, endTimeMs: NOW + 2000 },
-  ]));
+  ]), {}, accepted);
   assert.equal(later.stages[0].hard.find((row) => row.typeID === 11).state, "QUEUED");
   assert.equal(later.stages[0].skillQualification, "NOT_READY");
   const alreadyQualified = buildMinerReport(data, sheet({ 11: 1 }, [
     { typeID: 11, toLevel: 2, endTimeMs: NOW + 1000 },
-  ]));
+  ]), {}, accepted);
   assert.equal(alreadyQualified.stages[0].hard.find((row) => row.typeID === 11).state, "TRAINED");
   assert.equal(alreadyQualified.stages[0].hard.find((row) => row.typeID === 11).queuePosition, -1);
 });
 
 test("unreadable queue fails qualification closed without confusing equipment", () => {
-  const report = buildMinerReport(fixture({ 32880: [[11, 1]] }), sheet({ 11: 1 }, [], { queue: null }));
+  const report = buildMinerReport(fixture({ 32880: [[11, 1]] }), sheet({ 11: 1 }, [], { queue: null }), {}, accepted);
   assert.equal(report.stages[0].skillQualification, "UNKNOWN");
   assert.equal(report.stages[0].equipmentReadiness, "UNKNOWN");
-  const malformed = buildMinerReport(fixture({ 32880: [[11, 1]] }), sheet({ 11: 1 }, [], { skills: [{ typeID: 11, level: null }] }));
+  const malformed = buildMinerReport(fixture({ 32880: [[11, 1]] }), sheet({ 11: 1 }, [], { skills: [{ typeID: 11, level: null }] }), {}, accepted);
   assert.equal(malformed.stages[0].skillQualification, "UNKNOWN");
 });
 
@@ -115,7 +117,7 @@ test("missing static dogma cannot produce a false READY verdict", () => {
   const data = fixture();
   const get = data.getTypeDogma;
   data.getTypeDogma = (id) => id === 32880 ? null : get(id);
-  assert.throws(() => buildMinerReport(data, sheet({ 11: 5 })), /Static dogma unavailable/);
+  assert.throws(() => buildMinerReport(data, sheet({ 11: 5 }), {}, accepted), /Static dogma unavailable/);
 });
 
 test("ETA consumes effective server queue timestamps and never inserts retail or x50 constants", () => {
@@ -127,26 +129,19 @@ test("ETA consumes effective server queue timestamps and never inserts retail or
 
 const runtime = process.env.EVEJS_ROOT;
 const realDogma = runtime && fs.existsSync(path.join(runtime, "_local", "gameStore", "data", "typeDogma", "data.json"));
-test("current EveJS static closure has audited Miner minima and no invented active-drone floor", { skip: !realDogma }, () => {
+test("current EveJS dogma closes selected fitting types without a drone-count floor", { skip: !realDogma }, () => {
   const data = require("../src/staticData");
-  const expected = [
-    ["VENTURE", [[3386, 3], [32918, 1], [3436, 1]]],
-    ["PIONEER", [[3386, 4], [32918, 3], [3380, 3], [3436, 1]]],
-    ["PROCURER", [[3386, 4], [3410, 3], [3380, 5], [3402, 4], [17940, 1], [3436, 3]]],
-  ];
-  for (const [index, [name, checks]] of expected.entries()) {
-    const stage = STAGES[index];
-    assert.equal(stage.id, name);
-    const closure = prerequisiteClosure([stage.hull, ...stage.modules, ...stage.drones.map(([typeID]) => typeID)], data);
-    for (const [id, level] of checks) assert.equal(closure.get(id), level, `${name} skill ${id}`);
-    assert.ok((closure.get(3436) || 0) < 4, `${name} must not invent Drones IV/V for active count`);
+  assert.deepEqual(STAGES.map((stage) => stage.id), ["VENTURE", "PIONEER", "PROCURER"]);
+  for (const stage of STAGES) {
+    const closure = prerequisiteClosure(accepted[stage.id].typeIDs, data);
+    assert.ok(closure.size > 0);
+    assert.ok((closure.get(3436) || 0) < 4, `${stage.id} must not invent Drones IV/V for active count`);
   }
-  const venture = STAGES[0];
-  const ventureSkills = prerequisiteClosure([venture.hull, ...venture.modules, ...venture.drones.map(([typeID]) => typeID)], data);
+  const ventureSkills = prerequisiteClosure(accepted.VENTURE.typeIDs, data);
   const trained = Object.fromEntries(ventureSkills);
-  const report = buildMinerReport(data, sheet(trained));
+  const report = buildMinerReport(data, sheet(trained), {}, accepted);
   assert.equal(report.currentStage, "VENTURE");
   assert.equal(report.nextStage, "PIONEER");
-  assert.ok(report.previews.FAST.targets.some((row) => row.name === "Mining" && row.level === 4));
+  assert.ok(report.previews.FAST.targets.length > 0);
   assert.equal(report.stages[0].equipmentReadiness, "UNKNOWN");
 });

@@ -14,6 +14,7 @@ const eveGatewayClient = require("./eveGatewayClient");
 const webAuth = require("./webAuth");
 const staticDataModule = require("./staticData");
 const pilotTraining = require("./pilotTraining");
+const pilotTrainingFittings = require("./pilotTrainingFittings");
 const config = require("./config");
 const botScriptStoreModule = require("./botScriptStore");
 const botHostModule = require("./botHost");
@@ -18390,11 +18391,32 @@ app.get("/api/pilot-training/miner", requireAuth, async (req, res, next) => {
     return;
   }
   try {
-    const character = await store.getCharacterForAccount(req.account.accountID, characterID);
-    if (!character) {
+    const library = await pilotTrainingFittings.readAccountCorpFittings({
+      store, gateway, accountID: req.account.accountID, characterID, data: staticData,
+    });
+    if (library.status === "NOT_OWNED") {
       res.status(404).json({ ok: false, error: "CHARACTER_NOT_FOUND" });
       return;
     }
+    if (library.status !== "READY") {
+      res.status(503).json({ ok: false, error: "CORPORATION_FITTINGS_UNAVAILABLE" });
+      return;
+    }
+    let selections = {};
+    if (req.query.selections !== undefined) {
+      try {
+        const raw = String(req.query.selections);
+        if (raw.length > 4096) throw new Error("Too large");
+        selections = JSON.parse(raw);
+        if (!selections || typeof selections !== "object" || Array.isArray(selections)) throw new Error("Not an object");
+      } catch (error) {
+        res.status(400).json({ ok: false, error: "INVALID_TRAINING_CONFIGURATION" });
+        return;
+      }
+    }
+    const stageFittings = pilotTrainingFittings.resolveStageFittings(
+      pilotTraining.STAGES, library.fittings, selections, library.corporationID,
+    );
     const sheet = await gateway.getSkills(req.account.accountID, characterID);
     if (!sheet) {
       res.status(503).json({ ok: false, error: "SKILL_STATE_UNAVAILABLE" });
@@ -18403,13 +18425,20 @@ app.get("/api/pilot-training/miner", requireAuth, async (req, res, next) => {
     let report;
     try {
       report = pilotTraining.buildMinerReport(staticData, sheet, {
-        characterID, name: character.characterName, account: req.account.username,
-      });
+        characterID, name: library.character.characterName, account: req.account.username,
+      }, stageFittings);
     } catch (error) {
       res.status(503).json({ ok: false, error: "STATIC_SKILL_DATA_UNAVAILABLE", message: error.message });
       return;
     }
-    res.json({ ok: true, report });
+    res.json({ ok: true, report, corporationID: library.corporationID,
+      fittings: library.fittings.map((fitting) => ({
+        fittingID: fitting.fittingID, ownerID: fitting.ownerID || library.corporationID,
+        shipTypeID: fitting.shipTypeID || null, name: fitting.name || "Invalid fitting",
+        savedDate: fitting.savedDate || null, fingerprint: fitting.fingerprint || null,
+        items: fitting.items || [], invalid: fitting.invalid === true,
+        reason: fitting.reason || null,
+      })) });
   } catch (error) {
     next(error);
   }

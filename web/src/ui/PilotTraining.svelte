@@ -3,9 +3,10 @@
   import { loadMinerTraining, loadTrainingCharacters } from "../app/api.ts";
   import { formatDuration, romanLevel } from "../bridge/skills.ts";
   import { panelErrorWords } from "../bridge/refusals.ts";
+  import { acceptStageFitting, fittingsForHull } from "../training/fittingSelection.ts";
   import type { AppFlow } from "../app/flow.ts";
   import type { ClientStore } from "../store/clientStore.ts";
-  import type { MinerReport, RequirementRow, TrainingCharacter, PlanEta } from "../training/types.ts";
+  import type { MinerReport, RequirementRow, TrainingCharacter, PlanEta, CorporationSavedFitting, StageFittingSelection } from "../training/types.ts";
 
   let { store, flow }: { store: ClientStore; flow: AppFlow } = $props();
   // svelte-ignore state_referenced_locally
@@ -15,10 +16,39 @@
   let selectedID = $state(0);
   let role = $state<"" | "MINER">("");
   let report = $state<MinerReport | null>(null);
+  let corporationID = $state(0);
+  let fittings = $state<readonly CorporationSavedFitting[]>([]);
+  let selections = $state<Record<string, StageFittingSelection>>({});
   let rosterLoaded = $state(false);
   let busy = $state(false);
   let error = $state("");
   let readNumber = 0;
+
+  function configKey(id: number): string { return `pilot-training:miner:${account}:${id}`; }
+  function readConfig(id: number): Record<string, StageFittingSelection> {
+    try {
+      const stored = JSON.parse(localStorage.getItem(configKey(id)) || "{}");
+      return stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
+    } catch { return {}; }
+  }
+  function saveConfig(): boolean {
+    try { localStorage.setItem(configKey(selectedID), JSON.stringify(selections)); return true; }
+    catch { error = "Browser storage is unavailable; the fitting selection was not saved."; return false; }
+  }
+  function selectFitting(stageID: string, fittingID: number): void {
+    const previous = selections;
+    selections = { ...selections };
+    if (fittingID > 0) selections[stageID] = { scope: "CORPORATION", ownerID: corporationID, fittingID };
+    else delete selections[stageID];
+    if (!saveConfig()) { selections = previous; return; }
+    void readPilot(selectedID);
+  }
+  function acceptFitting(stageID: string, fit: CorporationSavedFitting): void {
+    const previous = selections;
+    selections = acceptStageFitting(selections, stageID, corporationID, fit);
+    if (!saveConfig()) { selections = previous; return; }
+    void readPilot(selectedID);
+  }
 
   function etaWords(eta: PlanEta): string {
     if (eta.kind === "READY") return "Already trained";
@@ -30,12 +60,19 @@
     const read = ++readNumber;
     selectedID = id;
     report = null;
+    corporationID = 0;
+    fittings = [];
     error = "";
     if (!Number.isSafeInteger(id) || id <= 0 || role !== "MINER") return;
+    selections = readConfig(id);
     busy = true;
     try {
-      const result = await loadMinerTraining(id, flow.requestOptions());
-      if (read === readNumber) report = result;
+      const result = await loadMinerTraining(id, selections, flow.requestOptions());
+      if (read === readNumber) {
+        report = result.report;
+        corporationID = result.corporationID;
+        fittings = result.fittings;
+      }
     } catch (cause) {
       if (read === readNumber) error = panelErrorWords(cause);
     } finally {
@@ -125,8 +162,25 @@
     <section>
       <h3>Stages</h3>
       {#each report.stages as stage (stage.id)}
-        <details>
-          <summary>{stage.id} · {stage.fitName} · skills {stage.skillQualification} · equipment {stage.equipmentReadiness}</summary>
+        <details open={stage.fitting.status === "REVIEW_REQUIRED"}>
+          <summary>{stage.id} · {stage.fitName} · fitting {stage.fitting.status} · skills {stage.skillQualification} · equipment {stage.equipmentReadiness}</summary>
+          <label for={`training-fit-${stage.id}`}>Corporation saved fitting</label>
+          <select id={`training-fit-${stage.id}`} value={selections[stage.id]?.fittingID ?? 0} disabled={busy}
+            onchange={(event) => selectFitting(stage.id, Number(event.currentTarget.value))}>
+            <option value={0}>Choose fitting</option>
+            {#each fittingsForHull(fittings, stage.hullTypeID) as fit (fit.fittingID)}
+              <option value={fit.fittingID}>{fit.name} · #{fit.fittingID}</option>
+            {/each}
+          </select>
+          {#if stage.fitting.reason}<p class="note">{stage.fitting.reason}</p>{/if}
+          {#if stage.fitting.status === "REVIEW_REQUIRED"}
+            {@const selectedFit = fittings.find((fit) => fit.fittingID === selections[stage.id]?.fittingID)}
+            <p class="note">Accepted fingerprint: {stage.fitting.acceptedFingerprint ?? "none"}</p>
+            <p class="note">Accepted saved date: {stage.fitting.acceptedSavedDate ?? "none"} · Current saved date: {stage.fitting.currentSavedDate ?? "unknown"}</p>
+            {#if selectedFit && !selectedFit.invalid}
+              <button type="button" class="minor" disabled={busy} onclick={() => acceptFitting(stage.id, selectedFit)}>Accept current fitting</button>
+            {/if}
+          {/if}
           <h4>Hard requirements</h4>
           {@render skillRows(stage.hard)}
           <h4>Support policy</h4>

@@ -1,16 +1,16 @@
 "use strict";
 
-// Read-only Miner qualification. Template type IDs identify equipment; every
-// skill edge and level comes from the current EveJS typeDogma table.
+// Read-only Miner qualification. Stage hulls and support policy are local;
+// fitted item types arrive from an accepted corporation saved fitting.
 const REQUIREMENT_ATTRIBUTES = [
   [182, 277], [183, 278], [184, 279],
   [1285, 1286], [1289, 1287], [1290, 1288],
 ];
 
 const STAGES = Object.freeze([
-  { id: "VENTURE", fitName: "Start Venture", hull: 32880, modules: [22542, 578, 444, 439, 483, 483], drones: [[2464, 2], [10246, 2]] },
-  { id: "PIONEER", fitName: "Poineer Corp", hull: 89240, modules: [22542, 2046, 444, 439, 578, 483, 483, 483, 31370, 31370, 31752], drones: [[2464, 8], [10246, 8]] },
-  { id: "PROCURER", fitName: "Simulated Procurer Fitting", hull: 17480, modules: [22542, 22542, 2046, 444, 3829, 578, 17482, 17482, 31790, 31754], drones: [[10246, 10], [15508, 10]] },
+  { id: "VENTURE", expectedHullTypeID: 32880, supportPolicyKey: "VENTURE" },
+  { id: "PIONEER", expectedHullTypeID: 89240, supportPolicyKey: "PIONEER" },
+  { id: "PROCURER", expectedHullTypeID: 17480, supportPolicyKey: "PROCURER" },
 ]);
 
 // Versioned, deliberately small policy. These are development targets, never
@@ -171,17 +171,20 @@ function etaFor(targets, sheet, rows) {
   return { kind: "SERVER_QUEUE", completionMs, remainingMs: Math.max(0, completionMs - Number(sheet.serverNowMs)) };
 }
 
-function buildMinerReport(data, sheet, identity = {}) {
+function buildMinerReport(data, sheet, identity = {}, stageFittings = {}) {
   const rows = readSkillState(sheet);
   const stages = STAGES.map((stage) => {
-    const hard = prerequisiteClosure([stage.hull, ...stage.modules, ...stage.drones.map(([typeID]) => typeID)], data);
-    if (hard.size === 0) throw new Error(`No hull or fit skill requirements found for ${stage.id}`);
-    const support = closeSkillTargets(policyTargets(stage.id, "balanced"), data);
+    const fitting = stageFittings[stage.id] || { status: "UNCONFIGURED" };
+    const hard = fitting.status === "READY" ? prerequisiteClosure(fitting.typeIDs, data) : new Map();
+    if (fitting.status === "READY" && hard.size === 0) throw new Error(`No hull or fit skill requirements found for ${stage.id}`);
+    const support = closeSkillTargets(policyTargets(stage.supportPolicyKey, "balanced"), data);
     const hardRows = requirements(hard, sheet, rows, data);
     return {
-      id: stage.id, fitName: stage.fitName, hullTypeID: stage.hull, hard: hardRows,
+      id: stage.id, supportPolicyKey: stage.supportPolicyKey,
+      fitName: fitting.name || "No accepted corporation fitting", hullTypeID: stage.expectedHullTypeID,
+      fitting, hard: hardRows,
       support: requirements(support, sheet, rows, data),
-      skillQualification: qualification(hardRows),
+      skillQualification: fitting.status === "READY" ? qualification(hardRows) : "UNKNOWN",
       equipmentReadiness: "UNKNOWN",
       equipmentReason: stage.id === "VENTURE"
         ? "Venture's reported drone inventory is not explained by the inspected static bay and mod rule; live equipment capability is not inspected here."
@@ -203,12 +206,16 @@ function buildMinerReport(data, sheet, identity = {}) {
       continue;
     }
     const base = mode === "MASTERY" ? current : next;
+    if (base.fitting.status !== "READY") {
+      previews[mode] = { stage: base.id, targets: [], eta: { kind: "UNKNOWN", reason: "Stage fitting is not accepted and readable." } };
+      continue;
+    }
     const targets = mode === "FAST"
       ? base.hardTargets
       : mergeTargets(
           base.hardTargets,
-          closeSkillTargets(policyTargets(base.id, "balanced"), data),
-          ...(mode === "MASTERY" ? [closeSkillTargets(policyTargets(base.id, "mastery"), data)] : []),
+          closeSkillTargets(policyTargets(base.supportPolicyKey, "balanced"), data),
+          ...(mode === "MASTERY" ? [closeSkillTargets(policyTargets(base.supportPolicyKey, "mastery"), data)] : []),
         );
     const all = requirements(targets, sheet, rows, data);
     previews[mode] = {
