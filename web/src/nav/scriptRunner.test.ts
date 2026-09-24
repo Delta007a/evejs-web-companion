@@ -70,6 +70,7 @@ interface Harness {
   issueThrows?: (action: ScriptAction) => unknown | null;
   /** A NOTE from `issue` — the call landed, but not as asked. */
   issueNote?: (action: ScriptAction) => string | null;
+  issueWait?: (action: ScriptAction) => Promise<void>;
   /** A flight recorder to hand the runner (nav/botLog.ts). */
   log?: BotLogSink;
 }
@@ -87,6 +88,7 @@ function harness(opts: Harness = {}) {
     },
     issue: async (a) => {
       issued.push(a);
+      await opts.issueWait?.(a);
       const thrown = opts.issueThrows?.(a) ?? null;
       if (thrown !== null) {
         throw thrown;
@@ -103,6 +105,30 @@ function harness(opts: Harness = {}) {
   });
   return { runner, issued, progress, setObs: (o: ScriptObservation) => { obs = o; } };
 }
+
+test("manual Stop suspends new script work until an issued action settles", async () => {
+  let issueStarted!: () => void;
+  let finishIssue!: () => void;
+  const started = new Promise<void>(resolve => { issueStarted = resolve; });
+  const held = new Promise<void>(resolve => { finishIssue = resolve; });
+  const h = harness({ issueWait: async () => { issueStarted(); await held; } });
+  h.setObs(calm({ holdEmpty: false }));
+  h.runner.start(script([macroStep("a", "deliver-ore")]));
+  const tick = h.runner.tick();
+  await started;
+  const graceful = h.runner.beginGracefulStop();
+  assert.equal(h.runner.getStatus(), "paused");
+  h.runner.resume();
+  assert.equal(h.runner.getStatus(), "paused", "resume cannot restart work during recall");
+  let settled = false;
+  void graceful.then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(settled, false);
+  finishIssue();
+  await Promise.all([tick, graceful]);
+  await h.runner.stop();
+  assert.equal(h.runner.getStatus(), "stopped");
+});
 
 // ── The refusal ledger ──────────────────────────────────────────────────────
 //

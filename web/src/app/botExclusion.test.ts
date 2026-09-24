@@ -103,18 +103,28 @@ function harness(docked: boolean, options: { readonly minersOffline?: boolean } 
   function respond(path: string, body: Record<string, unknown>): unknown {
     if (path === "/api/bridge/flight/status") return flightBody(docked);
     if (path === "/api/bridge/space/snapshot") return spaceBody();
+    if (path === "/api/bridge/script/observation") return { ...(spaceBody() as object), bay: [], inSpace: [], shipInfo: null };
     if (path === "/api/bridge/fitting") {
       return fittingBody(options.minersOffline ? { offline: STRIP_MINER_ITEM_IDS } : {});
     }
     if (path === "/api/bridge/ship/ore-hold") return holdsBody(0, []);
     if (path === "/api/names") return namesBody(body);
     if (path === "/api/bridge/targets") return { ok: true, targetIDs: [], notifications: [] };
+    if (path === "/api/bridge/drones") return { ok: true, bay: [], inSpace: [], shipInfo: null };
     return { ok: true };
   }
 
   const store = createClientStore();
   return { store, flow: createAppFlow(store, { fetch: fakeFetch }) };
 }
+
+test("manual custom-bot Stop confirms an empty flight before releasing the runner", async () => {
+  const { store, flow } = harness(false);
+  await flow.startCustomBot(CUSTOM_DOC);
+  assert.equal(store.get().customBot.status, "running");
+  await flow.gracefulStopCustomBot();
+  assert.equal(store.get().customBot.status, "stopped");
+});
 
 /** Every bot the client can run, and whether its loop currently holds the ship. */
 function holders(store: ReturnType<typeof createClientStore>): string[] {

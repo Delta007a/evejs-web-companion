@@ -6,6 +6,8 @@ export const MINING_DRONE_ORDER_ATTEMPTS = 3;
 const DEFENSE_CLEAR_OBSERVATIONS = 3;
 const RECALL_RETRY_OBSERVATIONS = 15;
 const MAX_RECALL_OBSERVATIONS = 90;
+export const MANUAL_STOP_RECALL_OBSERVATIONS = 30;
+export const MANUAL_STOP_RECALL_CADENCE_MS = 2000;
 
 export interface MiningDroneState {
   readonly bay: readonly DroneBayStack[] | null;
@@ -124,4 +126,43 @@ export function decideMiningDroneFlight(
   memory.attempts++;
   memory.cooldown = 3;
   return result(action);
+}
+
+/** Graceful Stop (manual or timed) uses the same recall/return authority as travel. */
+export async function recallFlightBeforeManualStop(deps: {
+  read(): Promise<MiningDroneState | null>;
+  recall(ids: readonly number[]): Promise<void>;
+  sleep(ms: number): Promise<void>;
+  /** Server expiry may shorten the retry window to fit its credential margin. */
+  deadlineMs?(): number | null;
+  now?(): number;
+}): Promise<void> {
+  let memory = freshDroneMemory();
+  let lastFailure: unknown = null;
+  const deadlineReached = () => {
+    const deadline = deps.deadlineMs?.() ?? null;
+    return deadline !== null && (deps.now?.() ?? Date.now()) >= deadline;
+  };
+  for (let observation = 0; observation < MANUAL_STOP_RECALL_OBSERVATIONS; observation++) {
+    if (deadlineReached()) break;
+    let state: MiningDroneState | null = null;
+    try { state = await deps.read(); } catch (error) { lastFailure = error; }
+    // An already-returning flight has received its recall order. Wait for the
+    // in-space list to clear instead of issuing a redundant first order.
+    if (observation === 0 && state?.out != null) {
+      memory = { ...memory, returning: state.out.filter(d => d.controlled && d.activity === "returning").map(d => d.itemID) };
+    }
+    const decision = decideMiningDroneFlight(state, memory, null, null, true);
+    memory = decision.memory;
+    if (state?.out != null && state.out.every(d => !d.controlled) && memory.returning.length === 0) return;
+    if (deadlineReached()) break;
+    if (decision.action?.kind === "recallDrones") {
+      try { await deps.recall(decision.action.droneIDs); } catch (error) { lastFailure = error; }
+    }
+    if (decision.action?.kind === "pause") break;
+    if (observation + 1 < MANUAL_STOP_RECALL_OBSERVATIONS) await deps.sleep(MANUAL_STOP_RECALL_CADENCE_MS);
+  }
+  throw new Error(lastFailure === null
+    ? "Controlled drones have not been confirmed back in the bay; Stop is paused."
+    : "Drone recall or return could not be confirmed; Stop is paused.");
 }

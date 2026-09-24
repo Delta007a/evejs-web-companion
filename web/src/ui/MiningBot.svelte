@@ -275,14 +275,14 @@
         <button type="button" disabled={busy} onclick={() => run(() => flow.pauseMiningBot())}>
           Pause
         </button>
-        <button type="button" class="danger" disabled={busy} onclick={() => run(() => flow.stopMiningBot())}>
+        <button type="button" class="danger" disabled={busy} onclick={() => run(() => flow.gracefulStopMiningBot())}>
           Stop
         </button>
       {:else if paused}
         <button type="button" class="primary" disabled={busy} onclick={() => run(() => flow.resumeMiningBot())}>
           Carry on
         </button>
-        <button type="button" class="danger" disabled={busy} onclick={() => run(() => flow.stopMiningBot())}>
+        <button type="button" class="danger" disabled={busy} onclick={() => run(() => flow.gracefulStopMiningBot())}>
           Stop
         </button>
       {:else}

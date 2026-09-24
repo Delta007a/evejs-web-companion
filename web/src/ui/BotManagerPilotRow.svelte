@@ -186,8 +186,13 @@
   function resume(): void {
     session?.flow.resumeCustomBot();
   }
-  function stop(): void {
-    session?.flow.stopCustomBot();
+  async function stop(): Promise<void> {
+    if (session === null || busy) return;
+    busy = true;
+    stopError = null;
+    try { await session.flow.gracefulStopCustomBot(); }
+    catch { stopError = "Drone return could not be confirmed; pilot control is retained."; }
+    finally { busy = false; }
   }
 
   let busy = $state(false);
@@ -206,8 +211,8 @@
       // call without per-session options (see App.svelte's token mirror).
       await stopServerBot(serverBot.botID, session?.flow.requestOptions() ?? {});
       onChanged();
-    } catch {
-      stopError = "Could not stop that bot — it may have already ended.";
+    } catch (cause) {
+      stopError = cause instanceof Error ? cause.message : "Could not stop that bot.";
     } finally {
       busy = false;
     }
@@ -295,8 +300,10 @@
         {
           fetchScript: (scriptID) => getBotScript(scriptID, pilot.flow.requestOptions()),
           confirm: (message) => window.confirm(message),
-          startServerBot: (charID, scriptID, grant) =>
-            apiStartServerBot(charID, scriptID, grant, pilot.flow.requestOptions()),
+          startServerBot: (charID, scriptID, grant) => {
+            pilot.flow.requireAutomationReady();
+            return apiStartServerBot(charID, scriptID, grant, pilot.flow.requestOptions());
+          },
           releaseSession: () => pilot.flow.releaseSession(),
         },
         selectedScriptID,
@@ -359,11 +366,11 @@
     <span class="row-actions">
       {#if isCustomTabRun}
         {#if customStatus === "paused"}
-          <ActionButton action="resume" onclick={resume} />
+          <ActionButton action="resume" disabled={busy} onclick={resume} />
         {:else}
           <ActionButton action="pause" disabled={customStatus !== "running"} onclick={pause} />
         {/if}
-        <ActionButton action="stop" danger onclick={stop} />
+        <ActionButton action="stop" danger disabled={busy} onclick={stop} />
       {:else if runState.isCompanion}
         <!-- ⚠ NO STOP HERE, DELIBERATELY. Stopping a companion is the Fleet
              companions window's job, and it is not the same act as stopping a

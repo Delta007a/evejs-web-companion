@@ -67,6 +67,7 @@ export interface LoginResult {
 export interface SelectResult {
   readonly character: OnlineCharacterState;
   readonly station: StationStatic | null;
+  readonly droneRecoveryCheckID: string | null;
   readonly notifications: readonly JsonValue[];
 }
 
@@ -306,6 +307,7 @@ export async function selectCharacter(
       typeof station === "object" && station !== null && !Array.isArray(station)
         ? (station as unknown as StationStatic)
         : null,
+    droneRecoveryCheckID: typeof data.droneRecoveryCheckID === "string" ? data.droneRecoveryCheckID : null,
     notifications: Array.isArray(data.notifications) ? data.notifications : [],
   };
 }
@@ -3850,6 +3852,20 @@ function readDroneAction(data: Record<string, JsonValue>): DroneActionResult {
 
 export async function getDrones(options: ApiOptions = {}): Promise<DronesResult> {
   const data = await getJson("/api/bridge/drones", options);
+  return readDronesResult(data);
+}
+
+/** One fresh space authority read, also projected as this observation's drones. */
+export async function getScriptObservation(options: ApiOptions = {}): Promise<SpaceSnapshotResult & DronesResult> {
+  const data = await getJson("/api/bridge/script/observation", options);
+  return {
+    ...readDronesResult(data),
+    space: data.space ?? null,
+    notifications: Array.isArray(data.notifications) ? data.notifications : [],
+  };
+}
+
+function readDronesResult(data: Record<string, JsonValue>): DronesResult {
   const rawErrors =
     typeof data.errors === "object" && data.errors !== null && !Array.isArray(data.errors)
       ? (data.errors as Record<string, JsonValue>)
@@ -3865,6 +3881,11 @@ export async function getDrones(options: ApiOptions = {}): Promise<DronesResult>
     shipInfo: data.shipInfo ?? null,
     errors,
   };
+}
+
+/** Complete the browser pilot's lost-flight check before server handoff. */
+export async function markDroneRecoveryReady(checkID: string, options: ApiOptions = {}): Promise<void> {
+  await postJson("/api/bridge/drone-recovery/ready", { checkID }, options);
 }
 
 /**

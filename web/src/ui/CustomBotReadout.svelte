@@ -23,6 +23,13 @@
   // station. Its own busy flag (never the bot's status) so a slow dock does not
   // freeze the button, and re-clicking is harmless.
   let docking = $state(false);
+  let stopping = $state(false);
+  async function stop(): Promise<void> {
+    if (stopping) return;
+    stopping = true;
+    try { await flow.gracefulStopCustomBot(); } catch { /* the paused readout carries the reason */ }
+    finally { stopping = false; }
+  }
   async function recallAndDock(): Promise<void> {
     if (docking) return;
     docking = true;
@@ -41,11 +48,11 @@
       <div class="controls">
         {#if active}
           {#if $customBot.status === "paused"}
-            <button class="primary" onclick={() => flow.resumeCustomBot()}>Resume</button>
+            <button class="primary" disabled={stopping} onclick={() => flow.resumeCustomBot()}>Resume</button>
           {:else}
-            <button onclick={() => flow.pauseCustomBot()}>Pause</button>
+            <button disabled={stopping} onclick={() => flow.pauseCustomBot()}>Pause</button>
           {/if}
-          <button class="danger" onclick={() => flow.stopCustomBot()}>Stop</button>
+          <button class="danger" disabled={stopping} onclick={stop}>{stopping ? "Stopping…" : "Stop"}</button>
           <button class="override" disabled={docking} title="Stop the bot, bring drones home, dock at the nearest station" onclick={recallAndDock}>
             {docking ? "Docking…" : "Recall drones & dock"}
           </button>

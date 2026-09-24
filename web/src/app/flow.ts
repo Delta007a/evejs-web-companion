@@ -97,6 +97,9 @@ import {
   decodeDroneOrderRefusals,
   decodeDronesInSpace,
 } from "../bridge/drones.ts";
+import { recallFlightBeforeManualStop } from "../nav/miningDroneFlight.ts";
+import { readRecoveryDrones, recoverLostDroneFlight, type DroneRecoveryState } from "../nav/lostDroneRecovery.ts";
+import { createSignal, readonlySignal, type ReadableSignal } from "../store/signals.ts";
 import { decodeSkillSheet, skillQueueRefusal } from "../bridge/skills.ts";
 import { decodeColonyReport } from "../bridge/planets.ts";
 import { decodeRecipeBook } from "../bridge/piRecipes.ts";
@@ -339,6 +342,8 @@ export interface AppFlowOptions {
    * single-session path (main.ts, every existing test) byte-for-byte unchanged.
    */
   readonly perSessionToken?: boolean;
+  /** Browser pilot selection performs lost-flight recovery before automation. */
+  readonly browserPilotRecovery?: boolean;
   /**
    * Server bot host — a session token this flow starts out holding, so a
    * headless flow whose owner ALREADY authenticated (the bot-start route runs
@@ -432,6 +437,9 @@ export interface LootOutcome {
 }
 
 export interface AppFlow {
+  readonly droneRecovery: ReadableSignal<DroneRecoveryState>;
+  retryDroneRecovery(): Promise<void>;
+  requireAutomationReady(): void;
   /** Boot health ping — sets the health slice online/offline (gates the login). */
   checkHealth(): Promise<void>;
   /** Who-cares login, then the typed reference call to fill the character list. */
@@ -1108,6 +1116,8 @@ export interface AppFlow {
   resumeMiningBot(): void;
   /** Stop the bot (it stops and never calls the bridge again). */
   stopMiningBot(): void;
+  /** User Stop: suspend work, confirm controlled drones home, then stop. */
+  gracefulStopMiningBot(): Promise<void>;
   // --- R36: the distribution-mission bot ---------------------------------
   // A THIRD browser decide-loop. Unlike the mining bot it does not fly the ship
   // itself: it hands destinations to the SAME autopilot the Travel panel drives,
@@ -1129,6 +1139,8 @@ export interface AppFlow {
   resumeCustomBot(): void;
   /** Stop it (it stops and never calls the bridge again). */
   stopCustomBot(): Promise<void>;
+  /** User Stop or timed expiry; rejects while drone return is unconfirmed. */
+  gracefulStopCustomBot(cleanupDeadlineMs?: () => number | null): Promise<void>;
   /** The character's saved-fitting library (for the Bot Builder's fitting picker). */
   listSavedFittings(): Promise<readonly import("../bridge/fittings.ts").SavedFitting[]>;
   /** The character's saved bookmarks (for the Bot Builder's saved-spot picker). */
@@ -1346,9 +1358,72 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   };
 
   let authLost = false;
+  const recoverySignal = createSignal<DroneRecoveryState>({ phase: "checking", reason: null });
+  let recoveryGeneration = 0;
+  let recoveryTask: Promise<void> | null = null;
+  const recoveryIDs = new Set<number>();
+  const confirmedRecoveryIDs = new Set<number>();
+  let recoveryCheckID: string | null = null;
+
+  function requireAutomationReady(): void {
+    if (options.browserPilotRecovery && recoverySignal.get().phase !== "ready") {
+      throw new Error(recoverySignal.get().reason ?? "Drone recovery is still checking this pilot. Wait or retry recovery.");
+    }
+  }
+
+  function retryDroneRecovery(): Promise<void> {
+    if (!options.browserPilotRecovery) return Promise.resolve();
+    if (recoverySignal.get().phase === "ready") return Promise.resolve();
+    if (recoveryTask !== null) return recoveryTask;
+    const generation = recoveryGeneration;
+    const current = () => {
+      if (generation !== recoveryGeneration) throw new Error("This pilot session changed during drone recovery.");
+    };
+    const task = (async () => {
+      try {
+        await recoverLostDroneFlight({
+          inSpace: async () => {
+            current();
+            const raw = (await api.getFlightStatus(callOptions)).flight;
+            current();
+            if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+            const row = raw as Record<string, JsonValue>;
+            return row.inSpace === true ? true : row.docked === true ? false : null;
+          },
+          read: async () => { current(); const raw = await api.getDrones(callOptions); current(); return readRecoveryDrones(raw.inSpace); },
+          reconnect: async ids => { current(); await api.reconnectDrones(ids, callOptions); current(); },
+          recall: async ids => { current(); await api.recallDrones(ids, callOptions); current(); },
+          sleep: async ms => { await new Promise(resolve => setTimeout(resolve, ms)); current(); },
+          pendingIDs: recoveryIDs,
+          confirmedIDs: confirmedRecoveryIDs,
+          report: state => {
+            if (generation === recoveryGeneration && state.phase !== "ready") recoverySignal.set(state);
+          },
+        });
+        if (generation !== recoveryGeneration) return;
+        if (recoveryCheckID === null) throw new Error("The selected pilot's recovery check could not be identified.");
+        await api.markDroneRecoveryReady(recoveryCheckID, callOptions);
+        if (generation === recoveryGeneration) recoverySignal.set({ phase: "ready", reason: null });
+      } catch (error) {
+        if (generation === recoveryGeneration) recoverySignal.set({
+          phase: "blocked",
+          reason: error instanceof Error ? error.message : "Lost-drone recovery could not be confirmed.",
+        });
+      }
+    })();
+    recoveryTask = task.finally(() => { if (generation === recoveryGeneration) recoveryTask = null; });
+    return recoveryTask;
+  }
+
   function handleAuthRequired(): void {
     if (authLost) return;
     authLost = true;
+    recoveryGeneration++;
+    recoveryTask = null;
+    recoveryIDs.clear();
+    confirmedRecoveryIDs.clear();
+    recoveryCheckID = null;
+    recoverySignal.set({ phase: "blocked", reason: "The pilot session was lost during drone recovery." });
     stopLiveStream();
     stopMiningController();
     stopMissionController();
@@ -5212,6 +5287,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     label: string,
     step: () => Promise<FlightStepResult>,
   ): Promise<void> {
+    // StopShip remains available to halt an already moving hull. All other
+    // browser movement must wait while a recoverable flight is on this grid.
+    if (label !== "Stop") requireAutomationReady();
     let result: FlightStepResult;
     try {
       result = await step();
@@ -5542,6 +5620,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
   async function startRoute(destinationID: number): Promise<RouteStartOutcome> {
     store.apply({ type: "travel/plan-error", message: null });
+    try { requireAutomationReady(); } catch (error) {
+      const reason = error instanceof Error ? error.message : "Drone recovery is pending.";
+      store.apply({ type: "travel/plan-error", message: reason });
+      return { started: false, reason, cause: error };
+    }
 
     // Every plan failure BOTH writes the travel slice (the Travel panel's
     // surface) AND returns `started: false` — see RouteStartOutcome.
@@ -7192,6 +7275,85 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     return settled;
   }
 
+  const MANUAL_STOP_TICK_SETTLE_MS = 10_000;
+  let miningManualStop: Promise<void> | null = null;
+  let customManualStop: Promise<void> | null = null;
+
+  async function settleIssuedWork(pending: Promise<void>): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const settled = await Promise.race([
+        pending.then(() => true),
+        new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), MANUAL_STOP_TICK_SETTLE_MS); }),
+      ]);
+      if (!settled) throw new Error("An issued bot action has not settled; Stop is paused while pilot control is retained.");
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  }
+
+  async function confirmDronesHomeForManualStop(cleanupDeadlineMs?: () => number | null): Promise<void> {
+    await recallFlightBeforeManualStop({
+      read: async () => {
+        const flight = decodeFlightStatus((await api.getFlightStatus(callOptions)).flight);
+        if (flight.docked) return { bay: [], out: [], maxActive: 0, roles: {} };
+        // One authority read can take 65 seconds. Do not begin the second read
+        // after the timed-run cleanup window has closed.
+        const deadline = cleanupDeadlineMs?.() ?? null;
+        if (deadline !== null && Date.now() >= deadline) return null;
+        const raw = await api.getDrones(callOptions);
+        const out = decodeDronesInSpace(raw.inSpace);
+        // The ordinary decoder treats an absent `controlled` flag as false for
+        // the recovery UI. Stop needs stronger authority before letting go.
+        const complete = Array.isArray(raw.inSpace) && out !== null && out.length === raw.inSpace.length &&
+          raw.inSpace.every(row => row !== null && typeof row === "object" && !Array.isArray(row) &&
+            typeof row.controlled === "boolean");
+        return { bay: null, out: complete ? out : null, maxActive: null, roles: {} };
+      },
+      recall: async ids => { await api.recallDrones(ids, callOptions); },
+      sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+      deadlineMs: cleanupDeadlineMs,
+    });
+  }
+
+  function gracefulStopMiningBot(): Promise<void> {
+    if (miningManualStop !== null) return miningManualStop;
+    const controller = miningBot;
+    if (controller === null) return Promise.resolve();
+    const pending = (async () => {
+      try {
+        await settleIssuedWork(controller.beginGracefulStop());
+        await confirmDronesHomeForManualStop();
+        controller.stop();
+      } catch (error) {
+        controller.blockManualStop(error instanceof Error ? error.message : "Drone return could not be confirmed; Stop is paused.");
+        throw error;
+      }
+    })();
+    miningManualStop = pending.finally(() => { miningManualStop = null; });
+    return miningManualStop;
+  }
+
+  function gracefulStopCustomBot(cleanupDeadlineMs?: () => number | null): Promise<void> {
+    if (customManualStop !== null) return customManualStop;
+    const controller = scriptRunner;
+    if (controller === null) return Promise.resolve();
+    const pending = (async () => {
+      customBotGeneration += 1;
+      autopilot?.abort();
+      try {
+        await settleIssuedWork(controller.beginGracefulStop());
+        await confirmDronesHomeForManualStop(cleanupDeadlineMs);
+        await stopCustomController();
+      } catch (error) {
+        controller.blockManualStop(error instanceof Error ? error.message : "Drone return could not be confirmed; Stop is paused.");
+        throw error;
+      }
+    })();
+    customManualStop = pending.finally(() => { customManualStop = null; });
+    return customManualStop;
+  }
+
   function stopCompanionController(): void {
     fleetCompanion?.stop();
     liveCompanionRequest = null;
@@ -7329,6 +7491,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   async function startMissionBot(request: MissionBotRequest): Promise<void> {
+    requireAutomationReady();
     store.apply({ type: "mission-bot/start-error", message: null });
 
     // ⚠ THE CLAIM COMES FIRST, BEFORE THE PREFLIGHT CAN REFUSE. The player has
@@ -7369,6 +7532,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   async function startMiningBot(request: MiningBotRequest): Promise<void> {
+    requireAutomationReady();
     store.apply({ type: "bot/start-error", message: null });
 
     // Taking the ship is the first semantic act of every start, even one whose
@@ -7704,6 +7868,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     setup: CompanionSetup,
     resuming: CompanionAbandonmentRecord | null = null,
   ): Promise<void> {
+    requireAutomationReady();
     store.apply({ type: "companion/start-error", message: null });
 
     // Taking the ship is the first semantic act of every start, even one whose
@@ -9233,13 +9398,16 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         release: (owner) => api.releaseContainerClaims(owner, callOptions),
       },
       observe: async (hint) => {
-        const [flightStep, spaceResult, targetsResult, holdsResult, dronesResult] = await Promise.all([
+        const [flightStep, observation, targetsResult, holdsResult] = await Promise.all([
           api.getFlightStatus(callOptions),
-          api.getSpaceSnapshot(callOptions),
+          api.getScriptObservation(callOptions),
           api.getTargets(callOptions),
           api.getMiningHolds(callOptions),
-          api.getDrones(callOptions),
         ]);
+        // Both projections belong to this read, never a previous tick or command.
+        // As before, this observer does not dispatch snapshot notifications.
+        const spaceResult = observation;
+        const dronesResult = observation;
         const status = decodeFlightStatus(flightStep.flight);
         void observeFlightStatus(status);
         // The surveyor, for the blocks that work a rock (see SURVEY_MACROS and
@@ -10574,6 +10742,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   async function startCustomBot(input: BotScript, sourceScriptID: string | null = null): Promise<void> {
+    requireAutomationReady();
     // Restarting the SAME controller is the one case createShipClaim deliberately
     // does not stop. Cancel it here, then take the structural claim so mining and
     // mission are stopped exhaustively from the shared registry.
@@ -11065,6 +11234,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   return {
+    droneRecovery: readonlySignal(recoverySignal),
+    retryDroneRecovery,
+    requireAutomationReady,
     async checkHealth() {
       // One shot, called at boot (main.ts) — never a poll. Any failure resolves
       // to offline inside api.getHealth, so this never throws.
@@ -11118,8 +11290,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     },
 
     async selectCharacter(characterID) {
+      recoveryGeneration++;
+      recoveryIDs.clear();
+      confirmedRecoveryIDs.clear();
+      recoveryCheckID = null;
+      recoverySignal.set({ phase: "checking", reason: null });
       store.apply({ type: "character/selected", characterID });
       const result = await api.selectCharacter(characterID, callOptions);
+      recoveryCheckID = result.droneRecoveryCheckID;
       store.apply({
         type: "character/online",
         character: result.character,
@@ -11133,6 +11311,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       // reads — anything the reads trigger is then already being observed.
       startLiveStream();
       await refreshStationPanel();
+      void retryDroneRecovery();
     },
 
     refreshStationPanel,
@@ -11684,6 +11863,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     stopMiningBot() {
       stopMiningController();
     },
+    gracefulStopMiningBot,
 
     startMissionBot,
 
@@ -11718,6 +11898,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     stopCustomBot() {
       return stopCustomController();
     },
+    gracefulStopCustomBot,
 
     panicRecallAndDock,
 
@@ -11796,6 +11977,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     },
 
     async releaseSession() {
+      recoveryGeneration++;
+      recoveryTask = null;
+      recoveryIDs.clear();
+      confirmedRecoveryIDs.clear();
+      recoveryCheckID = null;
+      recoverySignal.set({ phase: "checking", reason: null });
       // R10: stop consuming the push channel first — the session it belongs to
       // is about to end.
       stopLiveStream();
@@ -11810,6 +11997,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     },
 
     async logout() {
+      recoveryGeneration++;
+      recoveryTask = null;
+      recoveryIDs.clear();
+      confirmedRecoveryIDs.clear();
+      recoveryCheckID = null;
+      recoverySignal.set({ phase: "checking", reason: null });
       stopLiveStream();
       try {
         await api.logout(callOptions);

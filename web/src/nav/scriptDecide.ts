@@ -1026,7 +1026,14 @@ export function decideScriptAction(
   const mining = activeMacroID(script, mem) === "mine-at-belt";
   const step = mining ? activeStep(script, mem.position) : null;
   const enabled = activeStepUsesMiningDrones(script, mem);
-  if (!enabled && mem.miningFlight === undefined) return base;
+  // A normal program end can follow a combat-drone action outside the mining
+  // flight. A confirmed controlled flight still has to come home before DONE.
+  const terminalFlight = base.status === "done" && (obs.dronesOut === true || obs.miningDrones?.out?.some(d => {
+    if (!d.controlled) return false;
+    const role = d.typeID === null ? null : obs.miningDrones?.roles[d.typeID];
+    return role == null || role === "mining" || role === "combat";
+  }) === true);
+  if (!enabled && mem.miningFlight === undefined && !terminalFlight) return base;
   const leaving = !enabled || base.status !== "running" || base.memory.latched !== null ||
     activeStep(script, base.memory.position)?.id !== step?.id ||
     ["warp", "warpScan", "warpBookmark", "startRoute", "startSystemRoute", "dock", "undock"].includes(base.action.kind);

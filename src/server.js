@@ -4,6 +4,7 @@ const express = require("express");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
+const { randomUUID } = require("crypto");
 // R17 mail: mailMgr.GetBody answers a zlib-DEFLATED buffer, and inflating it is
 // this file's job — see mailBodyText. The browser never sees a compressed byte.
 const zlib = require("zlib");
@@ -20,6 +21,7 @@ const { createBeltMemory } = require("./beltMemory");
 const { createSquadBoard } = require("./squadBoard");
 const { createLootMemory, CONTAINER_LEASE_MS } = require("./lootMemory");
 const { createBotLogStore } = require("./botLogStore");
+const { reconnectCandidate, hasPendingRecovery } = require("./droneRecoveryGate");
 const {
   isBridgeWritePair,
   pickSafeBrowserSessionFields,
@@ -871,6 +873,10 @@ async function selectHeldCharacter(webSessionID, account, characterID) {
     // Opened right below, as a retail client does at login — see
     // joinHeldChat.
     chat: null,
+    // Browser automation cannot take this session until the login recovery
+    // check has completed. A new select always resets the gate.
+    droneRecoveryReady: false,
+    droneRecoveryCheckID: randomUUID(),
   });
   // The character is online; put it in its rooms. Fire-and-forget: a chat
   // server that is down must never stop a pilot coming online.
@@ -933,6 +939,12 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
     sessionReservation = Symbol("select-session");
     sessionOperations.set(req.webSessionID, sessionReservation);
     const outcome = await selectHeldCharacter(req.webSessionID, req.account, characterID);
+    // A server host is already the claimed automation owner, not a browser
+    // pilot being opened for recovery. Its select carries the private bot
+    // header, so only browser-owned sessions wait for the login check.
+    if (botHost.authorizesClaim(characterID, req.get(botHostModule.BOT_HEADER))) {
+      bridgeSessions.get(req.webSessionID).droneRecoveryReady = true;
+    }
     res.json({
       ok: true,
       character: {
@@ -952,6 +964,7 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
           : outcome.session.corporationID,
       },
       station: buildStationStatic(outcome.session.stationID),
+      droneRecoveryCheckID: bridgeSessions.get(req.webSessionID)?.droneRecoveryCheckID ?? null,
       notifications: outcome.notifications,
     });
   } catch (error) {
@@ -17771,23 +17784,24 @@ app.get("/api/bridge/space/snapshot", requireAuth, async (req, res, next) => {
 const ITEM_FLAG_DRONE_BAY = 87;
 
 /**
- * The drones the SERVER says are in space under this ship's control.
- *
- * Owner AND controller are both checked. `ownerID` alone would also match a
- * drone this character owns but launched from a hull they have since swapped
- * out of; `controllerID` alone would match a drone flown by this hull for
- * someone else. A drone the panel offers a Recall button for must be both.
+ * Owned or controlled drones, with control and lost-flight eligibility
+ * distinguished in the projection. Ownership alone does not permit orders.
  */
 async function readDronesInSpace(held) {
   const outcome = await gateway.readSpaceSnapshot(held.bridgeSessionID, {
     userid: held.accountID,
   });
   const space = outcome && outcome.space ? outcome.space : null;
+  return { drones: projectDronesInSpace(held, space), notifications: outcome ? outcome.notifications : [] };
+}
+
+// Pure projection; command and lifecycle readers still fetch afresh above.
+function projectDronesInSpace(held, space) {
   const entities = space && Array.isArray(space.entities) ? space.entities : null;
   if (entities === null) {
     // null, not [] — "we could not look" is not "you have no drones in space",
     // and a page that confuses the two invites a player to launch a second set.
-    return { drones: null, notifications: outcome ? outcome.notifications : [] };
+    return null;
   }
   const shipID = Number(held.activeShipID) || 0;
   const characterID = Number(held.characterID) || 0;
@@ -17817,6 +17831,10 @@ async function readDronesInSpace(held) {
       // A BOOLEAN, not the controllerID — the id itself must not reach the
       // browser (R7d), and the only question the page has is this one.
       controlled: shipID > 0 && (Number(row.controllerID) || 0) === shipID,
+      // Only an owned, explicitly disconnected drone is a lost-flight
+      // candidate. The authoritative reconnect command checks scene scope,
+      // ownership, bandwidth and active limits again before changing control.
+      reconnectCandidate: reconnectCandidate(row, characterID),
       // A WORD, or null for "we could not tell" — never a raw activity enum.
       activity: typeof row.droneActivity === "string" ? row.droneActivity : null,
       // What it is busy with, so the page can name the rock or the rat.
@@ -17825,7 +17843,7 @@ async function readDronesInSpace(held) {
       armorRatio: typeof row.armorRatio === "number" ? row.armorRatio : null,
       hullRatio: typeof row.hullRatio === "number" ? row.hullRatio : null,
     }));
-  return { drones, notifications: outcome ? outcome.notifications : [] };
+  return drones;
 }
 
 // The whole Drones panel: what is in the bay, what is in space, and the two
@@ -17839,7 +17857,7 @@ async function readDronesInSpace(held) {
 //
 // The three reads are INDEPENDENT (allSettled): a bay that cannot be read must
 // not blank the drones already flying, and vice versa.
-app.get("/api/bridge/drones", requireAuth, async (req, res, next) => {
+app.get(["/api/bridge/drones", "/api/bridge/script/observation"], requireAuth, async (req, res, next) => {
   const held = requireHeldBridgeSession(req, res);
   if (!held) {
     return;
@@ -17851,8 +17869,17 @@ app.get("/api/bridge/drones", requireAuth, async (req, res, next) => {
       res.status(409).json({ ok: false, error: "NO_ACTIVE_SHIP", message: "No active ship." });
       return;
     }
-    const noShip = () =>
-      Promise.reject(Object.assign(new Error("No active ship."), { code: "NO_ACTIVE_SHIP" }));
+    const observation = req.path === "/api/bridge/script/observation";
+    // Request-local ownership only. Nothing survives this observation.
+    const scope = { ...held };
+    const readObservation = async () => {
+      const outcome = await gateway.readSpaceSnapshot(scope.bridgeSessionID, { userid: scope.accountID });
+      return {
+        space: outcome.space ?? null,
+        drones: projectDronesInSpace(scope, outcome.space),
+        notifications: outcome.notifications ?? [],
+      };
+    };
     const [bay, shipInfo, inSpace] = await Promise.allSettled([
       boundCall(
         held,
@@ -17863,11 +17890,27 @@ app.get("/api/bridge/drones", requireAuth, async (req, res, next) => {
         null,
       ),
       heldTopLevelCall(held, req.webSessionID, "dogmaIM", "ShipGetInfo", [], null),
-      shipID ? readDronesInSpace(held) : noShip(),
+      observation ? readObservation() : readDronesInSpace(held),
     ]);
     for (const settled of [bay, shipInfo, inSpace]) {
       if (settled.status === "rejected" && settled.reason && settled.reason.code === "SESSION_NOT_FOUND") {
+        if (observation && bridgeSessions.get(req.webSessionID) === held) forgetBridgeSession(req.webSessionID);
         next(settled.reason);
+        return;
+      }
+    }
+    if (observation) {
+      // As with the old standalone space read, a failed authority read fails
+      // the observation rather than becoming a successful empty scene.
+      if (inSpace.status === "rejected") throw inSpace.reason;
+      const space = inSpace.value.space;
+      if (bridgeSessions.get(req.webSessionID) !== held ||
+          ["bridgeSessionID", "characterID", "activeShipID", "solarSystemID", "transitionEpoch"]
+            .some((key) => held[key] !== scope[key]) ||
+          (space?.ship?.itemID != null && Number(space.ship.itemID) !== Number(shipID)) ||
+          (space?.solarSystemID != null && Number(space.solarSystemID) !== Number(scope.solarSystemID))) {
+        res.status(409).json({ ok: false, error: "OBSERVATION_SCOPE_CHANGED",
+          message: "Pilot, ship or scene changed during the observation. Read again." });
         return;
       }
     }
@@ -17891,6 +17934,11 @@ app.get("/api/bridge/drones", requireAuth, async (req, res, next) => {
     res.json({
       ok: true,
       activeShipID: shipID,
+      // One snapshot drain, included once; ordinary /drones stays unchanged.
+      ...(observation ? {
+        space: withOreStaticFields(inSpace.value.space),
+        notifications: inSpace.value.notifications,
+      } : {}),
       // null (not []) on a failed read: "we could not look in the bay" is not
       // "the bay is empty", and the panel says which.
       bay: bayRows,
@@ -17906,6 +17954,20 @@ app.get("/api/bridge/drones", requireAuth, async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+// A browser pilot may hand control to the bot host only after its login-time
+// lost-flight check (including authoritative return confirmation) completes.
+app.post("/api/bridge/drone-recovery/ready", requireAuth, (req, res) => {
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) return;
+  if (typeof req.body?.checkID !== "string" || req.body.checkID !== held.droneRecoveryCheckID) {
+    res.status(409).json({ ok: false, error: "DRONE_RECOVERY_STALE",
+      message: "The pilot session changed during drone recovery. Bring the pilot online again." });
+    return;
+  }
+  held.droneRecoveryReady = true;
+  res.json({ ok: true });
 });
 
 /**
@@ -20242,6 +20304,11 @@ app.post("/api/bots/start", requireAuth, async (req, res, next) => {
       res.status(409).json({ ok: false, error: "CHARACTER_IN_USE", message: "This character is changing sessions. Try again shortly." });
       return;
     }
+    if (hasPendingRecovery(bridgeSessions.get(req.webSessionID), characterID)) {
+      res.status(409).json({ ok: false, error: "DRONE_RECOVERY_PENDING",
+        message: "This pilot's lost-drone recovery must finish before server handoff." });
+      return;
+    }
     const reservation = Symbol("handoff");
     characterOperations.set(characterID, reservation);
     sessionOperations.set(req.webSessionID, reservation);
@@ -20311,7 +20378,10 @@ app.post("/api/bots/:botID/stop", requireAuth, async (req, res, next) => {
   try {
     const outcome = await botHost.stop(req.params.botID, req.account.accountID);
     if (!outcome.ok) {
-      res.status(404).json({ ok: false, error: "BOT_NOT_FOUND", message: "No such bot." });
+      res.status(outcome.code === "DRONE_RETURN_UNCONFIRMED" ? 409 : 404).json({
+        ok: false, error: outcome.code,
+        message: outcome.message || "No such bot.", bot: outcome.bot,
+      });
       return;
     }
     res.json({ ok: true, bot: outcome.bot });
