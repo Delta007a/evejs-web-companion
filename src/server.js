@@ -20311,7 +20311,10 @@ app.post("/api/bots/:botID/stop", requireAuth, async (req, res, next) => {
   try {
     const outcome = await botHost.stop(req.params.botID, req.account.accountID);
     if (!outcome.ok) {
-      res.status(404).json({ ok: false, error: "BOT_NOT_FOUND", message: "No such bot." });
+      res.status(outcome.code === "DRONE_RETURN_UNCONFIRMED" ? 409 : 404).json({
+        ok: false, error: outcome.code,
+        message: outcome.message || "No such bot.", bot: outcome.bot,
+      });
       return;
     }
     res.json({ ok: true, bot: outcome.bot });

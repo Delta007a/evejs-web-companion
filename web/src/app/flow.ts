@@ -97,6 +97,7 @@ import {
   decodeDroneOrderRefusals,
   decodeDronesInSpace,
 } from "../bridge/drones.ts";
+import { recallFlightBeforeManualStop } from "../nav/miningDroneFlight.ts";
 import { decodeSkillSheet, skillQueueRefusal } from "../bridge/skills.ts";
 import { decodeColonyReport } from "../bridge/planets.ts";
 import { decodeRecipeBook } from "../bridge/piRecipes.ts";
@@ -1108,6 +1109,8 @@ export interface AppFlow {
   resumeMiningBot(): void;
   /** Stop the bot (it stops and never calls the bridge again). */
   stopMiningBot(): void;
+  /** User Stop: suspend work, confirm controlled drones home, then stop. */
+  gracefulStopMiningBot(): Promise<void>;
   // --- R36: the distribution-mission bot ---------------------------------
   // A THIRD browser decide-loop. Unlike the mining bot it does not fly the ship
   // itself: it hands destinations to the SAME autopilot the Travel panel drives,
@@ -1129,6 +1132,8 @@ export interface AppFlow {
   resumeCustomBot(): void;
   /** Stop it (it stops and never calls the bridge again). */
   stopCustomBot(): Promise<void>;
+  /** User Stop, including server-hosted scripts; rejects while recall is unconfirmed. */
+  gracefulStopCustomBot(): Promise<void>;
   /** The character's saved-fitting library (for the Bot Builder's fitting picker). */
   listSavedFittings(): Promise<readonly import("../bridge/fittings.ts").SavedFitting[]>;
   /** The character's saved bookmarks (for the Bot Builder's saved-spot picker). */
@@ -7192,6 +7197,80 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     return settled;
   }
 
+  const MANUAL_STOP_TICK_SETTLE_MS = 10_000;
+  let miningManualStop: Promise<void> | null = null;
+  let customManualStop: Promise<void> | null = null;
+
+  async function settleIssuedWork(pending: Promise<void>): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const settled = await Promise.race([
+        pending.then(() => true),
+        new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), MANUAL_STOP_TICK_SETTLE_MS); }),
+      ]);
+      if (!settled) throw new Error("An issued bot action has not settled; Stop is paused while pilot control is retained.");
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  }
+
+  async function confirmDronesHomeForManualStop(): Promise<void> {
+    await recallFlightBeforeManualStop({
+      read: async () => {
+        const flight = decodeFlightStatus((await api.getFlightStatus(callOptions)).flight);
+        if (flight.docked) return { bay: [], out: [], maxActive: 0, roles: {} };
+        const raw = await api.getDrones(callOptions);
+        const out = decodeDronesInSpace(raw.inSpace);
+        // The ordinary decoder treats an absent `controlled` flag as false for
+        // the recovery UI. Stop needs stronger authority before letting go.
+        const complete = Array.isArray(raw.inSpace) && out !== null && out.length === raw.inSpace.length &&
+          raw.inSpace.every(row => row !== null && typeof row === "object" && !Array.isArray(row) &&
+            typeof row.controlled === "boolean");
+        return { bay: null, out: complete ? out : null, maxActive: null, roles: {} };
+      },
+      recall: async ids => { await api.recallDrones(ids, callOptions); },
+      sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+    });
+  }
+
+  function gracefulStopMiningBot(): Promise<void> {
+    if (miningManualStop !== null) return miningManualStop;
+    const controller = miningBot;
+    if (controller === null) return Promise.resolve();
+    const pending = (async () => {
+      try {
+        await settleIssuedWork(controller.beginGracefulStop());
+        await confirmDronesHomeForManualStop();
+        controller.stop();
+      } catch (error) {
+        controller.blockManualStop(error instanceof Error ? error.message : "Drone return could not be confirmed; Stop is paused.");
+        throw error;
+      }
+    })();
+    miningManualStop = pending.finally(() => { miningManualStop = null; });
+    return miningManualStop;
+  }
+
+  function gracefulStopCustomBot(): Promise<void> {
+    if (customManualStop !== null) return customManualStop;
+    const controller = scriptRunner;
+    if (controller === null) return Promise.resolve();
+    const pending = (async () => {
+      customBotGeneration += 1;
+      autopilot?.abort();
+      try {
+        await settleIssuedWork(controller.beginGracefulStop());
+        await confirmDronesHomeForManualStop();
+        await stopCustomController();
+      } catch (error) {
+        controller.blockManualStop(error instanceof Error ? error.message : "Drone return could not be confirmed; Stop is paused.");
+        throw error;
+      }
+    })();
+    customManualStop = pending.finally(() => { customManualStop = null; });
+    return customManualStop;
+  }
+
   function stopCompanionController(): void {
     fleetCompanion?.stop();
     liveCompanionRequest = null;
@@ -11684,6 +11763,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     stopMiningBot() {
       stopMiningController();
     },
+    gracefulStopMiningBot,
 
     startMissionBot,
 
@@ -11718,6 +11798,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     stopCustomBot() {
       return stopCustomController();
     },
+    gracefulStopCustomBot,
 
     panicRecallAndDock,
 

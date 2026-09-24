@@ -205,6 +205,9 @@ export interface ScriptRunnerController {
   start(script: BotScript): void;
   pause(): void;
   resume(): void;
+  /** Suspend new work and wait for any already issued tick before manual recall. */
+  beginGracefulStop(): Promise<void>;
+  blockManualStop(reason: string): void;
   stop(): Promise<void>;
   tick(): Promise<void>;
   run(): Promise<void>;
@@ -244,6 +247,7 @@ const SETTLE_AFTER_SESSION_CHANGE = 2;
 
 export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerController {
   let status: ScriptRunnerStatus = "idle";
+  let gracefulStopPending = false;
   let runToken = 0;
   let script: BotScript | null = null;
   let memory: ScriptMemory | null = null;
@@ -806,6 +810,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
 
   return {
     start(next: BotScript): void {
+      gracefulStopPending = false;
       if (!tickBusy && attemptedClaimOwner !== null) void releaseClaims(attemptedClaimOwner);
       runToken += 1;
       script = next;
@@ -833,13 +838,27 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       }
     },
     resume(): void {
-      if (status === "paused") {
+      if (status === "paused" && !gracefulStopPending) {
         runToken += 1;
         status = "running";
         emit({ ...last, status: "running" });
       }
     },
+    beginGracefulStop(): Promise<void> {
+      gracefulStopPending = true;
+      if (status === "running") {
+        runToken += 1;
+        status = "paused";
+        emit({ ...last, status: "paused", phase: "Recalling drones", why: "Stopping after drones return." });
+      }
+      return activeTick ?? Promise.resolve();
+    },
+    blockManualStop(reason: string): void {
+      gracefulStopPending = false;
+      if (status === "paused") emit({ ...last, phase: "Stop blocked", why: reason, pauseReason: reason });
+    },
     stop(): Promise<void> {
+      gracefulStopPending = false;
       const claimedIssue = attemptedClaimOwner !== null ? activeTick : null;
       runToken += 1;
       status = "stopped";

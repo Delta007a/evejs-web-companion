@@ -109,12 +109,21 @@ function harness(docked: boolean, options: { readonly minersOffline?: boolean } 
     if (path === "/api/bridge/ship/ore-hold") return holdsBody(0, []);
     if (path === "/api/names") return namesBody(body);
     if (path === "/api/bridge/targets") return { ok: true, targetIDs: [], notifications: [] };
+    if (path === "/api/bridge/drones") return { ok: true, bay: [], inSpace: [], shipInfo: null };
     return { ok: true };
   }
 
   const store = createClientStore();
   return { store, flow: createAppFlow(store, { fetch: fakeFetch }) };
 }
+
+test("manual custom-bot Stop confirms an empty flight before releasing the runner", async () => {
+  const { store, flow } = harness(false);
+  await flow.startCustomBot(CUSTOM_DOC);
+  assert.equal(store.get().customBot.status, "running");
+  await flow.gracefulStopCustomBot();
+  assert.equal(store.get().customBot.status, "stopped");
+});
 
 /** Every bot the client can run, and whether its loop currently holds the ship. */
 function holders(store: ReturnType<typeof createClientStore>): string[] {

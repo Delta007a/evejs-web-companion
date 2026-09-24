@@ -50,15 +50,16 @@
       return;
     }
     busyBotID = botID;
+    let stopError: string | null = null;
     try {
       await stopServerBot(botID);
-      error = null;
-    } catch {
-      error = "Could not stop that bot — it may have already ended.";
+    } catch (cause) {
+      stopError = cause instanceof Error ? cause.message : "Could not stop that bot.";
     } finally {
       busyBotID = null;
     }
     await refresh();
+    if (stopError !== null) error = stopError;
   }
 
   onMount(() => {

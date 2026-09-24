@@ -1102,6 +1102,8 @@ export interface MiningBotController {
   start(plan: MiningPlan): void;
   pause(): void;
   resume(): void;
+  beginGracefulStop(): Promise<void>;
+  blockManualStop(reason: string): void;
   stop(): void;
   /** One decision cycle: read, decide, issue at most one atomic call. */
   tick(): Promise<MiningBotAction>;
@@ -1701,7 +1703,7 @@ export function createMiningBot(deps: MiningBotDeps): MiningBotController {
     }
   }
 
-  async function tick(): Promise<MiningBotAction> {
+  async function tickOnce(): Promise<MiningBotAction> {
     if (memory.status !== "running" || !plan) {
       return memory.status === "stopped"
         ? { kind: "stopped" }
@@ -1886,6 +1888,14 @@ export function createMiningBot(deps: MiningBotDeps): MiningBotController {
     return decision.action;
   }
 
+  const activeTicks = new Set<Promise<MiningBotAction>>();
+  let gracefulStopPending = false;
+  async function tick(): Promise<MiningBotAction> {
+    const pending = tickOnce();
+    activeTicks.add(pending);
+    try { return await pending; } finally { activeTicks.delete(pending); }
+  }
+
   async function run(): Promise<void> {
     const token = runToken;
     while (token === runToken && memory.status === "running") {
@@ -1899,6 +1909,7 @@ export function createMiningBot(deps: MiningBotDeps): MiningBotController {
 
   return {
     start(nextPlan: MiningPlan): void {
+      gracefulStopPending = false;
       plan = nextPlan;
       memory = freshMemory();
       memory.status = "running";
@@ -1920,7 +1931,7 @@ export function createMiningBot(deps: MiningBotDeps): MiningBotController {
       }
     },
     resume(): void {
-      if (memory.status === "paused") {
+      if (memory.status === "paused" && !gracefulStopPending) {
         memory.status = "running";
         memory.failureReason = null;
         memory.phase = "Resuming";
@@ -1929,7 +1940,28 @@ export function createMiningBot(deps: MiningBotDeps): MiningBotController {
         emit();
       }
     },
+    beginGracefulStop(): Promise<void> {
+      gracefulStopPending = true;
+      if (memory.status === "running") {
+        memory.status = "paused";
+        memory.phase = "Recalling drones";
+        memory.why = "Stopping after drones return.";
+        runToken += 1;
+        emit();
+      }
+      return Promise.allSettled([...activeTicks]).then(() => {});
+    },
+    blockManualStop(reason: string): void {
+      gracefulStopPending = false;
+      if (memory.status === "paused") {
+        memory.phase = "Stop blocked";
+        memory.why = reason;
+        memory.failureReason = reason;
+        emit();
+      }
+    },
     stop(): void {
+      gracefulStopPending = false;
       if (memory.status === "running" || memory.status === "paused") {
         memory.status = "stopped";
         memory.phase = "Stopped";

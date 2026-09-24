@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decideMiningDroneFlight, freshDroneMemory, miningDroneTopUp, type MiningDroneState } from "./miningDroneFlight.ts";
+import { decideMiningDroneFlight, freshDroneMemory, miningDroneTopUp, recallFlightBeforeManualStop, MANUAL_STOP_RECALL_OBSERVATIONS, type MiningDroneState } from "./miningDroneFlight.ts";
 import type { DroneInSpace } from "../store/types.ts";
 
 const drone = (itemID: number, typeID = 101, targetID: number | null = null, activity = "idle"): DroneInSpace => ({
@@ -127,6 +127,61 @@ test("mining command refusal does not reissue every tick or indefinitely", () =>
   const tick = driver();
   const results = Array.from({ length: 25 }, () => tick(state([drone(11)], 1)));
   assert.equal(results.filter(r => r.action?.kind === "mineDrones").length, 3);
+});
+
+for (const [role, typeID] of [["mining", 101], ["combat", 100]] as const) {
+  test(`manual Stop holds ${role} authority until the drone actually returns`, async () => {
+    let out = [drone(81, typeID)];
+    let unblock!: () => void;
+    let recalled!: () => void;
+    const sleep = new Promise<void>(resolve => { unblock = resolve; });
+    const recallIssued = new Promise<void>(resolve => { recalled = resolve; });
+    const calls: number[][] = [];
+    let stopped = false;
+    const pending = recallFlightBeforeManualStop({
+      read: async () => state(out, 1),
+      recall: async ids => { calls.push([...ids]); recalled(); },
+      sleep: async () => sleep,
+    }).then(() => { stopped = true; });
+    await recallIssued;
+    assert.deepEqual(calls, [[81]]);
+    assert.equal(stopped, false, "an issued recall is not a confirmed return");
+    out = [];
+    unblock();
+    await pending;
+    assert.equal(stopped, true);
+  });
+}
+
+test("manual Stop with no drones returns on its first read", async () => {
+  let reads = 0;
+  await recallFlightBeforeManualStop({
+    read: async () => { reads++; return state([], 1); },
+    recall: async () => { assert.fail("nothing should be recalled"); },
+    sleep: async () => { assert.fail("an empty flight must not wait"); },
+  });
+  assert.equal(reads, 1);
+});
+
+test("manual Stop does not call an already returning drone again", async () => {
+  let out = [drone(81, 101, null, "returning")];
+  let recalls = 0;
+  await recallFlightBeforeManualStop({
+    read: async () => state(out, 1),
+    recall: async () => { recalls++; },
+    sleep: async () => { out = []; },
+  });
+  assert.equal(recalls, 0);
+});
+
+test("manual Stop fails closed after bounded unreadable drone observations", async () => {
+  let reads = 0;
+  await assert.rejects(recallFlightBeforeManualStop({
+    read: async () => { reads++; return null; },
+    recall: async () => { assert.fail("unknown state cannot authorize recall"); },
+    sleep: async () => {},
+  }), /could not be confirmed|not been confirmed/);
+  assert.equal(reads, MANUAL_STOP_RECALL_OBSERVATIONS);
 });
 
 

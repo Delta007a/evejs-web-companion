@@ -160,6 +160,9 @@ function makeFakeStack(log) {
         stopCustomBot() {
           log.push(["stopCustomBot"]);
         },
+        async gracefulStopCustomBot() {
+          log.push(["gracefulStopCustomBot"]);
+        },
         async startFleetCompanion(request, resuming = null) {
           log.push(["startFleetCompanion", request, resuming]);
           store._set({
@@ -364,6 +367,69 @@ test("stop releases the claim and the character", async () => {
   assert.equal(log.some((row) => row[0] === "logout"), true);
   // The record remains listable for inspection.
   assert.equal(host.list(7).length, 1);
+});
+
+test("repeated manual server Stop retains the pilot through pending drone return", async () => {
+  let finishRecall;
+  let recallBegan;
+  const held = new Promise(resolve => { finishRecall = resolve; });
+  const began = new Promise(resolve => { recallBegan = resolve; });
+  const log = [];
+  let requests = 0;
+  const factory = makeFakeStack(log);
+  const host = makeHost({ log, loadStack: async () => {
+    const stack = await factory();
+    return { ...stack, createAppFlow(store, options) {
+      const flow = stack.createAppFlow(store, options);
+      return { ...flow, async gracefulStopCustomBot() {
+        requests++;
+        store._set({ customBot: { ...IDLE_SLICE, status: "paused", phase: "Recalling drones" } });
+        recallBegan();
+        await held;
+      } };
+    } };
+  } });
+  const started = await host.start(START);
+  const first = host.stop(started.bot.botID, 7);
+  await began;
+  const second = host.stop(started.bot.botID, 7);
+  assert.equal(requests, 1);
+  assert.notEqual(host.claimedBy(140000001), null);
+  assert.equal(log.some(([name]) => name === "logout"), false);
+  assert.equal(host.list(7)[0].status, "paused");
+  finishRecall();
+  const [a, b] = await Promise.all([first, second]);
+  assert.equal(a.ok, true);
+  assert.equal(b.ok, true);
+  assert.equal(log.filter(([name]) => name === "logout").length, 1);
+  assert.equal(host.claimedBy(140000001), null);
+});
+
+test("unconfirmed manual drone return keeps the server session and permits retry", async () => {
+  const log = [];
+  let fail = true;
+  const factory = makeFakeStack(log);
+  const host = makeHost({ log, loadStack: async () => {
+    const stack = await factory();
+    return { ...stack, createAppFlow(store, options) {
+      const flow = stack.createAppFlow(store, options);
+      return { ...flow, async gracefulStopCustomBot() {
+        store._set({ customBot: { ...IDLE_SLICE, status: "paused", phase: "Stop blocked" } });
+        if (fail) throw new Error("Drone return could not be confirmed; Stop is paused.");
+      } };
+    } };
+  } });
+  const started = await host.start(START);
+  const blocked = await host.stop(started.bot.botID, 7);
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.code, "DRONE_RETURN_UNCONFIRMED");
+  assert.equal(host.list(7)[0].status, "paused");
+  assert.notEqual(host.claimedBy(140000001), null);
+  assert.equal(log.some(([name]) => name === "logout"), false);
+  fail = false;
+  const stopped = await host.stop(started.bot.botID, 7);
+  assert.equal(stopped.ok, true);
+  assert.equal(host.claimedBy(140000001), null);
 });
 
 test("server stop keeps container exclusivity through settlement or bounded lease expiry", async () => {

@@ -830,11 +830,30 @@ function createBotHost(options) {
     if (!record || record.accountID !== Number(accountID)) {
       return { ok: false, code: "BOT_NOT_FOUND" };
     }
-    if (!record.finalized) {
-      record.status = "stopped";
-    }
-    await finalize(record);
-    return { ok: true, bot: publicBot(record) };
+    if (record.manualStopPromise) return record.manualStopPromise;
+    const pending = (async () => {
+      // Manual Stop is the only teardown that must recover the flight first.
+      // Deadline expiry, process shutdown and session failure still finalize
+      // through their existing forced path.
+      if (!record.finalized && record.kind === "script" && record.flow) {
+        try {
+          await record.flow.gracefulStopCustomBot();
+        } catch (error) {
+          const reason = error && error.message ? String(error.message) : "Drone return could not be confirmed; Stop is paused.";
+          record.status = "paused";
+          record.phase = "Stop blocked";
+          record.why = reason;
+          record.pauseReason = reason;
+          persistRoster();
+          return { ok: false, code: "DRONE_RETURN_UNCONFIRMED", message: reason, bot: publicBot(record) };
+        }
+      }
+      if (!record.finalized) record.status = "stopped";
+      await finalize(record);
+      return { ok: true, bot: publicBot(record) };
+    })();
+    record.manualStopPromise = pending;
+    try { return await pending; } finally { if (record.manualStopPromise === pending) record.manualStopPromise = null; }
   }
 
   function list(accountID) {

@@ -188,6 +188,9 @@ function harness(options: { locked?: number[]; activeModuleIDs?: number[] } = {}
     if (path === "/api/bridge/ship/ore-hold") {
       return { status: 200, body: holdsBody(0, []) };
     }
+    if (path === "/api/bridge/drones") {
+      return { status: 200, body: { ok: true, bay: [], inSpace: [], shipInfo: null } };
+    }
     // R43 preflight: the fit, and the names it needs to tell a Strip Miner from
     // a Nanofiber. Without these the requirement check reaches cannot-tell and
     // correctly refuses to start.
@@ -235,6 +238,15 @@ test("startMiningBot lands the plan in the store and the loop drives the real BF
 
   const lock = requests.find((r) => r.path === "/api/bridge/targets/lock");
   assert.equal(lock?.body.targetID, ROCK);
+});
+
+test("manual mining Stop with no controlled drones confirms authority and stops promptly", async () => {
+  const { store, flow, requests } = harness();
+  await flow.startMiningBot(REQUEST);
+  await flow.gracefulStopMiningBot();
+  assert.equal(store.get().bot.status, "stopped");
+  assert.equal(requests.filter(r => r.path === "/api/bridge/drones").length, 1);
+  assert.equal(requests.some(r => r.path === "/api/bridge/drones/recall"), false);
 });
 
 test("the bot activates a module with NO effect name — the server resolves it, the browser never guesses", async () => {
@@ -296,6 +308,9 @@ test("the bot's warps carry retail's minRange 0, not the autopilot call's built-
     }
     if (path === "/api/bridge/targets") {
       return { status: 200, body: { ok: true, targetIDs: [], notifications: [] } };
+    }
+    if (path === "/api/bridge/drones") {
+      return { status: 200, body: { ok: true, bay: [], inSpace: [], shipInfo: null } };
     }
     if (path === "/api/bridge/ship/ore-hold") return { status: 200, body: holdsBody(0, []) };
     if (path === "/api/bridge/fitting") return { status: 200, body: fittingBody() };
