@@ -218,8 +218,10 @@
       {
         fetchScript: (id) => getBotScript(id, flow.requestOptions()),
         confirm: (message) => window.confirm(message),
-        startServerBot: (characterID, id, grant) =>
-          apiStartServerBot(characterID, id, grant, optionsFor(characterID)),
+        startServerBot: (characterID, id, grant) => {
+          sessionFor(characterID)?.flow.requireAutomationReady();
+          return apiStartServerBot(characterID, id, grant, optionsFor(characterID));
+        },
         releaseHeld,
       },
       scriptID,
@@ -252,6 +254,7 @@
     const entries = await startCompanionSquad(
       {
         startCompanion: async (characterID, setup) => {
+          sessionFor(characterID)?.flow.requireAutomationReady();
           const grant = createBotLaunchGrant(
             COMPANION_GRANT_SCRIPT_REV,
             analyzeCompanionRunPolicy(setup),

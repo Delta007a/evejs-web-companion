@@ -4,6 +4,7 @@ const express = require("express");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
+const { randomUUID } = require("crypto");
 // R17 mail: mailMgr.GetBody answers a zlib-DEFLATED buffer, and inflating it is
 // this file's job — see mailBodyText. The browser never sees a compressed byte.
 const zlib = require("zlib");
@@ -20,6 +21,7 @@ const { createBeltMemory } = require("./beltMemory");
 const { createSquadBoard } = require("./squadBoard");
 const { createLootMemory, CONTAINER_LEASE_MS } = require("./lootMemory");
 const { createBotLogStore } = require("./botLogStore");
+const { reconnectCandidate, hasPendingRecovery } = require("./droneRecoveryGate");
 const {
   isBridgeWritePair,
   pickSafeBrowserSessionFields,
@@ -871,6 +873,10 @@ async function selectHeldCharacter(webSessionID, account, characterID) {
     // Opened right below, as a retail client does at login — see
     // joinHeldChat.
     chat: null,
+    // Browser automation cannot take this session until the login recovery
+    // check has completed. A new select always resets the gate.
+    droneRecoveryReady: false,
+    droneRecoveryCheckID: randomUUID(),
   });
   // The character is online; put it in its rooms. Fire-and-forget: a chat
   // server that is down must never stop a pilot coming online.
@@ -933,6 +939,12 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
     sessionReservation = Symbol("select-session");
     sessionOperations.set(req.webSessionID, sessionReservation);
     const outcome = await selectHeldCharacter(req.webSessionID, req.account, characterID);
+    // A server host is already the claimed automation owner, not a browser
+    // pilot being opened for recovery. Its select carries the private bot
+    // header, so only browser-owned sessions wait for the login check.
+    if (botHost.authorizesClaim(characterID, req.get(botHostModule.BOT_HEADER))) {
+      bridgeSessions.get(req.webSessionID).droneRecoveryReady = true;
+    }
     res.json({
       ok: true,
       character: {
@@ -952,6 +964,7 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
           : outcome.session.corporationID,
       },
       station: buildStationStatic(outcome.session.stationID),
+      droneRecoveryCheckID: bridgeSessions.get(req.webSessionID)?.droneRecoveryCheckID ?? null,
       notifications: outcome.notifications,
     });
   } catch (error) {
@@ -17817,6 +17830,10 @@ async function readDronesInSpace(held) {
       // A BOOLEAN, not the controllerID — the id itself must not reach the
       // browser (R7d), and the only question the page has is this one.
       controlled: shipID > 0 && (Number(row.controllerID) || 0) === shipID,
+      // Only an owned, explicitly disconnected drone is a lost-flight
+      // candidate. The authoritative reconnect command checks scene scope,
+      // ownership, bandwidth and active limits again before changing control.
+      reconnectCandidate: reconnectCandidate(row, characterID),
       // A WORD, or null for "we could not tell" — never a raw activity enum.
       activity: typeof row.droneActivity === "string" ? row.droneActivity : null,
       // What it is busy with, so the page can name the rock or the rat.
@@ -17906,6 +17923,20 @@ app.get("/api/bridge/drones", requireAuth, async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+// A browser pilot may hand control to the bot host only after its login-time
+// lost-flight check (including authoritative return confirmation) completes.
+app.post("/api/bridge/drone-recovery/ready", requireAuth, (req, res) => {
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) return;
+  if (typeof req.body?.checkID !== "string" || req.body.checkID !== held.droneRecoveryCheckID) {
+    res.status(409).json({ ok: false, error: "DRONE_RECOVERY_STALE",
+      message: "The pilot session changed during drone recovery. Bring the pilot online again." });
+    return;
+  }
+  held.droneRecoveryReady = true;
+  res.json({ ok: true });
 });
 
 /**
@@ -20240,6 +20271,11 @@ app.post("/api/bots/start", requireAuth, async (req, res, next) => {
 
     if (characterOperations.has(characterID) || sessionOperations.has(req.webSessionID)) {
       res.status(409).json({ ok: false, error: "CHARACTER_IN_USE", message: "This character is changing sessions. Try again shortly." });
+      return;
+    }
+    if (hasPendingRecovery(bridgeSessions.get(req.webSessionID), characterID)) {
+      res.status(409).json({ ok: false, error: "DRONE_RECOVERY_PENDING",
+        message: "This pilot's lost-drone recovery must finish before server handoff." });
       return;
     }
     const reservation = Symbol("handoff");

@@ -67,6 +67,7 @@ export interface LoginResult {
 export interface SelectResult {
   readonly character: OnlineCharacterState;
   readonly station: StationStatic | null;
+  readonly droneRecoveryCheckID: string | null;
   readonly notifications: readonly JsonValue[];
 }
 
@@ -306,6 +307,7 @@ export async function selectCharacter(
       typeof station === "object" && station !== null && !Array.isArray(station)
         ? (station as unknown as StationStatic)
         : null,
+    droneRecoveryCheckID: typeof data.droneRecoveryCheckID === "string" ? data.droneRecoveryCheckID : null,
     notifications: Array.isArray(data.notifications) ? data.notifications : [],
   };
 }
@@ -3865,6 +3867,11 @@ export async function getDrones(options: ApiOptions = {}): Promise<DronesResult>
     shipInfo: data.shipInfo ?? null,
     errors,
   };
+}
+
+/** Complete the browser pilot's lost-flight check before server handoff. */
+export async function markDroneRecoveryReady(checkID: string, options: ApiOptions = {}): Promise<void> {
+  await postJson("/api/bridge/drone-recovery/ready", { checkID }, options);
 }
 
 /**

@@ -300,8 +300,10 @@
         {
           fetchScript: (scriptID) => getBotScript(scriptID, pilot.flow.requestOptions()),
           confirm: (message) => window.confirm(message),
-          startServerBot: (charID, scriptID, grant) =>
-            apiStartServerBot(charID, scriptID, grant, pilot.flow.requestOptions()),
+          startServerBot: (charID, scriptID, grant) => {
+            pilot.flow.requireAutomationReady();
+            return apiStartServerBot(charID, scriptID, grant, pilot.flow.requestOptions());
+          },
           releaseSession: () => pilot.flow.releaseSession(),
         },
         selectedScriptID,

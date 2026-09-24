@@ -17,6 +17,7 @@
   import DockPanel from "./DockPanel.svelte";
   import HudBar from "./HudBar.svelte";
   import WorkspaceHeader from "./WorkspaceHeader.svelte";
+  import DroneRecoveryNotice from "./DroneRecoveryNotice.svelte";
   import MobileWorkspace from "./MobileWorkspace.svelte";
   import DockWipe from "./DockWipe.svelte";
   import Toasts from "./Toasts.svelte";
@@ -336,6 +337,7 @@
 {#if $station.online === null}
   <div class="workspace-shell-empty"></div>
 {:else if isMobile}
+  <DroneRecoveryNotice {flow} />
   <!-- The same transition in both workspaces: the state change is identical, so
        it would be strange for only one of them to acknowledge it. -->
   <DockWipe {isDocked} />
@@ -358,6 +360,7 @@
       <Neocom {store} {flow} {isDocked} openIds={neocomOpenIds} focusedId={focused} onSelect={openFromNeocom} />
     </ErrorBoundary>
     <div class="work">
+      <DroneRecoveryNotice {flow} />
       <ErrorBoundary name="Workspace header">
         <WorkspaceHeader {store} {flow} {isDocked} />
       </ErrorBoundary>
