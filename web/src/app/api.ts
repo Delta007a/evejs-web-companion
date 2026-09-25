@@ -1939,6 +1939,7 @@ export interface MiningOperationRuntime {
     readonly runtimeState: string;
     readonly phase: string | null;
     readonly reason: string | null;
+    readonly failureCode?: string | null;
     readonly botID: string | null;
   })[];
   readonly logisticsTail: readonly {
@@ -1963,6 +1964,7 @@ export interface MiningOperationRuntime {
 }
 
 export interface MiningOperationsPayload {
+  readonly results?: readonly { readonly characterID: number; readonly ok: boolean; readonly error?: string; readonly message?: string }[];
   readonly operations: readonly {
     readonly definition: MiningOperationDefinition & { readonly operationID: string };
     readonly runtime: MiningOperationRuntime;
@@ -1978,6 +1980,7 @@ export interface MiningOperationsPayload {
 
 function miningOperationsPayload(data: Record<string, JsonValue>): MiningOperationsPayload {
   return {
+    ...(Array.isArray(data.results) ? { results: data.results as unknown as NonNullable<MiningOperationsPayload["results"]> } : {}),
     operations: (Array.isArray(data.operations) ? data.operations : []) as unknown as MiningOperationsPayload["operations"],
     targetBoard: (Array.isArray(data.targetBoard) ? data.targetBoard : []) as unknown as MiningOperationsPayload["targetBoard"],
     capabilities: (data.capabilities && typeof data.capabilities === "object" && !Array.isArray(data.capabilities)

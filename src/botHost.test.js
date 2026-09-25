@@ -147,7 +147,7 @@ function makeFakeStack(log) {
       return store;
     },
     createAppFlow: (store, options) => {
-      log.push(["createAppFlow", options.baseUrl, options.perSessionToken, options.initialSessionToken, options.browserPilotRecovery]);
+      log.push(["createAppFlow", options.baseUrl, options.perSessionToken, options.initialSessionToken, options.browserPilotRecovery, options.miningOperationID]);
       return {
         async selectCharacter(characterID) {
           log.push(["selectCharacter", characterID]);
@@ -267,7 +267,7 @@ test("start flies the character on its own session and lists it", async () => {
   assert.equal(host.list(8).length, 0);
   // The flow was seeded with the minted token — no password ever crossed.
   const flowCall = log.find((row) => row[0] === "createAppFlow");
-  assert.deepEqual(flowCall.slice(2), [true, "bot-token", false]);
+  assert.deepEqual(flowCall.slice(2), [true, "bot-token", false, null]);
 });
 
 test("the approved runtime deadline stops, logs out, and releases the character claim", async () => {
@@ -737,6 +737,7 @@ test("a Mining Operation association follows the exact hosted claim and persists
   const started = await host.start({ ...START, operationID: "op-1", operationRole: "MINER" });
   assert.equal(started.ok, true);
   assert.equal(log.find((row) => row[0] === "createAppFlow")[4], true);
+  assert.equal(log.find((row) => row[0] === "createAppFlow")[5], "op-1");
   assert.ok(log.findIndex((row) => row[0] === "requireAutomationReady") < log.findIndex((row) => row[0] === "startCustomBot"));
   assert.equal(started.bot.operationID, "op-1");
   assert.equal(started.bot.operationRole, "MINER");
@@ -764,9 +765,31 @@ test("an operation pilot cannot start when login drone recovery is blocked", asy
   } });
   const outcome = await host.start({ ...START, operationID: "op-blocked", operationRole: "MINER" });
   assert.equal(outcome.ok, false);
+  assert.equal(outcome.stage, "DRONE_RECOVERY");
   assert.match(outcome.message, /Lost-drone recovery unconfirmed/);
   assert.equal(host.claimedBy(START.characterID), null);
   assert.equal(log.some(([kind]) => kind === "startCustomBot"), false);
+});
+
+test("operation pilot acquisition failure retains its stage and gateway cause code", async () => {
+  const log = [];
+  const stack = makeFakeStack(log);
+  const host = makeHost({ log, loadStack: async () => {
+    const base = await stack();
+    return { ...base, createAppFlow(store, options) {
+      const flow = base.createAppFlow(store, options);
+      return { ...flow, async selectCharacter() {
+        throw Object.assign(new Error("Pilot unavailable"), { code: "SESSION_UNAVAILABLE" });
+      } };
+    } };
+  } });
+  const outcome = await host.start({ ...START, operationID: "op-failed", operationRole: "MINER" });
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.code, "BOT_START_FAILED");
+  assert.equal(outcome.stage, "SELECT_CHARACTER");
+  assert.equal(outcome.causeCode, "SESSION_UNAVAILABLE");
+  assert.match(outcome.message, /SELECT_CHARACTER \(SESSION_UNAVAILABLE\): Pilot unavailable/);
+  assert.equal(host.claimedBy(START.characterID), null);
 });
 
 test("resume restarts a persisted bot on a fresh host (the restart path)", async () => {

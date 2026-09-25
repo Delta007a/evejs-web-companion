@@ -1212,6 +1212,26 @@ test("loot-containers: any container is fair game, no ownership check", () => {
   assert.equal(done.outcome.kind, "done");
 });
 
+test("operation hauler cannot loot an old grid after its target assignment is lost or changed", () => {
+  const loot = SCRIPT_MACROS["loot-containers"]!;
+  const step = { id: "lc", kind: "macro", macro: "loot-containers", args: {} } as const;
+  const oldBelt = entity({ itemID: 40001, name: "Asteroid Belt 1" });
+  const can = entity({ itemID: 80001, kind: "container", position: { x: 500, y: 0, z: 0 } });
+  const target = { targetKey: "BELT:30000142:Asteroid Belt 2", targetType: "BELT" as const,
+    systemID: 30000142, systemName: "Jita", targetName: "Asteroid Belt 2", state: "ACTIVE" as const,
+    claimedByOperationID: "op" };
+  const operation: NonNullable<ScriptObservation["miningOperation"]> = {
+    operationID: "op", operationName: "Op", role: "HAULER", unloadPolicy: "HAULER_SERVICE",
+    area: { anchorSystemID: 30000142, anchorSystemName: "Jita", reach: "CURRENT_SYSTEM", targetClasses: ["BELT"] },
+    state: "DEGRADED", currentTarget: target, logisticsTarget: null, rendezvous: null,
+  };
+  const oldGrid = obs({ snapshot: snapshot([oldBelt, can]), miningOperation: operation });
+  assert.equal(loot(step, oldGrid, {}, {}).action.kind, "wait");
+  assert.equal(loot(step, obs({ ...oldGrid, miningOperation: { ...operation, currentTarget: null } }), {}, {}).action.kind, "wait");
+  const newBelt = entity({ itemID: 40002, name: "Asteroid Belt 2" });
+  assert.equal(loot(step, obs({ ...oldGrid, snapshot: snapshot([newBelt, can]) }), {}, {}).action.kind, "lootContainer");
+});
+
 test("loot-containers: an empty read right after arrival waits out a settle window instead of leaving immediately", () => {
   // No natural pause the way a player starting the bot by hand gets — landing
   // on a belt and checking for containers on the very next tick can read one

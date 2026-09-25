@@ -141,6 +141,58 @@ test("an operation that misses its heartbeat never keeps acting on a claim it lo
   assert.equal(h.operations.runtimeFor("lost").history.at(-1).kind, "TARGET_CLAIM_LOST");
 });
 
+test("a surviving hosted miner renews a degraded operation's claim despite failed fleet members", () => {
+  const h = harness([definition("partial", [member(1, "MINER"), member(2, "MINER")])], { leaseMs: 100 });
+  h.operations.begin("partial", ["BELT"]);
+  h.operations.memberStarted("partial", 1, "bot-1");
+  h.operations.memberFailed("partial", 2, { code: "BOT_START_FAILED", message: "Gateway refused selection" });
+  h.operations.finishLaunch("partial");
+  const target = h.operations.reserveCandidate("partial", 1, belt()).target;
+  for (let i = 0; i < 3; i++) {
+    h.clock.advance(75);
+    h.operations.renewHostedClaims([{ operationID: "partial", characterID: 1, status: "running", endedAt: null }]);
+    assert.equal(h.board.get(target.targetKey).claimedByOperationID, "partial");
+  }
+  assert.equal(h.operations.assignment("partial", 1).currentTarget.targetKey, target.targetKey);
+  assert.equal(h.operations.runtimeFor("partial").state, "DEGRADED");
+  assert.equal(h.operations.runtimeFor("partial").members.get(2).failureCode, "BOT_START_FAILED");
+});
+
+test("host heartbeat preserves an unclaimed depleted SELF_UNLOAD rendezvous", () => {
+  const h = harness([definition("unload", [member(1, "MINER")])], { leaseMs: 100 });
+  startAll(h, "unload");
+  const target = h.operations.reserveCandidate("unload", 1, belt()).target;
+  h.operations.depleteTarget("unload", 1, target.targetKey, { empty: true });
+  assert.equal(h.board.get(target.targetKey).state, "DEPLETED");
+  h.operations.renewHostedClaims([{ operationID: "unload", characterID: 1, status: "running", endedAt: null }]);
+  assert.equal(h.operations.runtimeFor("unload").state, "UNLOADING");
+  assert.equal(h.operations.assignment("unload", 1).currentTarget.state, "DEPLETED");
+});
+
+test("botHost lowercase running projection still counts miners and haulers for depletion", () => {
+  const h = harness([definition("haul-live", [member(1, "MINER"), member(2, "HAULER")], "HAULER_SERVICE")]);
+  startAll(h, "haul-live");
+  const target = h.operations.reserveCandidate("haul-live", 1, belt()).target;
+  h.operations.list([1, 2].map((id) => ({ operationID: "haul-live", characterID: id, botID: `bot-${id}`,
+    status: "running", phase: "Mining", why: null, startedAt: "now", endedAt: null })));
+  assert.equal(h.operations.depleteTarget("haul-live", 1, target.targetKey, { partialDumpConfirmed: true }), true);
+  assert.equal(h.operations.runtimeFor("haul-live").drainingTargets.length, 1);
+});
+
+test("claim loss invalidates current target, rejects stale reservation and depletion, and records history once", () => {
+  const h = harness([definition("stale", [member(1, "MINER")])], { leaseMs: 100 });
+  startAll(h, "stale");
+  const target = h.operations.reserveCandidate("stale", 1, belt()).target;
+  h.clock.advance(101);
+  assert.equal(h.operations.reserveCandidate("stale", 1, belt("Belt II")).reason, "TARGET_CLAIM_LOST");
+  assert.equal(h.operations.assignment("stale", 1).currentTarget, null);
+  assert.equal(h.operations.depleteTarget("stale", 1, target.targetKey, { empty: true }), false);
+  assert.deepEqual(h.belts.dryBelts("Jita"), []);
+  assert.equal(h.operations.runtimeFor("stale").history.filter((row) => row.kind === "TARGET_CLAIM_LOST").length, 1);
+  assert.equal(h.operations.reserveCandidate("stale", 1, belt("Belt II")).acquired, true);
+  assert.equal(h.operations.runtimeFor("stale").state, "DEGRADED");
+});
+
 test("belt depletion is written through existing belt memory and its TTL clears the board projection", () => {
   const h = harness([definition("a", [member(1, "MINER")])], { beltTtlMs: 100 });
   startAll(h, "a");

@@ -57,12 +57,15 @@ function fakeHost(heldSessions = new Map()) {
   const rows = [];
   const stops = [];
   const inputs = [];
+  const failures = new Map();
   return {
     rows,
     stops,
     inputs,
+    failures,
     async start(input) {
       inputs.push(input);
+      if (failures.has(input.characterID)) return { ok: false, ...failures.get(input.characterID) };
       if ([...heldSessions].some(([sessionID, held]) => Number(held.characterID) === input.characterID && sessionID !== input.callerSessionID)) {
         return { ok: false, code: "CHARACTER_IN_USE", message: "Another browser session controls this pilot." };
       }
@@ -269,10 +272,26 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
   } });
   assert.equal(heldStart.payload.operations.find((row) => row.definition.operationID === crewOperation.payload.definition.operationID).runtime.state, "DEGRADED");
   assert.equal(heldStart.payload.results.find((row) => row.characterID === 7003).error, "CHARACTER_IN_USE");
+  const heldFailure = heldStart.payload.operations.find((row) => row.definition.operationID === crewOperation.payload.definition.operationID)
+    .runtime.members.find((row) => row.characterID === 7003);
+  assert.equal(heldFailure.failureCode, "CHARACTER_IN_USE");
+  assert.match(heldFailure.reason, /browser session/);
   assert.equal(host.inputs.find((input) => input.characterID === 7003).callerSessionID, null);
   assert.equal(heldSessions.has("other-browser"), true);
   await request(baseUrl, `/api/mining-operations/${crewOperation.payload.definition.operationID}/stop`, { method: "POST", token, body: {} });
   heldSessions.delete("other-browser");
+  host.failures.set(7002, { code: "BOT_START_FAILED", message: "Gateway selection refused: session limit" });
+  const failedMinerStart = await request(baseUrl, `/api/mining-operations/${crewOperation.payload.definition.operationID}/start`, { method: "POST", token, body: {
+    grants: Object.fromEntries(crew.map((row) => [row.characterID, { scriptRev: 1, riskClasses: [], maxRuntimeMinutes: 60 }])),
+  } });
+  const failedMiner = failedMinerStart.payload.operations.find((row) => row.definition.operationID === crewOperation.payload.definition.operationID)
+    .runtime.members.find((row) => row.characterID === 7002);
+  assert.equal(failedMinerStart.payload.results.find((row) => row.characterID === 7002).message, "Gateway selection refused: session limit");
+  assert.equal(failedMiner.failureCode, "BOT_START_FAILED");
+  assert.equal(failedMiner.reason, "Gateway selection refused: session limit");
+  assert.equal(failedMinerStart.payload.operations.find((row) => row.definition.operationID === crewOperation.payload.definition.operationID).runtime.state, "DEGRADED");
+  await request(baseUrl, `/api/mining-operations/${crewOperation.payload.definition.operationID}/stop`, { method: "POST", token, body: {} });
+  host.failures.delete(7002);
   const crewStart = await request(baseUrl, `/api/mining-operations/${crewOperation.payload.definition.operationID}/start`, { method: "POST", token, body: {
     grants: Object.fromEntries(crew.map((row) => [row.characterID, { scriptRev: 1, riskClasses: [], maxRuntimeMinutes: 60 }])),
   } });

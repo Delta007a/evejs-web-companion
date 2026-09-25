@@ -1037,7 +1037,39 @@ export function decideScriptAction(
   script: BotScript, obs: ScriptObservation, mem: ScriptMemory,
   registry: MacroRegistry, travelHome: HomeTravelDecider,
 ): ScriptTickResult {
-  const base = decideScriptCore(script, obs, mem, registry, travelHome);
+  let base = decideScriptCore(script, obs, mem, registry, travelHome);
+  const assignmentMissing = obs.miningOperationRequired === true && obs.miningOperation == null;
+  const minerTargetMissing = obs.miningOperationRequired === true &&
+    obs.miningOperation?.role === "MINER" && obs.miningOperation.currentTarget === null;
+  const operationHeld = (assignmentMissing || minerTargetMissing) && base.memory.latched === null;
+  if (operationHeld) {
+    // Do not let the ordinary saved-script path issue a nearest-belt order when
+    // the host's operation assignment cannot be read. Also settle work already
+    // cycling on a target whose claim was lost before selecting another one.
+    const active = new Set(obs.snapshot?.ship?.activeModuleIDs ?? []);
+    const miner = obs.miningModuleIDs?.find((id) => active.has(id));
+    const miningDrones = (obs.miningDrones?.out ?? [])
+      .filter((drone) => drone.controlled && drone.typeID !== null && obs.miningDrones?.roles[drone.typeID] === "mining")
+      .map((drone) => drone.itemID);
+    const why = assignmentMissing
+      ? `The operation assignment is unavailable; standalone target selection is disabled.${obs.miningOperationReadError ? ` ${obs.miningOperationReadError}` : ""}`
+      : "The operation has no owned target; settling mining equipment before selecting another.";
+    if (miner !== undefined || (miningDrones.length > 0 && obs.hostileOnGrid !== true)) {
+      return { ...base, action: miner !== undefined ? { kind: "deactivate", moduleID: miner } : { kind: "recallDrones", droneIDs: miningDrones },
+        why, phase: assignmentMissing ? "Waiting for operation assignment" : "Target claim unavailable",
+        status: "running", pauseReason: null, memory: mem, containerTargetID: undefined };
+    }
+    const activeMacro = activeMacroID(script, mem);
+    const targetlessMinerWork = minerTargetMissing && ![
+      "undock", "mine-at-belt", "warp-to-ore-anomaly", "deliver-ore", "travel-to-station", "unload-cargo",
+    ].includes(activeMacro ?? "");
+    if (assignmentMissing || targetlessMinerWork) {
+      // Keep the drone-flight wrapper below in play so existing hostile
+      // self-defense still runs, but no standalone resource action escapes.
+      base = { ...base, action: WAIT, why, phase: assignmentMissing ? "Waiting for operation assignment" : "Target claim unavailable",
+        status: "running", pauseReason: null, memory: mem, containerTargetID: undefined };
+    }
+  }
   if (obs.inWarp === true || obs.docked === true) return base;
   const mining = activeMacroID(script, mem) === "mine-at-belt";
   const step = mining ? activeStep(script, mem.position) : null;
@@ -1050,16 +1082,17 @@ export function decideScriptAction(
     return role == null || role === "mining" || role === "combat";
   }) === true);
   if (!enabled && mem.miningFlight === undefined && !terminalFlight) return base;
-  const leaving = !enabled || base.status !== "running" || base.memory.latched !== null ||
-    activeStep(script, base.memory.position)?.id !== step?.id ||
-    ["warp", "warpScan", "warpBookmark", "startRoute", "startSystemRoute", "dock", "undock"].includes(base.action.kind);
-  const rocks = obs.snapshot?.entities.filter(e => !e.isSelf && (e.miningYieldTypeID !== null || e.beltID !== null)) ?? [];
-  const picked = base.action.kind === "activate" || base.action.kind === "lock" ? base.action.targetID :
-    step === null ? null : base.memory.macroMem[step.id]?.["rockID"];
-  const rockID = typeof picked === "number" && rocks.some(r => r.itemID === picked) ? picked : null;
   const origin = obs.snapshot?.ship?.position ?? { x: 0, y: 0, z: 0 };
   const hostileID = obs.snapshot === null || obs.snapshot === undefined ? null :
     hostileRows(obs.snapshot, origin)[0]?.itemID ?? null;
+  const leaving = (operationHeld && hostileID === null) || !enabled || base.status !== "running" || base.memory.latched !== null ||
+    activeStep(script, base.memory.position)?.id !== step?.id ||
+    ["warp", "warpScan", "warpBookmark", "startRoute", "startSystemRoute", "dock", "undock"].includes(base.action.kind);
+  const rocks = obs.snapshot?.entities.filter(e => !e.isSelf && (e.miningYieldTypeID !== null || e.beltID !== null)) ?? [];
+  const picked = operationHeld ? null :
+    (base.action.kind === "activate" || base.action.kind === "lock" ? base.action.targetID :
+      step === null ? null : base.memory.macroMem[step.id]?.["rockID"]);
+  const rockID = typeof picked === "number" && rocks.some(r => r.itemID === picked) ? picked : null;
   const flight = decideMiningDroneFlight(
     obs.snapshot == null || obs.hostileOnGrid === null ? null : obs.miningDrones ?? null,
     mem.miningFlight ?? freshDroneMemory(), hostileID, rockID, leaving,

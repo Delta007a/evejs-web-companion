@@ -20190,7 +20190,7 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
       else if (!script || !audit) failure = "The referenced saved automation no longer exists.";
       else failure = operationRoutineCompatibility(definition, member.role, audit, commonClasses);
       if (failure) {
-        miningOperations.memberFailed(definition.operationID, member.characterID, failure);
+        miningOperations.memberFailed(definition.operationID, member.characterID, { code: "MEMBER_NOT_EXECUTABLE", message: failure });
         results.push({ characterID: member.characterID, ok: false, error: "MEMBER_NOT_EXECUTABLE", message: failure });
         continue;
       }
@@ -20200,7 +20200,7 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
         : null;
       if (!account || account.banned || !character) {
         failure = "The pilot is not owned by the saved account, or that account is unavailable.";
-        miningOperations.memberFailed(definition.operationID, member.characterID, failure);
+        miningOperations.memberFailed(definition.operationID, member.characterID, { code: "CHARACTER_NOT_FOUND", message: failure });
         results.push({ characterID: member.characterID, ok: false, error: "CHARACTER_NOT_FOUND", message: failure });
         continue;
       }
@@ -20213,13 +20213,13 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
       }
       if (hasPendingRecovery(callerHeld, member.characterID)) {
         failure = "This pilot's lost-drone recovery must finish before server handoff.";
-        miningOperations.memberFailed(definition.operationID, member.characterID, failure);
+        miningOperations.memberFailed(definition.operationID, member.characterID, { code: "DRONE_RECOVERY_PENDING", message: failure });
         results.push({ characterID: member.characterID, ok: false, error: "DRONE_RECOVERY_PENDING", message: failure });
         continue;
       }
       if (characterOperations.has(member.characterID) || (callerSessionID !== null && sessionOperations.has(callerSessionID))) {
         failure = "This pilot is changing sessions. Try this member again shortly.";
-        miningOperations.memberFailed(definition.operationID, member.characterID, failure);
+        miningOperations.memberFailed(definition.operationID, member.characterID, { code: "CHARACTER_IN_USE", message: failure });
         results.push({ characterID: member.characterID, ok: false, error: "CHARACTER_IN_USE", message: failure });
         continue;
       }
@@ -20269,7 +20269,7 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
         if (callerSessionID !== null && sessionOperations.get(callerSessionID) === reservation) sessionOperations.delete(callerSessionID);
       }
       if (!outcome.ok) {
-        miningOperations.memberFailed(definition.operationID, member.characterID, outcome.message || outcome.code);
+        miningOperations.memberFailed(definition.operationID, member.characterID, { code: outcome.code, message: outcome.message || outcome.code });
         results.push({ characterID: member.characterID, ok: false, error: outcome.code, message: outcome.message });
       } else {
         miningOperations.memberStarted(definition.operationID, member.characterID, outcome.bot.botID);
@@ -21073,6 +21073,19 @@ function startServer(options = {}) {
   const host = options.host || config.host;
   const port = options.port === undefined ? config.port : Number(options.port);
   const server = http.createServer(appToStart);
+  // Host ownership, not a script observation or an open dashboard, keeps the
+  // shared target lease alive. A dead server stops this timer, so abandoned
+  // ownership still expires on the board's bounded lease.
+  const boardLeaseMs = appToStart.locals.miningTargetBoard?.leaseMs || 30_000;
+  const claimHeartbeat = setInterval(() => {
+    try {
+      appToStart.locals.miningOperations?.renewHostedClaims(appToStart.locals.botHost?.listAll() || []);
+    } catch (error) {
+      console.error(error);
+    }
+  }, Math.max(1_000, Math.min(10_000, Math.floor(boardLeaseMs / 3))));
+  claimHeartbeat.unref?.();
+  server.on("close", () => clearInterval(claimHeartbeat));
   server.listen(port, host, () => {
     const address = server.address();
     const activePort = address && typeof address === "object" ? address.port : port;

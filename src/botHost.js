@@ -766,6 +766,7 @@ function createBotHost(options) {
     claims.set(characterID, botID);
     records.set(botID, record);
 
+    let startStage = "AUTHENTICATION";
     try {
       const token = auth.createBotSessionToken(account, deadlineMs);
       const store = stack.createClientStore();
@@ -785,15 +786,19 @@ function createBotHost(options) {
         // Operation bots may acquire a pilot without a browser workspace. They
         // must run the same login lost-drone gate before automation starts.
         browserPilotRecovery: record.operationID !== null,
+        miningOperationID: record.operationID,
       });
       record.flow = flow;
       record.store = store;
 
       // Validation, credentials, flow construction and the private claim exist
       // before the route releases the caller. The hook is internal, never wire data.
+      startStage = "SESSION_HANDOFF";
       if (beforeStart) await beforeStart();
+      startStage = "SELECT_CHARACTER";
       await flow.selectCharacter(characterID);
       if (record.operationID !== null) {
+        startStage = "DRONE_RECOVERY";
         await flow.retryDroneRecovery();
         flow.requireAutomationReady();
       }
@@ -816,15 +821,17 @@ function createBotHost(options) {
       });
 
       if (isCompanion) {
+        startStage = "START_AUTOMATION";
         await flow.startFleetCompanion(decodedRequest, resumingAbandonment);
         applySnapshot(record, store.companion.get());
       } else {
+        startStage = "START_AUTOMATION";
         await flow.startCustomBot(decodedDoc);
         applySnapshot(record, store.customBot.get());
       }
       if (record.startError !== null) {
         await finalize(record);
-        return { ok: false, code: "BOT_START_FAILED", message: record.startError };
+        return { ok: false, code: "BOT_START_FAILED", stage: startStage, message: `${startStage}: ${record.startError}` };
       }
       const remainingMs = Math.max(1, Date.parse(record.expiresAt) - now());
       record.deadlineTimer = setDeadlineTimeout(() => {
@@ -849,8 +856,10 @@ function createBotHost(options) {
       logError(error);
       record.status = "error";
       record.why = error && error.message ? String(error.message) : "The bot could not be started.";
+      const causeCode = typeof error?.code === "string" ? error.code : null;
       await finalize(record);
-      return { ok: false, code: "BOT_START_FAILED", message: record.why };
+      return { ok: false, code: "BOT_START_FAILED", stage: startStage, causeCode,
+        message: `${startStage}${causeCode ? ` (${causeCode})` : ""}: ${record.why}` };
     }
   }
 

@@ -120,6 +120,7 @@ function createMiningOperations(options) {
         runtimeState: "DRAFT",
         phase: null,
         reason: null,
+        failureCode: null,
       }])),
       drainingTargets: [],
       rendezvous: null,
@@ -150,6 +151,7 @@ function createMiningOperations(options) {
           runtimeState: "DRAFT",
           phase: null,
           reason: null,
+          failureCode: null,
         });
       }
     }
@@ -184,6 +186,7 @@ function createMiningOperations(options) {
         runtimeState: "STARTING",
         phase: "Starting saved automation",
         reason: null,
+        failureCode: null,
       });
     }
     return { ok: true, runtime };
@@ -197,6 +200,7 @@ function createMiningOperations(options) {
     member.runtimeState = "RUNNING";
     member.phase = "Waiting for operation target";
     member.reason = null;
+    member.failureCode = null;
     return true;
   }
 
@@ -225,13 +229,59 @@ function createMiningOperations(options) {
     if (!member) return false;
     member.runtimeState = "FAILED";
     member.phase = "Unavailable";
-    member.reason = String(reason || "This member could not start.");
+    member.reason = String(reason?.message || reason || "This member could not start.");
+    member.failureCode = typeof reason?.code === "string" ? reason.code : null;
     runtime.state = "DEGRADED";
     if (runtime.rendezvous) {
       runtime.rendezvous.required = runtime.rendezvous.required.filter((id) => id !== Number(characterID));
       releaseRendezvousIfReady(runtime);
     }
     return true;
+  }
+
+  function loseClaim(runtime, key) {
+    if (runtime.currentTarget?.targetKey !== key) return;
+    const previous = runtime.currentTarget;
+    const board = targetBoard.get(key);
+    runtime.currentTarget = null;
+    runtime.rendezvous = null;
+    runtime.state = "DEGRADED";
+    history(runtime, "TARGET_CLAIM_LOST", null, { targetKey: key,
+      priorLeaseExpiresAt: previous.leaseExpiresAt ?? null,
+      boardState: board?.state ?? null,
+      boardOwner: board?.claimedByOperationID ?? null });
+  }
+
+  function loseDrainClaim(runtime, key) {
+    const before = runtime.drainingTargets.length;
+    runtime.drainingTargets = runtime.drainingTargets.filter((row) => row.target?.targetKey !== key);
+    if (runtime.drainingTargets.length === before) return;
+    runtime.state = "DEGRADED";
+    history(runtime, "TARGET_CLAIM_LOST", null, { targetKey: key, logisticsTail: true });
+  }
+
+  // botHost is the pilot ownership authority. Keep a claim alive while at
+  // least one hosted member is active, even if its script observation stalls.
+  // A dead host cannot run this heartbeat, so the board's bounded lease still
+  // releases abandoned claims. Failed launch members do not cancel survivors.
+  function renewHostedClaims(bots = []) {
+    const activeOperations = new Set((bots || [])
+      .filter((bot) => bot.operationID && bot.endedAt === null && ["starting", "running", "paused"].includes(bot.status))
+      .map((bot) => bot.operationID));
+    for (const [operationID, runtime] of runtimes) {
+      if (!activeOperations.has(operationID)) continue;
+      const key = runtime.currentTarget?.claimedByOperationID === operationID
+        ? runtime.currentTarget.targetKey : null;
+      if (key) {
+        if (targetBoard.heartbeat(operationID, key)) runtime.currentTarget = targetBoard.get(key);
+        else loseClaim(runtime, key);
+      }
+      for (const tail of [...runtime.drainingTargets]) {
+        if (tail.target?.targetKey && !targetBoard.heartbeat(operationID, tail.target.targetKey)) {
+          loseDrainClaim(runtime, tail.target.targetKey);
+        }
+      }
+    }
   }
 
   function finishLaunch(operationID) {
@@ -253,6 +303,12 @@ function createMiningOperations(options) {
       return { acquired: false, reason: "NOT_OPERATION_MINER", target: null };
     }
     if (runtime.currentTarget !== null) {
+      const key = runtime.currentTarget.targetKey;
+      if (!targetBoard.heartbeat(operationID, key)) {
+        loseClaim(runtime, key);
+        return { acquired: false, reason: "TARGET_CLAIM_LOST", target: null };
+      }
+      runtime.currentTarget = targetBoard.get(key);
       return { acquired: true, reason: null, target: runtime.currentTarget };
     }
     const type = String(candidate?.targetType || "").toUpperCase();
@@ -302,7 +358,10 @@ function createMiningOperations(options) {
     const runtime = runtimeFor(operationID);
     const member = runtime?.members.get(Number(characterID));
     if (!runtime || !member || member.role !== "MINER" || runtime.currentTarget?.targetKey !== key) return false;
-    if (!targetBoard.activate(operationID, key)) return false;
+    if (!targetBoard.activate(operationID, key)) {
+      loseClaim(runtime, key);
+      return false;
+    }
     runtime.currentTarget = targetBoard.get(key);
     if (runtime.state !== "DEGRADED") runtime.state = "MINING";
     member.phase = "Mining operation target";
@@ -316,6 +375,10 @@ function createMiningOperations(options) {
     const member = runtime?.members.get(Number(characterID));
     const target = runtime?.currentTarget;
     if (!def || !runtime || !member || member.role !== "MINER" || target?.targetKey !== key) return false;
+    if (target.claimedByOperationID === operationID && !targetBoard.heartbeat(operationID, key)) {
+      loseClaim(runtime, key);
+      return false;
+    }
     // More than one miner will observe the same empty grid. The first report
     // establishes the fleet-wide clearance barrier; later reports are the
     // individual confirmations that each miner has disposed of its remainder.
@@ -333,25 +396,22 @@ function createMiningOperations(options) {
       reportedByCharacterID: Number(characterID),
       ...evidence,
     };
-    if (target.targetType === "BELT" && target.systemName) {
-      beltMemory.markDry(target.systemName, target.targetName, null);
-    }
     const activeHaulers = def.unloadPolicy === "HAULER_SERVICE"
       ? [...runtime.members.values()]
-        .filter((row) => row.role === "HAULER" && row.runtimeState === "RUNNING")
+        .filter((row) => row.role === "HAULER" && ["RUNNING", "running"].includes(row.runtimeState))
         .map((row) => row.characterID)
       : [];
     const draining = activeHaulers.length > 0;
     if (!targetBoard.markDepleted(operationID, key, proof, draining)) {
-      runtime.currentTarget = null;
-      runtime.rendezvous = null;
-      runtime.state = "DEGRADED";
-      history(runtime, "TARGET_CLAIM_LOST", null, { targetKey: key });
+      loseClaim(runtime, key);
       return false;
+    }
+    if (target.targetType === "BELT" && target.systemName) {
+      beltMemory.markDry(target.systemName, target.targetName, null);
     }
     history(runtime, "TARGET_DEPLETED", target, proof);
     const required = [...runtime.members.values()]
-      .filter((row) => row.role === "MINER" && row.runtimeState === "RUNNING")
+      .filter((row) => row.role === "MINER" && ["RUNNING", "running"].includes(row.runtimeState))
       .map((row) => row.characterID);
     if (def.unloadPolicy === "HAULER_SERVICE") {
       if (draining) {
@@ -394,6 +454,10 @@ function createMiningOperations(options) {
     const id = Number(characterID);
     const member = runtime?.members.get(id);
     if (!runtime || !member || member.role !== "HAULER") return false;
+    if (!targetBoard.heartbeat(operationID, targetKey)) {
+      loseDrainClaim(runtime, targetKey);
+      return false;
+    }
     let changed = false;
     for (const drain of runtime.drainingTargets) {
       if (drain.target.targetKey !== String(targetKey || "")) continue;
@@ -421,14 +485,14 @@ function createMiningOperations(options) {
       if (targetBoard.heartbeat(operationID, key)) {
         runtime.currentTarget = targetBoard.get(key);
       } else {
-        runtime.currentTarget = null;
-        runtime.rendezvous = null;
-        runtime.state = "DEGRADED";
-        history(runtime, "TARGET_CLAIM_LOST", null, { targetKey: key });
+        loseClaim(runtime, key);
       }
     }
-    const tail = runtime.drainingTargets.find((row) => row.pendingHaulers.includes(Number(characterID))) || null;
-    if (tail?.target?.targetKey) targetBoard.heartbeat(operationID, tail.target.targetKey);
+    let tail = runtime.drainingTargets.find((row) => row.pendingHaulers.includes(Number(characterID))) || null;
+    if (tail?.target?.targetKey && !targetBoard.heartbeat(operationID, tail.target.targetKey)) {
+      loseDrainClaim(runtime, tail.target.targetKey);
+      tail = null;
+    }
     return {
       operationID,
       operationName: def.name,
@@ -535,6 +599,7 @@ function createMiningOperations(options) {
 
   function list(bots = []) {
     reconcileBots(bots);
+    renewHostedClaims(bots);
     return store.list().map((def) => ({ definition: def, runtime: publicRuntime(def, runtimeFor(def.operationID)) }));
   }
 
@@ -566,6 +631,7 @@ function createMiningOperations(options) {
     beginStop,
     finishStop,
     reconcileBots,
+    renewHostedClaims,
     remove,
   };
 }

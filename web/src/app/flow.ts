@@ -344,6 +344,8 @@ export interface AppFlowOptions {
   readonly perSessionToken?: boolean;
   /** Browser pilot selection performs lost-flight recovery before automation. */
   readonly browserPilotRecovery?: boolean;
+  /** Host-verified operation identity: assignment reads must fail closed. */
+  readonly miningOperationID?: string | null;
   /**
    * Server bot host — a session token this flow starts out holding, so a
    * headless flow whose owner ALREADY authenticated (the bot-start route runs
@@ -9343,7 +9345,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     // A non-operation run proves that fact once. Operation runs keep reading so
     // the same lightweight call renews the bounded target lease and observes
     // target changes made by another member.
-    let miningOperationProbe: "unknown" | "member" | "none" = "unknown";
+    const miningOperationRequired = typeof options.miningOperationID === "string" && options.miningOperationID.length > 0;
+    let miningOperationProbe: "unknown" | "member" | "none" = miningOperationRequired ? "member" : "unknown";
     const unavailableMiningTargets = new Map<string, number>();
     // The hunt's jump-distance table, computed once per home system (a full
     // breadth-first sweep over the gate graph is too much to redo every tick).
@@ -9477,18 +9480,22 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // read is best-effort: a failure lands as null (unreadable, never "no").
         const macro = hint.activeMacro;
         let miningOperation: ScriptObservation["miningOperation"] = null;
-        if (
-          macro !== null &&
-          (miningOperationProbe === "member" || MINING_OPERATION_MACROS.has(macro)) &&
-          miningOperationProbe !== "none"
-        ) {
+        let miningOperationReadError: string | null = null;
+        if (miningOperationRequired || (macro !== null && miningOperationProbe !== "none" &&
+          (miningOperationProbe === "member" || MINING_OPERATION_MACROS.has(macro)))) {
           try {
             miningOperation = await api.readMiningOperationAssignment(callOptions);
-            miningOperationProbe = miningOperation === null ? "none" : "member";
-          } catch {
-            // Ordinary scripts have no operation capability and stop probing.
-            // A known member treats a transient read failure as unknown for this
-            // tick, then retries on the next existing observation.
+            if (miningOperationRequired && miningOperation?.operationID !== options.miningOperationID) {
+              miningOperationReadError = miningOperation === null
+                ? "The host returned no assignment for this operation bot."
+                : "The host returned a different operation assignment.";
+              miningOperation = null;
+            }
+            miningOperationProbe = miningOperationRequired ? "member" : miningOperation === null ? "none" : "member";
+          } catch (error) {
+            // A hosted operation treats a transient read failure as unknown for
+            // this tick and retries; it never becomes an ordinary script.
+            miningOperationReadError = error instanceof Error ? error.message : String(error);
             miningOperation = null;
           }
         }
@@ -10188,6 +10195,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           jumpsToDropoff,
           anomalies,
           miningOperation,
+          miningOperationRequired,
+          miningOperationReadError,
           unavailableMiningTargetKeys: [...unavailableMiningTargets.keys()],
           scannerOperations,
           localPlayers,

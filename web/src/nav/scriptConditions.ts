@@ -240,6 +240,9 @@ export interface ScriptObservation {
   readonly dryBelts?: readonly DryBelt[] | null;
   /** This hosted runner's BFF-side Mining Operation assignment, if any. */
   readonly miningOperation?: MiningOperationAssignment | null;
+  /** A hosted operation may never fall back to standalone target selection. */
+  readonly miningOperationRequired?: boolean;
+  readonly miningOperationReadError?: string | null;
   /** Run-local backoff after another operation won an atomic reservation. */
   readonly unavailableMiningTargetKeys?: readonly string[];
   /** True when a PLAYER's ship on this grid has locked this ship. */

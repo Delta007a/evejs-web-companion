@@ -2791,9 +2791,12 @@ const CONTAINER_SETTLE_TICKS = 30; // ~2s/tick elsewhere in this file -> roughly
 // loop the block forever.
 const lootContainers: MacroDecider = (step, obs, mem) => {
   const snapshot = obs.snapshot ?? null;
-  const logisticsTarget = obs.miningOperation?.role === "HAULER"
-    ? obs.miningOperation.logisticsTarget
-    : null;
+  const operation = obs.miningOperation?.role === "HAULER" ? obs.miningOperation : null;
+  const logisticsTarget = operation?.logisticsTarget ?? null;
+  const assignedTarget = logisticsTarget ?? operation?.currentTarget ?? null;
+  if (operation !== null && assignedTarget === null) {
+    return tick(WAIT, "The operation does not own a hauling target.", "Waiting for target", ACTING, false, mem);
+  }
   const clearDrainProof = <T extends MacroTick>(result: T): T => logisticsTarget === null
     ? result
     : withBoardPatch(result, { [OPERATION_DRAIN_CLEAR_BOARD_KEY]: "" }) as T;
@@ -2802,6 +2805,14 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
   }
   if (obs.inSpace !== true || snapshot === null) {
     return tick(WAIT, "Waiting for the ship to be out in space.", "Looting", ACTING, false, mem);
+  }
+  if (operation !== null && assignedTarget !== null) {
+    const belt = snapshot.entities.find((row) => row.name === assignedTarget.targetName && /belt/i.test(row.name ?? ""));
+    if (assignedTarget.targetType !== "BELT" ||
+        (obs.flightStatus?.solarSystemID ?? snapshot.solarSystemID) !== assignedTarget.systemID ||
+        belt === undefined || !isAtBeltForTravel(belt, measureSpace(snapshot))) {
+      return tick(WAIT, "The hauler is not at its owned current or draining target.", "Following operation target", ACTING, false, mem);
+    }
   }
   // ⚠ A FULL SHIP IS A FINISHED TRIP, NOT A FAILURE. With no room anywhere there
   // is nothing to attempt: reaching into a can regardless is the refusal loop

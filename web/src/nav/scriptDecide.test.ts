@@ -87,6 +87,47 @@ function script(program: readonly ProgramNode[], interrupts: readonly InterruptR
 
 const registry = { undock, "deliver-ore": deliver, "mine-at-belt": mine, "travel-to-station": undock };
 
+test("hosted operation without an assignment never falls back to standalone mining", () => {
+  const s = script([macroStep("mine", "mine-at-belt")], []);
+  const first = decideScriptAction(s, obs({ miningOperationRequired: true, miningOperation: null }), initialMemory(s), registry, home);
+  assert.equal(first.action.kind, "wait");
+  assert.equal(first.phase, "Waiting for operation assignment");
+  assert.deepEqual(first.memory, initialMemory(s));
+  const ordinary = decideScriptAction(s, obs(), initialMemory(s), registry, home);
+  assert.equal(ordinary.action.kind, "activate", "standalone scripts retain their own behavior");
+  const hauler = script([macroStep("haul", "travel-to-belt")], []);
+  const standaloneTravel = { ...registry, "travel-to-belt": (() => tick({ kind: "warp", targetID: 9 }, { kind: "acting" })) as MacroDecider };
+  const heldHauler = decideScriptAction(hauler, obs({ miningOperationRequired: true, miningOperation: null }), initialMemory(hauler), standaloneTravel, home);
+  assert.equal(heldHauler.action.kind, "wait", "a hauler cannot fall back to its saved nearest-belt travel");
+});
+
+test("operation claim loss settles active mining modules before any new target work", () => {
+  const s = script([macroStep("mine", "mine-at-belt")], []);
+  const observation = obs({
+    miningOperationRequired: true,
+    miningOperation: { operationID: "op", operationName: "Op", role: "MINER", unloadPolicy: "HAULER_SERVICE",
+      area: { anchorSystemID: 30000142, anchorSystemName: "Jita", reach: "CURRENT_SYSTEM", targetClasses: ["BELT"] },
+      state: "DEGRADED", currentTarget: null, logisticsTarget: null, rendezvous: null },
+    miningModuleIDs: [101],
+    snapshot: { ship: { activeModuleIDs: [101] } } as unknown as NonNullable<ScriptObservation["snapshot"]>,
+  });
+  const result = decideScriptAction(s, observation, initialMemory(s), registry, home);
+  assert.deepEqual(result.action, { kind: "deactivate", moduleID: 101 });
+  assert.equal(result.phase, "Target claim unavailable");
+  const drones = decideScriptAction(s, obs({ ...observation,
+    snapshot: { ship: { activeModuleIDs: [] } } as unknown as NonNullable<ScriptObservation["snapshot"]>,
+    miningDrones: { bay: null, maxActive: 5, roles: { 10: "mining" },
+      out: [{ itemID: 501, typeID: 10, controlled: true }] } as unknown as NonNullable<ScriptObservation["miningDrones"]>,
+  }), initialMemory(s), registry, home);
+  assert.deepEqual(drones.action, { kind: "recallDrones", droneIDs: [501] });
+  const jettison = script([macroStep("dump", "jettison-ore")], []);
+  const dumpRegistry = { ...registry, "jettison-ore": (() => tick({ kind: "jettison", itemIDs: [77] }, { kind: "acting" })) as MacroDecider };
+  const blockedDump = decideScriptAction(jettison, obs({ ...observation,
+    snapshot: { ship: { activeModuleIDs: [] } } as unknown as NonNullable<ScriptObservation["snapshot"]>,
+  }), initialMemory(jettison), dumpRegistry, home);
+  assert.equal(blockedDump.action.kind, "wait", "the miner must not dump into an unowned old target");
+});
+
 // Drive the runner across a sequence of observations, stopping when it leaves "running".
 function run(
   s: BotScript,
