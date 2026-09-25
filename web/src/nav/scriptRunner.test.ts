@@ -5,7 +5,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import type { BotScript, MacroStep, ProgramNode } from "../bots/botScript.ts";
+import type { BotScript, BranchBlock, MacroStep, ProgramNode } from "../bots/botScript.ts";
 import type { ScriptObservation } from "./scriptConditions.ts";
 import type { FlightStatus } from "../store/types.ts";
 import { MAX_CONSECUTIVE_REFUSALS, NO_ROOM_CODE, shipHasNoRoom } from "./refusalLedger.ts";
@@ -517,6 +517,49 @@ test("repeated read failures give up with a plain reason", async () => {
   assert.match(progress.at(-1)?.pauseReason ?? "", /several tries/i);
   assert.deepEqual(lines.filter((line) => line.kind === "read").map((line) => line.refusal),
     Array(MAX_READ_FAILURES).fill("ship holds: No active ship."));
+});
+
+test("the hauler's initial IF-in-FOREVER builds a hint and reaches observation", async () => {
+  const lines: BotLogDraft[] = [];
+  const branch: BranchBlock = {
+    id: "choose-haul", kind: "branch",
+    when: { kind: "ore-hold-at-least", fraction: 0.9 },
+    then: [macroStep("deliver", "deliver-ore")],
+    else: [macroStep("undock", "undock")],
+  };
+  const hauler = script([{ id: "main-loop", kind: "loop", repeat: { kind: "forever" }, body: [branch] }]);
+  const h = harness({ log: { write: (line) => { lines.push(line); } } });
+  h.setObs(calm({ inSpace: false, docked: true, oreHoldFraction: 0 }));
+  h.runner.start(hauler);
+  await h.runner.tick();
+  assert.deepEqual(h.issued, [{ kind: "undock" }]);
+  assert.equal(lines.some((line) => line.kind === "read"), false);
+});
+
+test("hint failure logs the exact stage and stack frame", async () => {
+  const lines: BotLogDraft[] = [];
+  const invalid = script([{ id: "bad", kind: "macro", macro: "undock", args: undefined } as unknown as MacroStep]);
+  const h = harness({ log: { write: (line) => { lines.push(line); } } });
+  h.runner.start(invalid);
+  await h.runner.tick();
+  const failure = lines.find((line) => line.kind === "read");
+  assert.equal(failure?.says, "item-name hint");
+  assert.match(failure?.refusal ?? "", /Cannot convert undefined or null to object/);
+  assert.match(failure?.source ?? "", /activeStepNeedsTypeNames/);
+});
+
+test("an observation projection failure logs its throwing source frame", async () => {
+  const lines: BotLogDraft[] = [];
+  const h = harness({
+    observeThrows: () => { throw new TypeError("projection failed"); },
+    log: { write: (line) => { lines.push(line); } },
+  });
+  h.runner.start(script([macroStep("undock", "undock")]));
+  await h.runner.tick();
+  const failure = lines.find((line) => line.kind === "read");
+  assert.equal(failure?.says, "script observation");
+  assert.equal(failure?.refusal, "projection failed");
+  assert.match(failure?.source ?? "", /observeThrows/);
 });
 
 test("stopping an unrelated in-flight world call does not wait for container coordination", async () => {

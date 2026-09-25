@@ -968,7 +968,11 @@ export function activeStepToursOreSites(script: BotScript, mem: ScriptMemory): b
  * names at all (see `ScriptObservation.typeNames`).
  */
 export function activeStepNeedsTypeNames(script: BotScript, mem: ScriptMemory): boolean {
-  if (mem.position.kind === "done" || mem.latched !== null) {
+  // A branch entry is a condition read, not a macro. Its BranchBlock has no
+  // `args`; looking there before the first observation stopped every script
+  // whose loop began with IF (including the operation hauler).
+  if (mem.position.kind === "done" || mem.position.kind === "branch-enter" ||
+      mem.position.kind === "loop-branch-enter" || mem.latched !== null) {
     return false;
   }
   const step = activeStep(script, mem.position);

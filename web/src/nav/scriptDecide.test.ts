@@ -15,6 +15,7 @@ import {
   decideScriptAction,
   initialMemory,
   activeMacroID,
+  activeStepNeedsTypeNames,
   activeStepToursOreSites,
   activeSquadRole,
   watchSquadRole,
@@ -982,6 +983,27 @@ test("activeSquadRole reads the active step's role, and is 'off' for everything 
   // A latched run (flying home to stop) consults no block at all.
   const latched: ScriptMemory = { ...initialMemory(withFollow), latched: { interruptID: null, reason: "stopping" } };
   assert.equal(activeSquadRole(withFollow, latched), "off");
+});
+
+test("a FOREVER loop beginning with IF has no macro arguments to inspect on branch entry", () => {
+  const branch: BranchBlock = {
+    id: "choose-haul", kind: "branch",
+    when: { kind: "ore-hold-at-least", fraction: 0.9 },
+    then: [macroStep("deliver", "deliver-ore")],
+    else: [macroStep("undock", "undock")],
+  };
+  const hauler = script([{ id: "main-loop", kind: "loop", repeat: { kind: "forever" }, body: [branch] }]);
+  const initial = initialMemory(hauler);
+  assert.equal(initial.position.kind, "loop-branch-enter");
+  assert.equal(activeMacroID(hauler, initial), null);
+  assert.equal(activeStepNeedsTypeNames(hauler, initial), false);
+  const topLevel = script([branch]);
+  assert.equal(initialMemory(topLevel).position.kind, "branch-enter");
+  assert.equal(activeStepNeedsTypeNames(topLevel, initialMemory(topLevel)), false);
+  const decision = decideScriptAction(hauler, obs({ inSpace: false, docked: true, oreHoldFraction: 0 }), initial, registry, home);
+  assert.equal(decision.stepPath, "undock");
+  assert.equal(decision.memory.position.kind, "loop-branch");
+  assert.equal(activeStepNeedsTypeNames(hauler, decision.memory), false);
 });
 
 // ── The watch fights like a block ────────────────────────────────────────────

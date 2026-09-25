@@ -420,20 +420,29 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     }
 
     let obs: ScriptObservation;
+    let readStage = "active-macro hint";
     try {
+      const activeMacro = activeMacroID(script, memory);
+      readStage = "item-name hint";
+      const needsTypeNames = activeStepNeedsTypeNames(script, memory);
+      readStage = "ore-site hint";
+      const needsOreSites = activeStepToursOreSites(script, memory);
+      readStage = "squad-role hint";
+      const squadRole = activeSquadRole(script, memory);
+      readStage = "watch-squad hint";
+      const watchSquad = watchSquadRole(script);
+      readStage = "script observation";
       obs = await deps.observe({
-        activeMacro: activeMacroID(script, memory),
-        needsTypeNames: activeStepNeedsTypeNames(script, memory),
-        needsOreSites: activeStepToursOreSites(script, memory),
-        squadRole: activeSquadRole(script, memory),
-        watchSquadRole: watchSquadRole(script),
+        activeMacro, needsTypeNames, needsOreSites, squadRole, watchSquadRole: watchSquad,
         board: memory.board,
       });
     } catch (error) {
+      const frames = error instanceof Error ? error.stack?.split("\n").slice(1).map((line) => line.trim()) ?? [] : [];
       record({
         t: now(), kind: "read", run: runID, ok: false,
-        says: "script observation",
+        says: readStage,
         refusal: error instanceof Error ? error.message : String(error),
+        source: frames.find((line) => !line.includes("<anonymous>") && !line.includes("node:internal")) ?? frames[0],
       });
       if (deps.isSessionLost(error)) {
         setError(SESSION_LOST);

@@ -76,6 +76,8 @@ export interface BotLogEntry {
   /** result lines: whether the call landed, and the server's words when not. */
   readonly ok?: boolean;
   readonly refusal?: string;
+  /** First non-native error stack frame for a read failure; local diagnostic only. */
+  readonly source?: string;
   /** start/end lines: the script and how it finished. */
   readonly script?: string;
   readonly reason?: string | null;
