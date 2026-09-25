@@ -60,7 +60,7 @@ import type { TabID } from "./tabs.ts";
  * exactly why it is a set here rather than a comparison spelled out four times
  * and kept in step by hand.
  */
-export const GLOBAL_TABS: ReadonlySet<TabID> = new Set<TabID>(["botManager", "miningOperations", "companion", "piManager"]);
+export const GLOBAL_TABS: ReadonlySet<TabID> = new Set<TabID>(["botManager", "companion", "piManager"]);
 
 /** True when this tab opens as a global window, not a workspace window. */
 export function isGlobalTab(id: TabID): boolean {

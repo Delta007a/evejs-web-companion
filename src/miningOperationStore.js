@@ -3,6 +3,7 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const staticData = require("./staticData");
 
 const STORE_FILENAME = "mining-operations.json";
 const ROLES = new Set(["MINER", "HAULER", "DEFENDER"]);
@@ -20,7 +21,7 @@ function cleanText(value, max = 100) {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }
 
-function normalizeDefinition(value, existing = null, now = () => new Date().toISOString(), uuid = crypto.randomUUID) {
+function normalizeDefinition(value, existing = null, now = () => new Date().toISOString(), uuid = crypto.randomUUID, resolveSystem = staticData.getSolarSystem) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw fail("MINING_OPERATION_INVALID", "That is not a Mining Operation definition.");
   }
@@ -34,6 +35,14 @@ function normalizeDefinition(value, existing = null, now = () => new Date().toIS
   if (!name) throw fail("MINING_OPERATION_INVALID", "Give the operation a name.");
   if (!Number.isSafeInteger(anchorSystemID) || anchorSystemID <= 0) {
     throw fail("MINING_OPERATION_INVALID", "Choose an anchor solar system.");
+  }
+  const system = resolveSystem(anchorSystemID);
+  if (!system || !system.solarSystemName) {
+    throw fail("MINING_OPERATION_INVALID", "Choose a known anchor solar system from the map catalog.");
+  }
+  const anchorSystemName = String(system.solarSystemName);
+  if (value.area?.anchorSystemName && cleanText(value.area.anchorSystemName, 120) !== anchorSystemName) {
+    throw fail("MINING_OPERATION_INVALID", "Anchor system name and ID do not identify the same solar system.");
   }
   if (!REACH.has(reach)) throw fail("MINING_OPERATION_INVALID", "Choose a supported area reach.");
   if (targetClasses.length === 0) throw fail("MINING_OPERATION_INVALID", "Choose at least one target class.");
@@ -51,7 +60,7 @@ function normalizeDefinition(value, existing = null, now = () => new Date().toIS
       throw fail("MINING_OPERATION_INVALID", "Every member must be a different valid pilot.");
     }
     if (!ROLES.has(role)) throw fail("MINING_OPERATION_INVALID", "Every member needs an explicit role.");
-    if (!automationID) throw fail("MINING_OPERATION_INVALID", "Every member needs a saved automation reference.");
+    if (!automationID && role !== "DEFENDER") throw fail("MINING_OPERATION_INVALID", "Executable members need an operation routine reference.");
     if (!accountName) throw fail("MINING_OPERATION_INVALID", "Every member needs its owning account reference.");
     seen.add(characterID);
     return {
@@ -77,7 +86,7 @@ function normalizeDefinition(value, existing = null, now = () => new Date().toIS
     name,
     area: {
       anchorSystemID,
-      anchorSystemName: cleanText(value.area?.anchorSystemName, 120) || null,
+      anchorSystemName,
       reach,
       targetClasses,
     },
@@ -93,6 +102,7 @@ function createMiningOperationStore(options) {
   const dataDir = options.dataDir;
   const now = options.now || (() => new Date().toISOString());
   const uuid = options.uuid || (() => crypto.randomUUID());
+  const resolveSystem = options.resolveSystem || staticData.getSolarSystem;
   const filePath = path.join(dataDir, STORE_FILENAME);
 
   function readAll() {
@@ -122,7 +132,7 @@ function createMiningOperationStore(options) {
     save(value) {
       const all = readAll();
       const index = all.findIndex((row) => row.operationID === String(value?.operationID || ""));
-      const definition = normalizeDefinition(value, index >= 0 ? all[index] : null, now, uuid);
+      const definition = normalizeDefinition(value, index >= 0 ? all[index] : null, now, uuid, resolveSystem);
       if (index >= 0) all[index] = definition;
       else all.push(definition);
       writeAll(all);

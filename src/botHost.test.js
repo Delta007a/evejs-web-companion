@@ -147,12 +147,14 @@ function makeFakeStack(log) {
       return store;
     },
     createAppFlow: (store, options) => {
-      log.push(["createAppFlow", options.baseUrl, options.perSessionToken, options.initialSessionToken]);
+      log.push(["createAppFlow", options.baseUrl, options.perSessionToken, options.initialSessionToken, options.browserPilotRecovery]);
       return {
         async selectCharacter(characterID) {
           log.push(["selectCharacter", characterID]);
           store._set({ station: { online: { characterID, characterName: "Test Pilot" } } });
         },
+        async retryDroneRecovery() { log.push(["retryDroneRecovery"]); },
+        requireAutomationReady() { log.push(["requireAutomationReady"]); },
         async startCustomBot(doc) {
           log.push(["startCustomBot", doc]);
           store._set({ customBot: { ...IDLE_SLICE, status: "running", phase: "Working" } });
@@ -265,7 +267,7 @@ test("start flies the character on its own session and lists it", async () => {
   assert.equal(host.list(8).length, 0);
   // The flow was seeded with the minted token — no password ever crossed.
   const flowCall = log.find((row) => row[0] === "createAppFlow");
-  assert.deepEqual(flowCall.slice(2), [true, "bot-token"]);
+  assert.deepEqual(flowCall.slice(2), [true, "bot-token", false]);
 });
 
 test("the approved runtime deadline stops, logs out, and releases the character claim", async () => {
@@ -730,9 +732,12 @@ test("the running roster is mirrored to disk and cleared when the bot ends", asy
 
 test("a Mining Operation association follows the exact hosted claim and persists without runtime target state", async () => {
   const rosterPath = tempRosterPath();
-  const host = makeHost({ persistPath: rosterPath });
+  const log = [];
+  const host = makeHost({ persistPath: rosterPath, log });
   const started = await host.start({ ...START, operationID: "op-1", operationRole: "MINER" });
   assert.equal(started.ok, true);
+  assert.equal(log.find((row) => row[0] === "createAppFlow")[4], true);
+  assert.ok(log.findIndex((row) => row[0] === "requireAutomationReady") < log.findIndex((row) => row[0] === "startCustomBot"));
   assert.equal(started.bot.operationID, "op-1");
   assert.equal(started.bot.operationRole, "MINER");
   assert.deepEqual(host.operationForClaim(START.characterID, "private-claim-capability"), {
@@ -745,6 +750,23 @@ test("a Mining Operation association follows the exact hosted claim and persists
   assert.equal(row.operationRole, "MINER");
   assert.equal("currentTarget" in row, false);
   await host.stopAll();
+});
+
+test("an operation pilot cannot start when login drone recovery is blocked", async () => {
+  const log = [];
+  const stack = makeFakeStack(log);
+  const host = makeHost({ log, loadStack: async () => {
+    const base = await stack();
+    return { ...base, createAppFlow(store, options) {
+      const flow = base.createAppFlow(store, options);
+      return { ...flow, requireAutomationReady() { throw new Error("Lost-drone recovery unconfirmed."); } };
+    } };
+  } });
+  const outcome = await host.start({ ...START, operationID: "op-blocked", operationRole: "MINER" });
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.message, /Lost-drone recovery unconfirmed/);
+  assert.equal(host.claimedBy(START.characterID), null);
+  assert.equal(log.some(([kind]) => kind === "startCustomBot"), false);
 });
 
 test("resume restarts a persisted bot on a fresh host (the restart path)", async () => {

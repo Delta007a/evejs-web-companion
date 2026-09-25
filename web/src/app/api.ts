@@ -1991,6 +1991,34 @@ export async function loadMiningOperations(options: ApiOptions = {}): Promise<Mi
   return miningOperationsPayload(await getJson("/api/mining-operations", options));
 }
 
+export interface OperationRoutineSummary {
+  readonly scriptID: string;
+  readonly name: string;
+  readonly rev: number;
+  readonly roles: Readonly<Record<"MINER" | "HAULER" | "DEFENDER", { readonly compatible: boolean; readonly reason: string | null }>>;
+}
+
+export async function listOperationRoutines(
+  classes: readonly MiningTargetType[],
+  unloadPolicy: "HAULER_SERVICE" | "SELF_UNLOAD",
+  options: ApiOptions = {},
+): Promise<OperationRoutineSummary[]> {
+  const params = new URLSearchParams({ classes: classes.join(","), unloadPolicy });
+  const data = await getJson(`/api/mining-operations/routines?${params}`, options);
+  return (Array.isArray(data.routines) ? data.routines : []) as unknown as OperationRoutineSummary[];
+}
+
+export interface OperationPilotChoice {
+  readonly accountName: string;
+  readonly characterID: number;
+  readonly characterName: string;
+}
+
+export async function listOperationAccountPilots(accountName: string, options: ApiOptions = {}): Promise<OperationPilotChoice[]> {
+  const data = await getJson(`/api/mining-operations/accounts/${encodeURIComponent(accountName)}/pilots`, options);
+  return (Array.isArray(data.pilots) ? data.pilots : []) as unknown as OperationPilotChoice[];
+}
+
 export async function saveMiningOperation(
   definition: MiningOperationDefinition,
   options: ApiOptions = {},

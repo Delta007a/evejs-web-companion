@@ -9,7 +9,7 @@ const path = require("path");
 const { createBeltMemory } = require("../src/beltMemory");
 const { createMiningOperationStore } = require("../src/miningOperationStore");
 const { createMiningTargetBoard } = require("../src/miningTargetBoard");
-const { createMiningOperations, auditMiningScript } = require("../src/miningOperations");
+const { createMiningOperations, auditMiningScript, operationRoutineCompatibility } = require("../src/miningOperations");
 
 function clock(start = 1_000_000) {
   let value = start;
@@ -32,6 +32,7 @@ function definition(operationID, members, unloadPolicy = "SELF_UNLOAD", targetCl
     updatedAt: "2026-01-01T00:00:00.000Z",
   };
 }
+const resolveSystem = (id) => Number(id) === 30000142 ? { solarSystemID: 30000142, solarSystemName: "Jita" } : null;
 
 function harness(definitions, options = {}) {
   const byID = new Map(definitions.map((row) => [row.operationID, row]));
@@ -69,7 +70,7 @@ function anomaly(name = "ABC-123") {
 test("operation definitions save, reload, and retain stable automation references without copying scripts", (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mining-operations-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const store = createMiningOperationStore({ dataDir: dir, uuid: () => "op-1", now: () => "2026-01-01T00:00:00.000Z" });
+  const store = createMiningOperationStore({ dataDir: dir, uuid: () => "op-1", now: () => "2026-01-01T00:00:00.000Z", resolveSystem });
   const saved = store.save(definition(undefined, [member(1, "MINER")], "SELF_UNLOAD"));
   assert.equal(saved.operationID, "op-1");
   assert.deepEqual(saved.members[0], member(1, "MINER"));
@@ -80,11 +81,16 @@ test("operation definitions save, reload, and retain stable automation reference
 
 test("operation validation preserves all explicit roles and requires policy-compatible membership", () => {
   const value = definition("roles", [member(1, "MINER"), member(2, "HAULER"), member(3, "DEFENDER")], "HAULER_SERVICE");
-  const normalized = require("../src/miningOperationStore").normalizeDefinition(value, null, () => "now", () => "roles");
+  const normalized = require("../src/miningOperationStore").normalizeDefinition(value, null, () => "now", () => "roles", resolveSystem);
   assert.deepEqual(normalized.members.map((row) => row.role), ["MINER", "HAULER", "DEFENDER"]);
+  const unassignedDefender = { ...value, members: value.members.map((row) => row.role === "DEFENDER" ? { ...row, automationID: "" } : row) };
+  assert.equal(require("../src/miningOperationStore").normalizeDefinition(unassignedDefender, null, () => "now", () => "roles", resolveSystem).members[2].automationID, "");
   assert.throws(() => require("../src/miningOperationStore").normalizeDefinition(
-    definition("bad", [member(1, "MINER")], "HAULER_SERVICE"), null, () => "now", () => "bad",
+    definition("bad", [member(1, "MINER")], "HAULER_SERVICE"), null, () => "now", () => "bad", resolveSystem,
   ), /HAULER/);
+  assert.throws(() => require("../src/miningOperationStore").normalizeDefinition(
+    { ...value, area: { ...value.area, anchorSystemName: "Wrong" } }, null, () => "now", () => "bad", resolveSystem,
+  ), /name and ID/);
 });
 
 test("multiple independent operations share one target board and only one atomically reserves a target", () => {
@@ -265,4 +271,26 @@ test("saved automation audit detects executable target seams and rejects resourc
   assert.deepEqual(auditMiningScript(beltDoc).targetClasses, ["BELT"]);
   assert.deepEqual(auditMiningScript(siteDoc).targetClasses, ["ORE_ANOMALY"]);
   assert.equal(auditMiningScript(siteDoc).hasOrePreference, true);
+});
+
+test("operation routine contract rejects pinned and independent resource travel but permits delivery destinations", () => {
+  const macro = (name, args = {}) => ({ kind: "macro", id: name, macro: name, args });
+  const normal = { program: [
+    macro("mine-at-belt", { belt: { kind: "belt", belt: { mode: "nearest" } } }),
+    macro("travel-to-station", { station: { kind: "station", ref: { kind: "starting" } } }),
+    macro("deliver-ore"),
+  ] };
+  const definition = { unloadPolicy: "SELF_UNLOAD" };
+  assert.equal(operationRoutineCompatibility(definition, "MINER", auditMiningScript(normal), ["BELT"]), null);
+  const pinned = { program: [macro("mine-at-belt", { belt: { kind: "belt", belt: { mode: "chosen", name: "Belt I" } } }), macro("deliver-ore")] };
+  assert.match(operationRoutineCompatibility(definition, "MINER", auditMiningScript(pinned), ["BELT"]), /pinned belt/);
+  const independent = { program: [...normal.program, macro("travel-to-system", { system: { kind: "system", id: 123 } })] };
+  assert.match(operationRoutineCompatibility(definition, "MINER", auditMiningScript(independent), ["BELT"]), /not operation-target-aware/);
+  const contradictory = { program: [...normal.program, macro("warp-to-ore-anomaly")] };
+  assert.match(operationRoutineCompatibility(definition, "MINER", auditMiningScript(contradictory), ["BELT"]), /cannot compete/);
+  const composed = { program: [...normal.program, { kind: "sub-bot", id: "hidden", scriptID: "other" }] };
+  assert.match(operationRoutineCompatibility(definition, "MINER", auditMiningScript(composed), ["BELT"]), /Unsupported program node/);
+  const hauler = { program: [macro("travel-to-belt", { belt: { kind: "belt", belt: { mode: "nearest" } } }), macro("loot-containers"), macro("deliver-ore")] };
+  assert.equal(operationRoutineCompatibility({ unloadPolicy: "HAULER_SERVICE" }, "HAULER", auditMiningScript(hauler), ["BELT"]), null);
+  assert.match(operationRoutineCompatibility(definition, "DEFENDER", auditMiningScript(normal), ["BELT"]), /not supported/);
 });

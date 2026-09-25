@@ -252,6 +252,31 @@ test("a public bot ID cannot bypass the claimed-character select guard", async (
   assert.equal(authorized.response.status, 200);
 });
 
+test("an operation bot select stays behind the lost-drone gate until recovery acknowledges", async () => {
+  const log = [];
+  const host = {
+    ...fakeBotHost(log),
+    claimedBy: (characterID) => Number(characterID) === 7001 ? "operation-bot" : null,
+    authorizesClaim: (characterID, secret) => Number(characterID) === 7001 && secret === "private-operation-capability",
+    operationForClaim: (characterID, secret) => Number(characterID) === 7001 && secret === "private-operation-capability"
+      ? { operationID: "op-1", operationRole: "MINER" } : null,
+  };
+  const { baseUrl, app } = await startTestServer(log, host);
+  const signed = await request(baseUrl, "/api/login", { method: "POST", body: { username: FARMER.username, password: "x" } });
+  const token = signed.payload.sessionToken;
+  const selected = await request(baseUrl, "/api/bridge/select", {
+    method: "POST", token, headers: { "x-evejs-bot-claim": "private-operation-capability" }, body: { characterID: 7001 },
+  });
+  assert.equal(selected.response.status, 200);
+  const sessionID = webAuth.verifySessionToken(token).sessionID;
+  assert.equal(app.locals.bridgeSessions.get(sessionID).droneRecoveryReady, false);
+  const ready = await request(baseUrl, "/api/bridge/drone-recovery/ready", {
+    method: "POST", token, body: { checkID: selected.payload.droneRecoveryCheckID },
+  });
+  assert.equal(ready.response.status, 200);
+  assert.equal(app.locals.bridgeSessions.get(sessionID).droneRecoveryReady, true);
+});
+
 // ── kind: "companion" — the SAME route, branched by the body ────────────────
 // docs/fleet-companion-handoff.md, "3. Extend botHost": no second route, so
 // these pin that /api/bots/start's companion branch reaches botHost.start

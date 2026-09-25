@@ -9,16 +9,23 @@ function stamp(now) {
 
 function auditMiningScript(doc) {
   const macros = [];
+  const unsupportedNodes = [];
   function visit(nodes) {
-    if (!Array.isArray(nodes)) return;
+    if (!Array.isArray(nodes)) {
+      unsupportedNodes.push("missing program body");
+      return;
+    }
     for (const node of nodes) {
-      if (!node || typeof node !== "object") continue;
+      if (!node || typeof node !== "object") {
+        unsupportedNodes.push("invalid program node");
+        continue;
+      }
       if (node.kind === "macro") macros.push(node);
-      if (node.kind === "loop") visit(node.body);
-      if (node.kind === "branch") {
+      else if (node.kind === "loop") visit(node.body);
+      else if (node.kind === "branch") {
         visit(node.then);
         visit(node.else);
-      }
+      } else unsupportedNodes.push(String(node.kind || "unknown"));
     }
   }
   visit(doc?.program);
@@ -30,6 +37,7 @@ function auditMiningScript(doc) {
   });
   const belt = mineSteps.some((row) => row.args?.belt?.belt?.mode !== "site");
   const oreAnomaly = names.has("warp-to-ore-anomaly") && mineSteps.some((row) => row.args?.belt?.belt?.mode === "site");
+  const siteMine = mineSteps.some((row) => row.args?.belt?.belt?.mode === "site");
   return {
     targetClasses: [belt ? "BELT" : null, oreAnomaly ? "ORE_ANOMALY" : null].filter(Boolean),
     hasOrePreference,
@@ -38,7 +46,54 @@ function auditMiningScript(doc) {
     normalJettison: names.has("jettison-ore"),
     selfUnload: names.has("deliver-ore"),
     macros: [...names],
+    unsupportedNodes,
+    pinnedResourceTarget: macros.some((row) =>
+      (row.macro === "mine-at-belt" || row.macro === "travel-to-belt") &&
+      row.args?.belt?.belt?.mode === "chosen"),
+    invalidResourceMode: macros.some((row) => {
+      if (row.macro !== "mine-at-belt" && row.macro !== "travel-to-belt") return false;
+      const mode = row.args?.belt?.belt?.mode;
+      return row.macro === "travel-to-belt" ? mode !== "nearest" && mode !== "chosen"
+        : !["nearest", "site", "chosen"].includes(mode);
+    }),
+    mixedResourceFlow: (belt && siteMine) || (names.has("warp-to-ore-anomaly") !== siteMine),
   };
+}
+
+// Only these blocks have an operation target overlay, or do not select a
+// resource destination at all. Unknown/composed nodes fail closed: a sub-bot
+// could hide an independent target selector from a superficial macro scan.
+const OPERATION_MACROS = Object.freeze({
+  MINER: new Set(["undock", "mine-at-belt", "warp-to-ore-anomaly", "jettison-ore", "deliver-ore", "travel-to-station", "dock-at-nearest", "unload-cargo", "defend-with-drones", "hardeners-on", "wait", "repair-ship", "refine-ore", "compress-ore"]),
+  HAULER: new Set(["undock", "travel-to-belt", "loot-containers", "deliver-ore", "travel-to-station", "dock-at-nearest", "unload-cargo", "hardeners-on", "wait", "repair-ship"]),
+});
+
+function operationRoutineCompatibility(definition, role, audit, executionClasses) {
+  if (role === "DEFENDER") return "DEFENDER execution is not supported yet.";
+  if (!audit) return "The referenced routine no longer exists.";
+  if (audit.unsupportedNodes.length > 0) return `Unsupported program node: ${audit.unsupportedNodes[0]}.`;
+  if (audit.pinnedResourceTarget) return "A pinned belt/site competes with operation.currentTarget; use nearest belt or site mode.";
+  if (audit.invalidResourceMode) return "The routine has an unsupported resource target mode; use nearest belt or ore site mode.";
+  if (audit.mixedResourceFlow) return "Belt and ore-site travel/mining blocks cannot compete in one operation routine.";
+  const allowed = OPERATION_MACROS[role];
+  const competing = audit.macros.find((macro) => !allowed?.has(macro));
+  if (competing) return `The ${competing} block is not operation-target-aware and may select a competing destination.`;
+  if (role === "HAULER") {
+    if (!executionClasses.includes("BELT")) return "HAULER_SERVICE currently supports belt targets only.";
+    return audit.hauler ? null : "A HAULER routine needs Travel to belt, Loot containers, and Deliver ore blocks.";
+  }
+  if (!audit.miner) return "A MINER routine needs a Mine at a belt or ore site block.";
+  if (audit.hasOrePreference) return "Mining Operations v0.1 supports any eligible target, not an ore preference list.";
+  if (!audit.targetClasses.some((kind) => executionClasses.includes(kind))) {
+    return "This MINER routine cannot execute the operation's selected target class.";
+  }
+  if (definition.unloadPolicy === "HAULER_SERVICE" && !audit.normalJettison) {
+    return "A HAULER_SERVICE miner routine needs a Jettison ore block.";
+  }
+  if (definition.unloadPolicy === "SELF_UNLOAD" && !audit.selfUnload) {
+    return "A SELF_UNLOAD miner routine needs a Deliver ore block.";
+  }
+  return null;
 }
 
 function createMiningOperations(options) {
@@ -518,6 +573,7 @@ function createMiningOperations(options) {
 module.exports = {
   createMiningOperations,
   auditMiningScript,
+  operationRoutineCompatibility,
   EXECUTABLE_TARGET_CLASSES,
   DEFERRED_TARGET_CLASSES,
 };

@@ -22,7 +22,6 @@ export type TabID =
   | "bots"
   | "botBuilder"
   | "botManager"
-  | "miningOperations"
   | "companion"
   | "inventory"
   | "market"
@@ -114,9 +113,6 @@ export const TABS: readonly TabDef[] = [
   // subject in a rail that already has too many. `ServerBots.svelte` still
   // exists, mounted on character select, which has no Manager to hold it.
   { id: "botManager", label: "Bot Manager", where: "both" },
-  // A global operations board: definitions, all-member botHost state and the
-  // shared target board do not belong to whichever pilot is currently active.
-  { id: "miningOperations", label: "Mining Operations", where: "both" },
   // ⚠ NOT A BOT, AND NOT IN THE RAIL. The fleet companion is a GLOBAL window
   // (globalWindow.ts) over every pilot at once, and the one door onto it is the
   // button beside the brand in the character bar — which is the only chrome

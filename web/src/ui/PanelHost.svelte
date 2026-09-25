@@ -27,7 +27,6 @@
   import Bots from "./Bots.svelte";
   import BotBuilder from "./BotBuilder.svelte";
   import BotManager from "./BotManager.svelte";
-  import MiningOperations from "./MiningOperations.svelte";
   import FleetCompanions from "./FleetCompanions.svelte";
   import PiManager from "./PiManager.svelte";
   import Chat from "./Chat.svelte";
@@ -144,8 +143,6 @@
   <BotBuilder {store} {flow} />
 {:else if tab === "botManager"}
   <BotManager {store} {flow} {sessions} onOpen={(id, sid) => onOpen?.(id, sid)} />
-{:else if tab === "miningOperations"}
-  <MiningOperations {store} {flow} {sessions} />
 {:else if tab === "companion"}
   <!-- ⚠ NOT GIVEN `store`. Every other panel here is a view of the mounted
        pilot; this one is a view of ALL of them and reads each session's own

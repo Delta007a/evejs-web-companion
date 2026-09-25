@@ -782,6 +782,9 @@ function createBotHost(options) {
         perSessionToken: true,
         initialSessionToken: token,
         eventSource: stubEventSource,
+        // Operation bots may acquire a pilot without a browser workspace. They
+        // must run the same login lost-drone gate before automation starts.
+        browserPilotRecovery: record.operationID !== null,
       });
       record.flow = flow;
       record.store = store;
@@ -790,6 +793,10 @@ function createBotHost(options) {
       // before the route releases the caller. The hook is internal, never wire data.
       if (beforeStart) await beforeStart();
       await flow.selectCharacter(characterID);
+      if (record.operationID !== null) {
+        await flow.retryDroneRecovery();
+        flow.requireAutomationReady();
+      }
       const online = store.station.get().online;
       record.characterName = online ? online.characterName : null;
 

@@ -2,13 +2,17 @@
   import { onMount } from "svelte";
   import {
     deleteMiningOperation,
+    findMapLocations,
     getBotScript,
-    listBotScripts,
+    listOperationAccountPilots,
+    listOperationRoutines,
     loadMiningOperations,
+    resolveDestination,
     saveMiningOperation,
     startMiningOperation,
     stopMiningOperation,
-    type BotScriptSummary,
+    type OperationPilotChoice,
+    type OperationRoutineSummary,
     type MiningOperationDefinition,
     type MiningOperationMemberDefinition,
     type MiningOperationsPayload,
@@ -17,23 +21,12 @@
   import { loadKnownCharacters } from "../app/knownCharacters.ts";
   import { decodeScriptValue } from "../bots/scriptCodec.ts";
   import { analyzeBotRunPolicy, createBotLaunchGrant } from "../bots/runPolicy.ts";
-  import type { AppFlow } from "../app/flow.ts";
-  import type { ClientStore } from "../store/clientStore.ts";
-  import type { Session } from "../app/sessions.ts";
-
-  let { store, flow, sessions: _sessions }: {
-    store: ClientStore;
-    flow: AppFlow;
-    sessions?: readonly Session[];
-  } = $props();
-
-  // svelte-ignore state_referenced_locally
-  const flight = store.flight;
-  const opts = () => flow.requestOptions();
+  const opts = () => ({});
   let payload = $state<MiningOperationsPayload | null>(null);
-  let scripts = $state<BotScriptSummary[]>([]);
+  let scripts = $state<OperationRoutineSummary[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  let pollError = $state<string | null>(null);
   let busy = $state<string | null>(null);
   let editing = $state(false);
   let runtimeMinutes = $state(12 * 60);
@@ -43,15 +36,21 @@
   let name = $state("");
   let anchorSystemID = $state(0);
   let anchorSystemName = $state("");
+  let anchorError = $state<string | null>(null);
+  let systemMatches = $state<readonly { id: number; name: string }[]>([]);
+  let systemLookupSerial = 0;
   let reach = $state<"CURRENT_SYSTEM" | "CURRENT_AND_ADJACENT">("CURRENT_SYSTEM");
   let belt = $state(true);
   let oreAnomaly = $state(false);
   let unloadPolicy = $state<"HAULER_SERVICE" | "SELF_UNLOAD">("HAULER_SERVICE");
   let members = $state<DraftMember[]>([]);
   let seedSquadID = $state("");
+  let accountLookup = $state("");
+  let roster = $state<OperationPilotChoice[]>(loadKnownCharacters().map(({ accountName, characterID, characterName }) => ({ accountName, characterID, characterName })));
 
-  const known = $derived(loadKnownCharacters());
   const prefs = $derived(loadHangarPrefs());
+  const selectedClasses = $derived([...(belt ? ["BELT" as const] : []), ...(oreAnomaly ? ["ORE_ANOMALY" as const] : [])]);
+  const anchorValid = $derived(anchorSystemID > 0 && anchorSystemName.length > 0 && anchorError === null);
 
   function words(cause: unknown): string {
     return cause instanceof Error ? cause.message : "The Mining Operations request failed.";
@@ -59,10 +58,10 @@
 
   async function refresh(): Promise<void> {
     try {
-      [payload, scripts] = await Promise.all([loadMiningOperations(opts()), listBotScripts(opts())]);
-      error = null;
+      payload = await loadMiningOperations(opts());
+      pollError = null;
     } catch (cause) {
-      error = words(cause);
+      pollError = words(cause);
     } finally {
       loading = false;
     }
@@ -74,11 +73,69 @@
     return () => clearInterval(timer);
   });
 
+  $effect(() => {
+    const classes = selectedClasses;
+    const policy = unloadPolicy;
+    if (classes.length === 0) return;
+    void listOperationRoutines(classes, policy, opts()).then((rows) => { scripts = rows; }).catch((cause) => { error = words(cause); });
+  });
+
+  async function searchSystem(value: string): Promise<void> {
+    const serial = ++systemLookupSerial;
+    anchorSystemName = value;
+    anchorSystemID = 0;
+    anchorError = "Select a known solar system.";
+    systemMatches = [];
+    if (value.trim().length < 2) return;
+    try {
+      const result = await findMapLocations(value.trim(), "system", opts());
+      if (serial !== systemLookupSerial) return;
+      systemMatches = result.matches.filter((row) => row.kind === "system").map((row) => ({ id: row.id, name: row.name }));
+      const exact = systemMatches.find((row) => row.name.toLocaleLowerCase() === value.trim().toLocaleLowerCase());
+      if (exact) chooseSystem(exact);
+      else anchorError = systemMatches.length ? "Choose a matching solar system." : "No known solar system matches that name.";
+    } catch (cause) { if (serial === systemLookupSerial) anchorError = words(cause); }
+  }
+
+  function chooseSystem(system: { id: number; name: string }): void {
+    ++systemLookupSerial;
+    anchorSystemID = system.id;
+    anchorSystemName = system.name;
+    anchorError = null;
+    systemMatches = [];
+  }
+
+  async function resolveSystemID(value: string): Promise<void> {
+    const serial = ++systemLookupSerial;
+    anchorSystemID = Number(value) || 0;
+    anchorSystemName = "";
+    systemMatches = [];
+    anchorError = "Enter a known solar system ID.";
+    if (!Number.isSafeInteger(anchorSystemID) || anchorSystemID <= 0) return;
+    try {
+      const result = await resolveDestination(anchorSystemID, opts());
+      if (serial !== systemLookupSerial) return;
+      if (result.kind === "system" && result.solarSystemID === anchorSystemID && result.systemName) {
+        anchorSystemName = result.systemName;
+        anchorError = null;
+      } else anchorError = "That ID is not a known solar system.";
+    } catch (cause) { if (serial === systemLookupSerial) anchorError = words(cause); }
+  }
+
+  async function loadAccount(): Promise<void> {
+    try {
+      const pilots = await listOperationAccountPilots(accountLookup.trim(), opts());
+      roster = [...roster.filter((row) => row.accountName !== accountLookup.trim()), ...pilots];
+      error = null;
+    } catch (cause) { error = words(cause); }
+  }
+
   function newOperation(): void {
     operationID = undefined;
     name = "";
-    anchorSystemID = $flight.status?.solarSystemID ?? 0;
-    anchorSystemName = $flight.solarSystemName ?? "";
+    anchorSystemID = 0;
+    anchorSystemName = "";
+    anchorError = "Select a known solar system.";
     reach = "CURRENT_SYSTEM";
     belt = true;
     oreAnomaly = false;
@@ -93,6 +150,7 @@
     name = definition.name;
     anchorSystemID = definition.area.anchorSystemID;
     anchorSystemName = definition.area.anchorSystemName ?? "";
+    anchorError = anchorSystemName ? null : "Resolve this solar system before saving.";
     reach = definition.area.reach;
     belt = definition.area.targetClasses.includes("BELT");
     oreAnomaly = definition.area.targetClasses.includes("ORE_ANOMALY");
@@ -103,14 +161,14 @@
 
   function addPilot(characterID: number): void {
     if (members.some((member) => member.characterID === characterID)) return;
-    const pilot = known.find((row) => row.characterID === characterID);
+    const pilot = roster.find((row) => row.characterID === characterID);
     if (!pilot) return;
     members = [...members, {
       characterID: pilot.characterID,
       characterName: pilot.characterName,
       accountName: pilot.accountName,
       role: "MINER",
-      automationID: scripts[0]?.scriptID ?? "",
+      automationID: "",
     }];
   }
 
@@ -127,6 +185,7 @@
   }
 
   async function save(): Promise<void> {
+    if (!anchorValid) { error = anchorError ?? "Choose a known solar system."; return; }
     busy = "save";
     error = null;
     try {
@@ -137,7 +196,7 @@
           anchorSystemID,
           anchorSystemName: anchorSystemName.trim() || null,
           reach,
-          targetClasses: [...(belt ? ["BELT" as const] : []), ...(oreAnomaly ? ["ORE_ANOMALY" as const] : [])],
+          targetClasses: selectedClasses,
         },
         targetPolicy: "ANY_ELIGIBLE",
         unloadPolicy,
@@ -157,6 +216,7 @@
     try {
       const grants: Record<string, ReturnType<typeof createBotLaunchGrant>> = {};
       for (const member of definition.members) {
+        if (member.role === "DEFENDER") continue;
         const record = await getBotScript(member.automationID, opts());
         if (!record) throw new Error(`${member.characterName}'s saved automation no longer exists.`);
         const decoded = decodeScriptValue(record.doc);
@@ -219,6 +279,7 @@
   </header>
 
   {#if error}<p class="error" role="alert">{error}</p>{/if}
+  {#if pollError}<p class="error" role="alert">{pollError}</p>{/if}
   {#if loading}<p class="muted">Loading Mining Command Center…</p>{/if}
 
   {#if editing}
@@ -226,9 +287,13 @@
       <h3>{operationID ? "Edit operation" : "New operation"}</h3>
       <label>Name <input required bind:value={name} /></label>
       <div class="grid2">
-        <label>Anchor system <input required bind:value={anchorSystemName} placeholder="System name" /></label>
-        <label>Anchor system ID <input required type="number" min="1" bind:value={anchorSystemID} /></label>
+        <label>Anchor system <input required value={anchorSystemName} oninput={(event) => void searchSystem(event.currentTarget.value)} placeholder="Search solar systems" autocomplete="off" /></label>
+        <label>Anchor system ID <input required type="number" min="1" value={anchorSystemID || ""} oninput={(event) => void resolveSystemID(event.currentTarget.value)} /></label>
       </div>
+      {#if systemMatches.length > 0}<div class="system-matches" role="listbox" aria-label="Matching solar systems">
+        {#each systemMatches as system (system.id)}<button type="button" role="option" aria-selected="false" onclick={() => chooseSystem(system)}>{system.name} · {system.id}</button>{/each}
+      </div>{/if}
+      {#if anchorError}<p class="error" role="status">{anchorError}</p>{/if}
       <label>Reach
         <select bind:value={reach}>
           <option value="CURRENT_SYSTEM">Current system</option>
@@ -259,35 +324,42 @@
       {/if}
 
       <h4>Members</h4>
+      <div class="seed">
+        <label>Account <input bind:value={accountLookup} placeholder="Existing EveJS account" /></label>
+        <button type="button" disabled={!accountLookup.trim()} onclick={() => void loadAccount()}>Load account pilots</button>
+      </div>
       <div class="pilot-picker">
-        {#each known as pilot (pilot.characterID)}
-          <label><input type="checkbox" checked={members.some((member) => member.characterID === pilot.characterID)} onchange={(event) => event.currentTarget.checked ? addPilot(pilot.characterID) : removePilot(pilot.characterID)} /> {pilot.characterName}</label>
+        {#each roster as pilot (pilot.characterID)}
+          <label><input type="checkbox" checked={members.some((member) => member.characterID === pilot.characterID)} onchange={(event) => event.currentTarget.checked ? addPilot(pilot.characterID) : removePilot(pilot.characterID)} /> {pilot.characterName} ({pilot.accountName})</label>
         {/each}
       </div>
       {#if members.length === 0}<p class="muted">Select at least one miner.</p>{/if}
       {#if members.length > 0}
         <table>
-          <thead><tr><th>Pilot</th><th>Role</th><th>Saved automation</th></tr></thead>
+          <thead><tr><th>Pilot</th><th>Role</th><th>Operation routine</th></tr></thead>
           <tbody>
             {#each members as member (member.characterID)}
               <tr>
                 <td>{member.characterName}</td>
-                <td><select value={member.role} onchange={(event) => patchMember(member.characterID, { role: event.currentTarget.value as DraftMember["role"] })}>
+                <td><select value={member.role} onchange={(event) => patchMember(member.characterID, { role: event.currentTarget.value as DraftMember["role"], automationID: "" })}>
                   <option value="MINER">Miner</option>
                   <option value="HAULER">Hauler</option>
                   <option value="DEFENDER">Defender — execution not supported</option>
                 </select></td>
-                <td><select required value={member.automationID} onchange={(event) => patchMember(member.characterID, { automationID: event.currentTarget.value })}>
-                  <option value="">Choose saved automation…</option>
-                  {#each scripts as script (script.scriptID)}<option value={script.scriptID}>{script.name}</option>{/each}
-                </select></td>
+                <td>{#if member.role === "DEFENDER"}Not yet executable{:else}<select required value={member.automationID} onchange={(event) => patchMember(member.characterID, { automationID: event.currentTarget.value })}>
+                  <option value="">Choose operation-compatible routine…</option>
+                  {#each scripts.filter((script) => script.roles[member.role]?.compatible) as script (script.scriptID)}<option value={script.scriptID}>{script.name}</option>{/each}
+                  {#if member.automationID && !scripts.some((script) => script.scriptID === member.automationID && script.roles[member.role]?.compatible)}
+                    <option value={member.automationID} disabled>Incompatible routine — choose another</option>
+                  {/if}
+                </select>{/if}</td>
               </tr>
             {/each}
           </tbody>
         </table>
       {/if}
       <p class="note">Defender is a first-class role, but launch is deliberately disabled until an existing combat primitive can stay with the operation target safely.</p>
-      <div class="actions"><button type="submit" disabled={busy !== null}>Save operation</button><button type="button" onclick={() => (editing = false)}>Cancel</button></div>
+      <div class="actions"><button type="submit" disabled={busy !== null || !anchorValid}>Save operation</button><button type="button" onclick={() => (editing = false)}>Cancel</button></div>
     </form>
   {/if}
 
@@ -317,6 +389,7 @@
         <tbody>{#each row.runtime.members as member (member.characterID)}<tr><td>{member.characterName}</td><td>{member.role}</td><td>{member.automationID ? scripts.find((script) => script.scriptID === member.automationID)?.name ?? "Missing automation" : "—"}</td><td>{member.runtimeState}</td><td>{member.phase ?? member.reason ?? "—"}</td></tr>{/each}</tbody>
       </table>
       {#if row.runtime.stopFailures.length > 0}<p class="error">Graceful Stop remains blocked for {row.runtime.stopFailures.length} member(s); this operation is not reported stopped.</p>{/if}
+      {#if row.runtime.history.length > 0}<details><summary>Target history</summary><ul>{#each row.runtime.history as item}<li>{item.at} · {item.kind} · {item.target?.targetName ?? "—"}</li>{/each}</ul></details>{/if}
     </article>
   {/each}
 
@@ -343,6 +416,7 @@
   fieldset { border: 1px solid #304754; margin: .7rem 0; }
   .disabled { color: #728691; }
   .pilot-picker { display: flex; flex-wrap: wrap; gap: .4rem 1rem; }
+  .system-matches { display: flex; flex-wrap: wrap; gap: .35rem; }
   table { width: 100%; border-collapse: collapse; margin-top: .55rem; }
   th, td { border-bottom: 1px solid #263943; text-align: left; padding: .45rem; vertical-align: top; }
   th { color: #8fb4c7; font-weight: 600; }

@@ -9,7 +9,6 @@
 // into public/dist/, and the built index.html links it automatically.
 import "./styles.css";
 import { mount } from "svelte";
-import App from "./ui/App.svelte";
 import { installErrorOverlay } from "./app/errorOverlay.ts";
 
 // Before anything else: a framework-free net for uncaught errors and unhandled
@@ -22,5 +21,9 @@ installErrorOverlay();
 // itself (app/sessions.ts). There is no single app-wide store/flow any more.
 const target = document.getElementById("app");
 if (target) {
-  mount(App, { target });
+  if (window.location.pathname === "/mining-command-center") {
+    void import("./ui/MiningCommandCenter.svelte").then(({ default: CommandCenter }) => mount(CommandCenter, { target }));
+  } else {
+    void import("./ui/App.svelte").then(({ default: App }) => mount(App, { target }));
+  }
 }

@@ -26,6 +26,7 @@ const { createMiningOperationStore } = require("./miningOperationStore");
 const {
   createMiningOperations,
   auditMiningScript,
+  operationRoutineCompatibility,
   EXECUTABLE_TARGET_CLASSES,
 } = require("./miningOperations");
 const { reconnectCandidate, hasPendingRecovery } = require("./droneRecoveryGate");
@@ -128,7 +129,7 @@ app.locals.botScripts = botScripts;
 const beltMemory = options.beltMemory || createBeltMemory();
 app.locals.beltMemory = beltMemory;
 const miningTargetBoard = options.miningTargetBoard || createMiningTargetBoard();
-const miningOperationStore = options.miningOperationStore || createMiningOperationStore({ dataDir: config.dataDir });
+const miningOperationStore = options.miningOperationStore || createMiningOperationStore({ dataDir: config.dataDir, resolveSystem: (id) => staticData.getSolarSystem(id) });
 const miningOperations = options.miningOperations || createMiningOperations({
   store: miningOperationStore,
   targetBoard: miningTargetBoard,
@@ -955,10 +956,11 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
     sessionReservation = Symbol("select-session");
     sessionOperations.set(req.webSessionID, sessionReservation);
     const outcome = await selectHeldCharacter(req.webSessionID, req.account, characterID);
-    // A server host is already the claimed automation owner, not a browser
-    // pilot being opened for recovery. Its select carries the private bot
-    // header, so only browser-owned sessions wait for the login check.
-    if (botHost.authorizesClaim(characterID, req.get(botHostModule.BOT_HEADER))) {
+    // Ordinary hosted bots retain their existing select semantics. Mining
+    // operation bots explicitly run the lost-drone recovery gate in botHost,
+    // including a matching /drone-recovery/ready acknowledgement.
+    const botSecret = req.get(botHostModule.BOT_HEADER);
+    if (botHost.authorizesClaim(characterID, botSecret) && !botHost.operationForClaim?.(characterID, botSecret)) {
       bridgeSessions.get(req.webSessionID).droneRecoveryReady = true;
     }
     res.json({
@@ -20035,6 +20037,60 @@ app.get("/api/mining-operations", requireAuth, (req, res, next) => {
   }
 });
 
+function canonicalOperationArea(area) {
+  const systemID = Number(area?.anchorSystemID);
+  const system = Number.isSafeInteger(systemID) && systemID > 0
+    ? staticData.getSolarSystem(systemID) : null;
+  if (!system) {
+    const error = new Error("Choose a known anchor solar system from the map catalog.");
+    error.code = "MINING_OPERATION_INVALID";
+    throw error;
+  }
+  const canonicalName = String(system.solarSystemName || "");
+  if (area.anchorSystemName && String(area.anchorSystemName).trim() !== canonicalName) {
+    const error = new Error("Anchor system name and ID do not identify the same solar system.");
+    error.code = "MINING_OPERATION_INVALID";
+    throw error;
+  }
+  return { ...area, anchorSystemID: systemID, anchorSystemName: canonicalName };
+}
+
+app.get("/api/mining-operations/routines", requireAuth, (req, res, next) => {
+  try {
+    const classes = String(req.query.classes || "BELT").split(",").filter((kind) => EXECUTABLE_TARGET_CLASSES.includes(kind));
+    const unloadPolicy = req.query.unloadPolicy === "SELF_UNLOAD" ? "SELF_UNLOAD" : "HAULER_SERVICE";
+    const definition = { unloadPolicy };
+    const routines = botScripts.list().map((summary) => {
+      const script = botScripts.get(summary.scriptID);
+      const audit = script ? auditMiningScript(script.doc) : null;
+      const roles = {};
+      for (const role of ["MINER", "HAULER", "DEFENDER"]) {
+        const reason = operationRoutineCompatibility(definition, role, audit, classes);
+        roles[role] = { compatible: reason === null, reason };
+      }
+      return { scriptID: summary.scriptID, name: summary.name, rev: summary.rev, roles };
+    });
+    res.json({ ok: true, routines });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/mining-operations/accounts/:accountName/pilots", requireAuth, async (req, res, next) => {
+  try {
+    const accountName = String(req.params.accountName || "").trim();
+    const account = accountName ? await store.getAccount(accountName) : null;
+    if (!account || account.banned) {
+      res.status(404).json({ ok: false, error: "ACCOUNT_NOT_FOUND", message: "That account is unavailable." });
+      return;
+    }
+    const characters = await store.listCharactersForAccount(account.accountID);
+    res.json({ ok: true, pilots: characters.map((row) => ({
+      accountName,
+      characterID: Number(row.characterID),
+      characterName: String(row.characterName || `Pilot ${row.characterID}`),
+    })) });
+  } catch (error) { next(error); }
+});
+
 app.post("/api/mining-operations", requireAuth, (req, res, next) => {
   try {
     const existingID = req.body && req.body.operationID;
@@ -20045,7 +20101,8 @@ app.post("/api/mining-operations", requireAuth, (req, res, next) => {
         return;
       }
     }
-    const definition = miningOperationStore.save(req.body || {});
+    const input = req.body || {};
+    const definition = miningOperationStore.save({ ...input, area: canonicalOperationArea(input.area) });
     res.json({ ok: true, definition, ...operationPayload() });
   } catch (error) {
     sendMiningOperationError(res, error, next);
@@ -20065,34 +20122,15 @@ app.post("/api/mining-operations/:operationID/delete", requireAuth, (req, res, n
   }
 });
 
-function memberLaunchCompatibility(definition, member, scriptAudit, executionClasses) {
-  if (member.role === "DEFENDER") {
-    return "DEFENDER execution is not supported yet; the role remains in the operation model.";
-  }
-  if (member.role === "HAULER") {
-    return scriptAudit.hauler
-      ? null
-      : "This HAULER automation needs Travel to belt, Loot containers, and Deliver ore blocks.";
-  }
-  if (!scriptAudit.miner) return "This MINER automation has no Mine at a belt or ore site block.";
-  if (scriptAudit.hasOrePreference) return "Mining Operations v0.1 supports any eligible target, not an ore preference list.";
-  if (!scriptAudit.targetClasses.some((kind) => executionClasses.includes(kind))) {
-    return "This MINER automation cannot execute the operation's supported target class.";
-  }
-  if (definition.unloadPolicy === "HAULER_SERVICE" && !scriptAudit.normalJettison) {
-    return "A HAULER_SERVICE miner automation needs a Jettison ore block for its normal threshold cycle.";
-  }
-  if (definition.unloadPolicy === "SELF_UNLOAD" && !scriptAudit.selfUnload) {
-    return "A SELF_UNLOAD miner automation needs a Deliver ore block.";
-  }
-  return null;
-}
-
 app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, res, next) => {
   try {
     const definition = miningOperations.definition(req.params.operationID);
     if (!definition) {
       res.status(404).json({ ok: false, error: "MINING_OPERATION_NOT_FOUND", message: "That Mining Operation no longer exists." });
+      return;
+    }
+    try { canonicalOperationArea(definition.area); } catch (error) {
+      res.status(409).json({ ok: false, error: "MINING_OPERATION_INVALID", message: error.message });
       return;
     }
     const selectedExecutable = definition.area.targetClasses.filter((kind) => EXECUTABLE_TARGET_CLASSES.includes(kind));
@@ -20125,6 +20163,18 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
       // SELF_UNLOAD capability rather than a promise haulers cannot keep.
       (!hasHaulerService || kind === "BELT"),
     );
+    if (commonClasses.length === 0) {
+      res.status(409).json({ ok: false, error: "INCOMPATIBLE_OPERATION_ROUTINE", message: "The member routines do not share an executable operation target class." });
+      return;
+    }
+    for (const member of definition.members) {
+      if (member.role === "DEFENDER") continue; // Modeled role; its member row fails honestly below.
+      const reason = operationRoutineCompatibility(definition, member.role, audits.get(member.characterID), commonClasses);
+      if (reason) {
+        res.status(409).json({ ok: false, error: "INCOMPATIBLE_OPERATION_ROUTINE", message: `${member.characterName}: ${reason}`, characterID: member.characterID });
+        return;
+      }
+    }
     const begin = miningOperations.begin(definition.operationID, commonClasses);
     if (!begin.ok) {
       res.status(MINING_OPERATION_STATUS[begin.code] || 409).json(begin);
@@ -20136,10 +20186,9 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
       const script = scripts.get(member.characterID);
       const audit = audits.get(member.characterID);
       let failure = null;
-      if (!script || !audit) failure = "The referenced saved automation no longer exists.";
-      else if (commonClasses.length === 0) {
-        failure = "The MINER automations do not share one executable target class.";
-      } else failure = memberLaunchCompatibility(definition, member, audit, commonClasses);
+      if (member.role === "DEFENDER") failure = "DEFENDER execution is not supported yet; no escort routine was started.";
+      else if (!script || !audit) failure = "The referenced saved automation no longer exists.";
+      else failure = operationRoutineCompatibility(definition, member.role, audit, commonClasses);
       if (failure) {
         miningOperations.memberFailed(definition.operationID, member.characterID, failure);
         results.push({ characterID: member.characterID, ok: false, error: "MEMBER_NOT_EXECUTABLE", message: failure });
@@ -20157,12 +20206,10 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
       }
       let callerSessionID = null;
       let callerHeld = null;
-      for (const [sessionID, held] of bridgeSessions) {
-        if (Number(held.characterID) === member.characterID) {
-          callerSessionID = sessionID;
-          callerHeld = held;
-          break;
-        }
+      const ownHeld = bridgeSessions.get(req.webSessionID);
+      if (ownHeld && Number(ownHeld.characterID) === member.characterID) {
+        callerSessionID = req.webSessionID;
+        callerHeld = ownHeld;
       }
       if (hasPendingRecovery(callerHeld, member.characterID)) {
         failure = "This pilot's lost-drone recovery must finish before server handoff.";
