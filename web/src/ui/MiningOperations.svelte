@@ -3,7 +3,7 @@
   import {
     deleteMiningOperation,
     findMapLocations,
-    getBotScript,
+    getMiningOperationLaunchPlan,
     listOperationAccountPilots,
     listOperationRoutines,
     loadMiningOperations,
@@ -30,6 +30,7 @@
   let busy = $state<string | null>(null);
   let editing = $state(false);
   let runtimeMinutes = $state(12 * 60);
+  let readiness = $state<Record<string, { key: string; message: string | null }>>({});
 
   type DraftMember = MiningOperationMemberDefinition;
   let operationID = $state<string | undefined>(undefined);
@@ -43,6 +44,13 @@
   let belt = $state(true);
   let oreAnomaly = $state(false);
   let unloadPolicy = $state<"HAULER_SERVICE" | "SELF_UNLOAD">("HAULER_SERVICE");
+  let unloadStationID = $state(0);
+  let unloadStationName = $state("");
+  let unloadStationSystemName = $state("");
+  let unloadDivision = $state(1);
+  let stationMatches = $state<readonly { id: number; name: string; systemName: string }[]>([]);
+  let destinationError = $state<string | null>(null);
+  let stationLookupSerial = 0;
   let members = $state<DraftMember[]>([]);
   let seedSquadID = $state("");
   let accountLookup = $state("");
@@ -51,6 +59,13 @@
   const prefs = $derived(loadHangarPrefs());
   const selectedClasses = $derived([...(belt ? ["BELT" as const] : []), ...(oreAnomaly ? ["ORE_ANOMALY" as const] : [])]);
   const anchorValid = $derived(anchorSystemID > 0 && anchorSystemName.length > 0 && anchorError === null);
+  const standardAvailable = $derived(selectedClasses.length === 1 && selectedClasses[0] === "BELT" && unloadPolicy === "HAULER_SERVICE");
+
+  function modeOf(member: DraftMember): "STANDARD" | "CUSTOM" { return member.routineMode ?? (member.automationID ? "CUSTOM" : "STANDARD"); }
+  function profileName(member: DraftMember): string {
+    if (modeOf(member) === "CUSTOM") return scripts.find((script) => script.scriptID === member.automationID)?.name ?? "Custom routine";
+    return member.role === "MINER" ? "Belt Miner / Hauler Service · v1" : member.role === "HAULER" ? "Belt Hauler · v1" : "Not yet executable";
+  }
 
   function words(cause: unknown): string {
     return cause instanceof Error ? cause.message : "The Mining Operations request failed.";
@@ -60,6 +75,17 @@
     try {
       payload = await loadMiningOperations(opts());
       pollError = null;
+      for (const row of payload.operations) {
+        if (!["DRAFT", "STOPPED"].includes(row.runtime.state)) continue;
+        const key = JSON.stringify(row.definition);
+        if (readiness[row.definition.operationID]?.key === key) continue;
+        readiness[row.definition.operationID] = { key, message: "Checking start readiness…" };
+        void getMiningOperationLaunchPlan(row.definition.operationID, opts()).then((plan) => {
+          if (readiness[row.definition.operationID]?.key === key) readiness[row.definition.operationID] = { key, message: plan.warnings.join(" ") || null };
+        }).catch((cause) => {
+          if (readiness[row.definition.operationID]?.key === key) readiness[row.definition.operationID] = { key, message: words(cause) };
+        });
+      }
     } catch (cause) {
       pollError = words(cause);
     } finally {
@@ -130,6 +156,34 @@
     } catch (cause) { error = words(cause); }
   }
 
+  async function searchStation(value: string): Promise<void> {
+    const serial = ++stationLookupSerial;
+    unloadStationName = value;
+    unloadStationID = 0;
+    unloadStationSystemName = "";
+    destinationError = "Choose a known unload station.";
+    stationMatches = [];
+    if (value.trim().length < 2) return;
+    try {
+      const result = await findMapLocations(value.trim(), "station", opts());
+      if (serial !== stationLookupSerial) return;
+      stationMatches = result.matches.filter((row) => row.kind === "station")
+        .map((row) => ({ id: row.id, name: row.name, systemName: row.solarSystemName ?? "" }));
+      const exact = stationMatches.find((row) => row.name.toLocaleLowerCase() === value.trim().toLocaleLowerCase());
+      if (exact) chooseStation(exact);
+      else destinationError = stationMatches.length ? "Choose a matching station." : "No known station matches that name.";
+    } catch (cause) { if (serial === stationLookupSerial) destinationError = words(cause); }
+  }
+
+  function chooseStation(station: { id: number; name: string; systemName: string }): void {
+    ++stationLookupSerial;
+    unloadStationID = station.id;
+    unloadStationName = station.name;
+    unloadStationSystemName = station.systemName;
+    destinationError = null;
+    stationMatches = [];
+  }
+
   function newOperation(): void {
     operationID = undefined;
     name = "";
@@ -140,6 +194,11 @@
     belt = true;
     oreAnomaly = false;
     unloadPolicy = "HAULER_SERVICE";
+    unloadStationID = 0;
+    unloadStationName = "";
+    unloadStationSystemName = "";
+    unloadDivision = 1;
+    destinationError = null;
     members = [];
     seedSquadID = "";
     editing = true;
@@ -155,7 +214,12 @@
     belt = definition.area.targetClasses.includes("BELT");
     oreAnomaly = definition.area.targetClasses.includes("ORE_ANOMALY");
     unloadPolicy = definition.unloadPolicy;
-    members = definition.members.map((member) => ({ ...member }));
+    unloadStationID = definition.unloadDestination?.stationID ?? 0;
+    unloadStationName = definition.unloadDestination?.stationName ?? "";
+    unloadStationSystemName = definition.unloadDestination?.systemName ?? "";
+    unloadDivision = definition.unloadDestination?.corporationDivision ?? 1;
+    destinationError = null;
+    members = definition.members.map((member) => ({ ...member, routineMode: modeOf(member) }));
     editing = true;
   }
 
@@ -168,6 +232,7 @@
       characterName: pilot.characterName,
       accountName: pilot.accountName,
       role: "MINER",
+      routineMode: "STANDARD",
       automationID: "",
     }];
   }
@@ -200,9 +265,13 @@
         },
         targetPolicy: "ANY_ELIGIBLE",
         unloadPolicy,
+        unloadDestination: unloadStationID > 0 && destinationError === null
+          ? { stationID: unloadStationID, stationName: unloadStationName, systemName: unloadStationSystemName, corporationDivision: unloadDivision }
+          : null,
         members,
       }, opts());
       editing = false;
+      await refresh();
     } catch (cause) {
       error = words(cause);
     } finally {
@@ -215,17 +284,16 @@
     error = null;
     try {
       const grants: Record<string, ReturnType<typeof createBotLaunchGrant>> = {};
-      for (const member of definition.members) {
-        if (member.role === "DEFENDER") continue;
-        const record = await getBotScript(member.automationID, opts());
-        if (!record) throw new Error(`${member.characterName}'s saved automation no longer exists.`);
-        const decoded = decodeScriptValue(record.doc);
-        if (!decoded.ok) throw new Error(`${member.characterName}'s saved automation is invalid: ${decoded.refusal}`);
-        grants[String(member.characterID)] = createBotLaunchGrant(record.rev, analyzeBotRunPolicy(decoded.doc), runtimeMinutes);
+      const plan = await getMiningOperationLaunchPlan(definition.operationID, opts());
+      for (const member of plan.members) {
+        const decoded = decodeScriptValue(member.script.doc);
+        if (!decoded.ok) throw new Error(`${member.script.name} is invalid: ${decoded.refusal}`);
+        grants[String(member.characterID)] = createBotLaunchGrant(member.script.rev, analyzeBotRunPolicy(decoded.doc), runtimeMinutes);
       }
       const hours = runtimeMinutes / 60;
-      if (!window.confirm(`Start “${definition.name}” for ${definition.members.length} members, with a ${hours}-hour server-hosted limit?`)) return;
-      payload = await startMiningOperation(definition.operationID, grants, opts());
+      const warning = plan.warnings.length ? `\n\n${plan.warnings.join("\n")}` : "";
+      if (!window.confirm(`Start “${definition.name}” for ${definition.members.length} members, with a ${hours}-hour server-hosted limit?${warning}`)) return;
+      payload = await startMiningOperation(definition.operationID, grants, plan.planHash, opts());
     } catch (cause) {
       error = words(cause);
     } finally {
@@ -312,6 +380,19 @@
         <label><input type="radio" bind:group={unloadPolicy} value="HAULER_SERVICE" /> Hauler service</label>
         <label><input type="radio" bind:group={unloadPolicy} value="SELF_UNLOAD" /> Self unload</label>
       </fieldset>
+      {#if unloadPolicy === "HAULER_SERVICE"}
+        <div class="destination">
+          <h4>Hauler delivery destination</h4>
+          <p class="muted">Standard Belt Hauler requires a known station and corporation division, even when pilots start in space.</p>
+          <label>Unload station <input value={unloadStationName} oninput={(event) => void searchStation(event.currentTarget.value)} placeholder="Search stations" autocomplete="off" /></label>
+          {#if stationMatches.length > 0}<div class="system-matches" role="listbox" aria-label="Matching stations">
+            {#each stationMatches as station (station.id)}<button type="button" role="option" aria-selected="false" onclick={() => chooseStation(station)}>{station.name} · {station.systemName}</button>{/each}
+          </div>{/if}
+          {#if unloadStationID > 0}<p class="muted">Station {unloadStationID} · {unloadStationSystemName}</p>{/if}
+          {#if destinationError}<p class="error" role="status">{destinationError}</p>{/if}
+          <label>Corporation division <select bind:value={unloadDivision}>{#each [1, 2, 3, 4, 5, 6, 7] as division}<option value={division}>Division {division}</option>{/each}</select></label>
+        </div>
+      {/if}
 
       {#if prefs.squads.length > 0}
         <div class="seed">
@@ -336,7 +417,7 @@
       {#if members.length === 0}<p class="muted">Select at least one miner.</p>{/if}
       {#if members.length > 0}
         <table>
-          <thead><tr><th>Pilot</th><th>Role</th><th>Operation routine</th></tr></thead>
+          <thead><tr><th>Pilot</th><th>Role</th><th>Routine mode</th><th>Effective profile / routine</th></tr></thead>
           <tbody>
             {#each members as member (member.characterID)}
               <tr>
@@ -346,7 +427,13 @@
                   <option value="HAULER">Hauler</option>
                   <option value="DEFENDER">Defender — execution not supported</option>
                 </select></td>
-                <td>{#if member.role === "DEFENDER"}Not yet executable{:else}<select required value={member.automationID} onchange={(event) => patchMember(member.characterID, { automationID: event.currentTarget.value })}>
+                <td>{#if member.role === "DEFENDER"}Not yet executable{:else}<select value={modeOf(member)} onchange={(event) => patchMember(member.characterID, { routineMode: event.currentTarget.value as "STANDARD" | "CUSTOM", automationID: "" })}>
+                  <option value="STANDARD">Standard / Automatic</option>
+                  <option value="CUSTOM">Custom / Advanced</option>
+                </select>{/if}</td>
+                <td>{#if member.role === "DEFENDER"}Not yet executable{:else if modeOf(member) === "STANDARD"}
+                  {#if standardAvailable}{profileName(member)}{:else}<span class="error">No Standard profile for this class/policy; use Custom / Advanced.</span>{/if}
+                {:else}<select required value={member.automationID} onchange={(event) => patchMember(member.characterID, { automationID: event.currentTarget.value })}>
                   <option value="">Choose operation-compatible routine…</option>
                   {#each scripts.filter((script) => script.roles[member.role]?.compatible) as script (script.scriptID)}<option value={script.scriptID}>{script.name}</option>{/each}
                   {#if member.automationID && !scripts.some((script) => script.scriptID === member.automationID && script.roles[member.role]?.compatible)}
@@ -375,7 +462,11 @@
           <button type="button" class="danger" disabled={busy !== null} onclick={() => void stop(row.definition.operationID)}>Stop operation</button>
         {/if}
       </div></div>
+      {#if row.runtime.statusReason}<p class="notice"><strong>Status:</strong> {row.runtime.statusReason}</p>{/if}
       <p><strong>Area:</strong> {row.definition.area.anchorSystemName ?? "Unknown system"} · {row.definition.area.reach === "CURRENT_SYSTEM" ? "current system" : "adjacent mode (anchor-only execution in v0.1)"}</p>
+      <p><strong>Target class / unload:</strong> {row.definition.area.targetClasses.join(", ")} · {row.definition.unloadPolicy === "HAULER_SERVICE" ? "Hauler service" : "Self unload"}</p>
+      {#if row.definition.unloadPolicy === "HAULER_SERVICE"}<p><strong>Delivery:</strong> {row.definition.unloadDestination ? `${row.definition.unloadDestination.stationName} · Corporation Division ${row.definition.unloadDestination.corporationDivision}` : row.definition.members.some((member) => modeOf(member) === "STANDARD") ? "Not configured — Standard Start blocked" : "Configured in custom routine"}</p>{/if}
+      {#if ["DRAFT", "STOPPED"].includes(row.runtime.state)}<p class={readiness[row.definition.operationID]?.message ? "notice" : "muted"}><strong>Start readiness:</strong> {readiness[row.definition.operationID]?.message ?? "Routine preflight ready; pilot ownership and run grant are checked at Start."}</p>{/if}
       <p><strong>Current target:</strong> {row.runtime.currentTarget?.targetName ?? "Waiting for selection"} {row.runtime.currentTarget ? `· ${row.runtime.currentTarget.state}` : ""}</p>
       <p><strong>Current system:</strong> {row.runtime.currentTarget?.systemName ?? (row.runtime.currentTarget ? String(row.runtime.currentTarget.systemID) : "Awaiting target")}</p>
       {#if row.runtime.rendezvous}
@@ -386,7 +477,7 @@
       {/each}
       <table>
         <thead><tr><th>Pilot</th><th>Role</th><th>Assignment</th><th>Bot state</th><th>Phase</th></tr></thead>
-        <tbody>{#each row.runtime.members as member (member.characterID)}<tr><td>{member.characterName}</td><td>{member.role}</td><td>{member.automationID ? scripts.find((script) => script.scriptID === member.automationID)?.name ?? "Missing automation" : "—"}</td><td>{member.runtimeState}</td><td>{member.runtimeState === "FAILED" ? `${member.failureCode ? `${member.failureCode}: ` : ""}${member.reason ?? member.phase ?? "Unavailable"}` : member.phase ?? member.reason ?? "—"}</td></tr>{/each}</tbody>
+        <tbody>{#each row.runtime.members as member (member.characterID)}<tr><td>{member.characterName}</td><td>{member.role}</td><td>{modeOf(member) === "STANDARD" && (row.definition.unloadPolicy !== "HAULER_SERVICE" || row.definition.area.targetClasses.length !== 1 || row.definition.area.targetClasses[0] !== "BELT") ? "Standard unavailable" : profileName(member)}</td><td>{member.runtimeState}</td><td>{member.runtimeState === "FAILED" ? `${member.failureCode ? `${member.failureCode}: ` : ""}${member.reason ?? member.phase ?? "Unavailable"}` : member.phase ?? member.reason ?? "—"}</td></tr>{/each}</tbody>
       </table>
       {#if row.runtime.stopFailures.length > 0}<p class="error">Graceful Stop remains blocked for {row.runtime.stopFailures.length} member(s); this operation is not reported stopped.</p>{/if}
       {#if row.runtime.history.length > 0}<details><summary>Target history</summary><ul>{#each row.runtime.history as item}<li>{item.at} · {item.kind} · {item.target?.targetName ?? (item.evidence ? JSON.stringify(item.evidence) : "—")}</li>{/each}</ul></details>{/if}

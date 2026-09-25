@@ -73,10 +73,26 @@ test("operation definitions save, reload, and retain stable automation reference
   const store = createMiningOperationStore({ dataDir: dir, uuid: () => "op-1", now: () => "2026-01-01T00:00:00.000Z", resolveSystem });
   const saved = store.save(definition(undefined, [member(1, "MINER")], "SELF_UNLOAD"));
   assert.equal(saved.operationID, "op-1");
-  assert.deepEqual(saved.members[0], member(1, "MINER"));
+  assert.deepEqual(saved.members[0], { ...member(1, "MINER"), routineMode: "CUSTOM" });
   assert.equal(Object.hasOwn(saved.members[0], "script"), false);
   const reloaded = createMiningOperationStore({ dataDir: dir }).get("op-1");
   assert.deepEqual(reloaded, saved);
+});
+
+test("Standard member mode and canonical explicit unload destination persist without a saved script", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mining-standard-definition-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const store = createMiningOperationStore({ dataDir: dir, resolveSystem,
+    resolveStation: (id) => Number(id) === 60000004
+      ? { stationID: 60000004, stationName: "Jita Station", solarSystemID: 30000142 } : null });
+  const saved = store.save({ ...definition("standard", [
+    { ...member(1, "MINER", ""), routineMode: "STANDARD" },
+    { ...member(2, "HAULER", ""), routineMode: "STANDARD" },
+  ], "HAULER_SERVICE"), unloadDestination: { stationID: 60000004, corporationDivision: 1 } });
+  assert.deepEqual(saved.members.map((row) => [row.routineMode, row.automationID]), [["STANDARD", ""], ["STANDARD", ""]]);
+  assert.deepEqual(saved.unloadDestination, { stationID: 60000004, stationName: "Jita Station", systemName: "Jita", corporationDivision: 1 });
+  assert.deepEqual(createMiningOperationStore({ dataDir: dir }).get("standard"), saved);
+  assert.throws(() => store.save({ ...saved, unloadDestination: { stationID: 60000004, stationName: "Wrong", corporationDivision: 1 } }), /name and ID do not match/);
 });
 
 test("operation validation preserves all explicit roles and requires policy-compatible membership", () => {
@@ -179,6 +195,37 @@ test("botHost lowercase running projection still counts miners and haulers for d
   assert.equal(h.operations.runtimeFor("haul-live").drainingTargets.length, 1);
 });
 
+test("aggregate status follows active mining body, not a hauler's phase or an earlier transient", () => {
+  const a = definition("a", [member(1, "MINER"), member(2, "MINER"), member(3, "HAULER")], "HAULER_SERVICE");
+  const b = definition("b", [member(4, "MINER"), member(5, "HAULER")], "HAULER_SERVICE");
+  const h = harness([a, b]);
+  startAll(h, "a"); startAll(h, "b");
+  const first = h.operations.reserveCandidate("a", 1, belt("Belt I")).target;
+  const second = h.operations.reserveCandidate("b", 4, belt("Belt II")).target;
+  h.operations.activateTarget("a", 1, first.targetKey);
+  h.operations.activateTarget("b", 4, second.targetKey);
+  h.operations.memberFailed("a", 2, { code: "TRANSIENT", message: "Earlier startup failure" });
+  const bots = [
+    [1, "a", "Mining"], [2, "a", "Mining"], [3, "a", "Unloading"],
+    [4, "b", "Approaching a rock"], [5, "b", "Looting"],
+  ].map(([id, operationID, phase]) => ({ operationID, characterID: id, botID: `bot-${id}`,
+    status: "running", phase, why: null, startedAt: "now", endedAt: null }));
+  let projected = h.operations.list(bots);
+  assert.equal(projected.find((row) => row.definition.operationID === "a").runtime.state, "MINING");
+  assert.equal(projected.find((row) => row.definition.operationID === "b").runtime.state, "MINING");
+  assert.equal(h.operations.runtimeFor("a").members.get(2).failureCode, null);
+  h.operations.memberFailed("a", 2, { code: "FAILED", message: "Actually unavailable" });
+  projected = h.operations.list(bots.filter((bot) => bot.characterID !== 2));
+  assert.equal(projected.find((row) => row.definition.operationID === "a").runtime.state, "DEGRADED");
+  assert.match(projected.find((row) => row.definition.operationID === "a").runtime.statusReason, /Pilot 2.*Actually unavailable/);
+  assert.equal(projected.find((row) => row.definition.operationID === "b").runtime.state, "MINING");
+  h.operations.beginStop("a"); h.operations.finishStop("a", []);
+  projected = h.operations.list(bots.filter((bot) => bot.operationID === "b"));
+  assert.equal(projected.find((row) => row.definition.operationID === "a").runtime.state, "STOPPED");
+  assert.equal(projected.find((row) => row.definition.operationID === "b").runtime.state, "MINING");
+  assert.equal(h.board.get(second.targetKey).claimedByOperationID, "b");
+});
+
 test("claim loss invalidates current target, rejects stale reservation and depletion, and records history once", () => {
   const h = harness([definition("stale", [member(1, "MINER")])], { leaseMs: 100 });
   startAll(h, "stale");
@@ -217,13 +264,18 @@ test("a confirmed anomaly disappearance can be reclaimed only after that scanner
   assert.equal(h.operations.reserveCandidate("site", 1, anomaly()).acquired, true);
 });
 
-test("successful multi-member launch becomes traveling and an honest member failure becomes degraded", () => {
+test("launch waits for target selection, then travels; member failure is degraded", () => {
   const def = definition("launch", [member(1, "MINER"), member(2, "MINER")]);
   const h = harness([def]);
   assert.equal(h.operations.begin("launch", ["BELT"]).ok, true);
   h.operations.memberStarted("launch", 1, "bot-1");
+  h.operations.memberStarted("launch", 2, "bot-2");
+  assert.equal(h.operations.finishLaunch("launch").state, "SELECTING");
+  h.operations.reserveCandidate("launch", 1, belt());
+  assert.equal(h.operations.runtimeFor("launch").state, "TRAVELING");
   h.operations.memberFailed("launch", 2, "pilot already controlled");
-  assert.equal(h.operations.finishLaunch("launch").state, "DEGRADED");
+  assert.equal(h.operations.list([{ operationID: "launch", characterID: 1, botID: "bot-1",
+    status: "running", phase: "Traveling", startedAt: "now", endedAt: null }])[0].runtime.state, "DEGRADED");
   assert.equal(h.operations.runtimeFor("launch").members.get(2).reason, "pilot already controlled");
 });
 

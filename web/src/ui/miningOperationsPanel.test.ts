@@ -64,3 +64,17 @@ test("the dashboard explains a split main body and logistics tail", () => {
   assert.match(source, /main body may relocate/);
   assert.match(source, /DRAINING/);
 });
+
+test("normal BELT setup defaults to Standard profiles and keeps Custom as Advanced", () => {
+  const source = readFileSync(new URL("./MiningOperations.svelte", import.meta.url), "utf8");
+  assert.match(source, /routineMode: "STANDARD"/);
+  assert.match(source, /Standard \/ Automatic/);
+  assert.match(source, /Custom \/ Advanced/);
+  assert.match(source, /Belt Miner \/ Hauler Service/);
+  assert.match(source, /Belt Hauler/);
+  assert.match(source, /getMiningOperationLaunchPlan/);
+  assert.match(source, /findMapLocations\(value\.trim\(\), "station"/);
+  assert.match(source, /Corporation division/);
+  assert.match(source, /Start readiness/);
+  assert.doesNotMatch(source, /getBotScript\(/);
+});

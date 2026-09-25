@@ -198,10 +198,10 @@ function createBotHost(options) {
   const persistPath = options.persistPath || null;
   const loadAccount = options.loadAccount || (async () => null);
   // The saved-script library is platform-wide: any account's characters may
-  // run any account's script. `loadScript(scriptID) -> Record | null` looks a
-  // script up by ID alone — it does NOT check who authored it. Authority over
-  // characters and running bots stays account-scoped elsewhere in this file
-  // (claims, list(), stop()); only the script lookup is global.
+  // run any account's script. `loadScript(scriptID, rosterRow)` still looks
+  // saved scripts up by ID alone, not author; the optional roster context lets
+  // MCC reconstruct an operation-owned profile from its durable definition.
+  // Character and running-bot authority stays account-scoped below.
   const loadScript = options.loadScript || (() => null);
 
   /**
@@ -1085,7 +1085,7 @@ function createBotHost(options) {
         }
         let script = null;
         if (kind === "script") {
-          script = loadScript(String(row.scriptID || ""));
+          script = loadScript(String(row.scriptID || ""), row);
           if (!script) {
             recordResumeFailure(row, "the saved bot no longer exists.");
             continue;

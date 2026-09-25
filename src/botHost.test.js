@@ -885,6 +885,25 @@ test("resume looks up the script by ID alone — authorship is not account-scope
   assert.notEqual(after.claimedBy(140000001), null);
 });
 
+test("resume supplies the operation roster row to MCC profile resolution", async () => {
+  const rosterPath = tempRosterPath();
+  const before = makeHost({ persistPath: rosterPath });
+  const scriptID = "mcc.belt.hauler-service.hauler";
+  assert.equal((await before.start({ ...START, scriptID, scriptName: "Belt Hauler",
+    operationID: "operation-belt", operationRole: "HAULER" })).ok, true);
+  let received = null;
+  const after = makeHost({ persistPath: rosterPath, loadAccount: async () => ({ ...ACCOUNT }),
+    loadScript: (id, row) => {
+      received = { id, row };
+      return { scriptID, name: "Belt Hauler", rev: 1, doc: { valid: true } };
+    } });
+  await after.resume();
+  assert.equal(received.id, scriptID);
+  assert.equal(received.row.operationID, "operation-belt");
+  assert.equal(received.row.characterID, START.characterID);
+  assert.equal(after.list(7)[0].status, "running");
+});
+
 test("resume refuses a script whose saved revision changed after launch", async () => {
   const rosterPath = tempRosterPath();
   const before = makeHost({ persistPath: rosterPath });

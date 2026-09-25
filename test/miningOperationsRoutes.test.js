@@ -123,7 +123,8 @@ async function request(baseUrl, route, { method = "GET", token, body } = {}) {
 }
 
 test("Mining Operations routes persist definitions, launch through botHost, project status, and stop gracefully", async (t) => {
-  const operationStore = createMiningOperationStore({ dataDir, resolveSystem: (id) => ({ 30000142: { solarSystemID: 30000142, solarSystemName: "Jita" }, 30004504: { solarSystemID: 30004504, solarSystemName: "4C-B7X" } })[Number(id)] || null });
+  const operationStore = createMiningOperationStore({ dataDir, resolveSystem: (id) => ({ 30000142: { solarSystemID: 30000142, solarSystemName: "Jita" }, 30004504: { solarSystemID: 30004504, solarSystemName: "4C-B7X" } })[Number(id)] || null,
+    resolveStation: (id) => Number(id) === 60003760 ? { stationID: 60003760, stationName: "Jita IV - Moon 4", solarSystemID: 30000142 } : null });
   const board = createMiningTargetBoard();
   const operations = createMiningOperations({ store: operationStore, targetBoard: board, beltMemory: createBeltMemory() });
   const heldSessions = new Map();
@@ -144,7 +145,7 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
       list: () => [script, pinnedScript, crewMinerScript, crewHaulerScript],
     },
     staticData: {
-      getStation: () => null,
+      getStation: (id) => Number(id) === 60003760 ? { stationID: 60003760, stationName: "Jita IV - Moon 4", solarSystemID: 30000142 } : null,
       getSolarSystem: (id) => ({ 30000142: { solarSystemID: 30000142, solarSystemName: "Jita" }, 30004504: { solarSystemID: 30004504, solarSystemName: "4C-B7X" } })[Number(id)] || null,
       getSolarSystemName: (id) => ({ 30000142: "Jita", 30004504: "4C-B7X" })[Number(id)] || `System ${id}`,
       findMapLocations: ({ q }) => {
@@ -226,7 +227,7 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
     body: { grants: { [character.characterID]: { scriptRev: 1, riskClasses: [], maxRuntimeMinutes: 60 } } },
   });
   assert.equal(started.response.status, 200);
-  assert.equal(started.payload.operations.find((row) => row.definition.operationID === operationID).runtime.state, "TRAVELING");
+  assert.equal(started.payload.operations.find((row) => row.definition.operationID === operationID).runtime.state, "SELECTING");
   assert.equal(host.rows[0].operationID, operationID);
   assert.equal(host.rows[0].operationRole, "MINER");
   assert.equal(host.inputs[0].callerSessionID, null);
@@ -244,12 +245,57 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
   assert.equal(stopped.payload.operations.find((row) => row.definition.operationID === operationID).runtime.state, "STOPPED");
   assert.deepEqual(host.stops, [`bot-${character.characterID}`]);
 
+  const standardInput = {
+    ...operationInput, name: "Standard belts", unloadPolicy: "HAULER_SERVICE",
+    unloadDestination: { stationID: 60003760, stationName: "Jita IV - Moon 4", corporationDivision: 1 },
+    members: crew.map((pilot, index) => ({ ...pilot, accountName: account.username,
+      role: index === 2 ? "HAULER" : "MINER", routineMode: "STANDARD", automationID: "" })),
+  };
+  const noDestination = await request(baseUrl, "/api/mining-operations", { method: "POST", token,
+    body: { ...standardInput, name: "Missing delivery", unloadDestination: null } });
+  assert.equal(noDestination.response.status, 200);
+  const noDestinationPlan = await request(baseUrl, `/api/mining-operations/${noDestination.payload.definition.operationID}/launch-plan`, { token });
+  assert.equal(noDestinationPlan.response.status, 409);
+  assert.equal(noDestinationPlan.payload.error, "STANDARD_UNLOAD_DESTINATION_REQUIRED");
+  const noDestinationStart = await request(baseUrl, `/api/mining-operations/${noDestination.payload.definition.operationID}/start`, { method: "POST", token, body: { grants: {} } });
+  assert.equal(noDestinationStart.response.status, 409);
+  assert.equal(host.inputs.length, 1);
+  const invalidDestination = await request(baseUrl, "/api/mining-operations", { method: "POST", token,
+    body: { ...standardInput, unloadDestination: { stationID: 999999, corporationDivision: 1 } } });
+  assert.equal(invalidDestination.response.status, 400);
+  const standardSaved = await request(baseUrl, "/api/mining-operations", { method: "POST", token, body: standardInput });
+  assert.equal(standardSaved.response.status, 200);
+  const standardID = standardSaved.payload.definition.operationID;
+  assert.equal(standardSaved.payload.definition.unloadDestination.stationName, "Jita IV - Moon 4");
+  assert.deepEqual(standardSaved.payload.definition.members.map((member) => member.automationID), ["", "", ""]);
+  const standardPlan = await request(baseUrl, `/api/mining-operations/${standardID}/launch-plan`, { token });
+  assert.equal(standardPlan.response.status, 200);
+  assert.deepEqual(standardPlan.payload.members.map((member) => member.script.scriptID), [
+    "mcc.belt.hauler-service.miner", "mcc.belt.hauler-service.miner", "mcc.belt.hauler-service.hauler",
+  ]);
+  assert.equal(standardPlan.payload.members[2].script.doc.program[0].body[0].then[0].args.station.ref.id, 60003760);
+  const stalePlan = await request(baseUrl, `/api/mining-operations/${standardID}/start`, { method: "POST", token,
+    body: { grants: {}, planHash: "not-the-reviewed-plan" } });
+  assert.equal(stalePlan.response.status, 409);
+  assert.equal(stalePlan.payload.error, "OPERATION_LAUNCH_PLAN_STALE");
+  const standardStart = await request(baseUrl, `/api/mining-operations/${standardID}/start`, { method: "POST", token,
+    body: { planHash: standardPlan.payload.planHash,
+      grants: Object.fromEntries(crew.map((pilot) => [pilot.characterID, { scriptRev: 1, riskClasses: [], maxRuntimeMinutes: 60 }])) } });
+  assert.equal(standardStart.response.status, 200);
+  assert.equal(standardStart.payload.results.filter((row) => row.ok).length, 3);
+  assert.equal(host.inputs.at(-1).callerSessionID, null, "the in-space hauler needs no selected browser workspace");
+  assert.equal(host.inputs.at(-1).scriptID, "mcc.belt.hauler-service.hauler");
+  assert.equal(host.inputs.at(-1).doc.program[0].body.at(-1).args.seconds.value, 3);
+  await request(baseUrl, `/api/mining-operations/${standardID}/stop`, { method: "POST", token, body: {} });
+
   const withDefender = await request(baseUrl, "/api/mining-operations", { method: "POST", token, body: {
     ...operationInput,
     name: "Modeled guard",
     members: [...operationInput.members, { characterID: 7002, characterName: "Guard", accountName: account.username, role: "DEFENDER", automationID: "" }],
   } });
   assert.equal(withDefender.response.status, 200);
+  const defenderPlan = await request(baseUrl, `/api/mining-operations/${withDefender.payload.definition.operationID}/launch-plan`, { token });
+  assert.match(defenderPlan.payload.warnings[0], /DEFENDER execution is not supported/);
   const defenderStart = await request(baseUrl, `/api/mining-operations/${withDefender.payload.definition.operationID}/start`, {
     method: "POST", token,
     body: { grants: { [character.characterID]: { scriptRev: 1, riskClasses: [], maxRuntimeMinutes: 60 } } },

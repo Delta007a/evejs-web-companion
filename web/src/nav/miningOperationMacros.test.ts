@@ -1,10 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 
 import type { MacroStep } from "../bots/botScript.ts";
 import type { FlightStatus, MiningHold, SpaceEntity, SpaceSnapshot } from "../store/types.ts";
 import type { MiningOperationAssignment, MiningOperationTarget, ScriptObservation } from "./scriptConditions.ts";
 import { SCRIPT_MACROS } from "./scriptMacros.ts";
+const require = createRequire(import.meta.url);
+const { buildStandardProfile } = require("../../../src/miningOperationProfiles.js");
 
 const beltStep: MacroStep = {
   id: "mine",
@@ -94,6 +97,25 @@ test("operation miner reserves one deterministic eligible belt when no target ex
   assert.ok(tick.action.kind === "reserveMiningTarget" && tick.action.targetName === "Asteroid Belt 1");
 });
 
+test("MCC standard miner and hauler resource steps obey currentTarget, not nearest standalone belt", () => {
+  const def = { area: { targetClasses: ["BELT"] }, unloadPolicy: "HAULER_SERVICE",
+    unloadDestination: { stationID: 60000004, stationName: "Home", systemName: "Jita", corporationDivision: 1 } };
+  const minerBody = buildStandardProfile(def, { role: "MINER", routineMode: "STANDARD" }).doc.program[0].body;
+  const haulerBody = buildStandardProfile(def, { role: "HAULER", routineMode: "STANDARD" }).doc.program[0].body;
+  const assigned = target({ targetKey: "BELT:30000142:Asteroid Belt 2", targetName: "Asteroid Belt 2" });
+  const world = observation({ miningOperation: assignment({ currentTarget: assigned }),
+    snapshot: snapshot([entity(1, "Asteroid Belt 1", 100_000), entity(2, "Asteroid Belt 2", 200_000)]) });
+  const mine = SCRIPT_MACROS["mine-at-belt"](minerBody[1] as MacroStep, world, {}, {});
+  assert.equal(mine.action.kind, "warp");
+  assert.equal(mine.action.kind === "warp" ? mine.action.targetID : null, 2);
+  const inSpaceUndock = SCRIPT_MACROS["undock"](haulerBody[0].else[0] as MacroStep,
+    { ...world, miningOperation: assignment({ role: "HAULER", currentTarget: assigned }) }, {}, {});
+  assert.equal(inSpaceUndock.outcome.kind, "done", "a hauler already in space can enter the standard profile");
+  const travel = SCRIPT_MACROS["travel-to-belt"](haulerBody[0].else[1] as MacroStep,
+    { ...world, miningOperation: assignment({ role: "HAULER", currentTarget: assigned }) }, {}, {});
+  assert.equal(travel.action.kind === "warp" ? travel.action.targetID : null, 2);
+});
+
 test("HAULER_SERVICE depletion forces a below-threshold partial dump before relocation", () => {
   const mine = SCRIPT_MACROS["mine-at-belt"];
   const world = observation({ snapshot: snapshot([entity(1, "Asteroid Belt 1")]), holds: oreHold([81, 82]) });
@@ -152,7 +174,8 @@ test("hauler completes its drain only after the old grid and freight are both em
   const loot = SCRIPT_MACROS["loot-containers"];
   const deliver = SCRIPT_MACROS["deliver-ore"];
   const hauler = assignment({ role: "HAULER", logisticsTarget: target({ state: "DRAINING" }) });
-  const clearGrid = loot(lootStep, observation({ miningOperation: hauler }), { emptyChecks: 30 }, {});
+  const clearGrid = loot(lootStep, observation({ miningOperation: hauler,
+    snapshot: snapshot([entity(1, "Asteroid Belt 1")]) }), { emptyChecks: 30 }, {});
   assert.equal(clearGrid.outcome.kind, "done");
   assert.equal(clearGrid.boardPatch?.miningDrainGridClear, hauler.logisticsTarget?.targetKey);
   const docked = observation({

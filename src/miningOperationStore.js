@@ -21,7 +21,7 @@ function cleanText(value, max = 100) {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }
 
-function normalizeDefinition(value, existing = null, now = () => new Date().toISOString(), uuid = crypto.randomUUID, resolveSystem = staticData.getSolarSystem) {
+function normalizeDefinition(value, existing = null, now = () => new Date().toISOString(), uuid = crypto.randomUUID, resolveSystem = staticData.getSolarSystem, resolveStation = staticData.getStation) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw fail("MINING_OPERATION_INVALID", "That is not a Mining Operation definition.");
   }
@@ -47,6 +47,22 @@ function normalizeDefinition(value, existing = null, now = () => new Date().toIS
   if (!REACH.has(reach)) throw fail("MINING_OPERATION_INVALID", "Choose a supported area reach.");
   if (targetClasses.length === 0) throw fail("MINING_OPERATION_INVALID", "Choose at least one target class.");
   if (!UNLOAD.has(unloadPolicy)) throw fail("MINING_OPERATION_INVALID", "Choose an unload policy.");
+  let unloadDestination = null;
+  if (value.unloadDestination != null) {
+    const stationID = Number(value.unloadDestination.stationID);
+    const division = Number(value.unloadDestination.corporationDivision);
+    const station = Number.isSafeInteger(stationID) && stationID > 0 ? resolveStation(stationID) : null;
+    if (!station || !station.stationName || !Number.isSafeInteger(division) || division < 1 || division > 7) {
+      throw fail("MINING_OPERATION_INVALID", "Choose a known unload station and corporation division 1–7.");
+    }
+    const stationSystem = resolveSystem(Number(station.solarSystemID));
+    if (!stationSystem?.solarSystemName) throw fail("MINING_OPERATION_INVALID", "The unload station has no known solar system.");
+    if (value.unloadDestination.stationName && cleanText(value.unloadDestination.stationName, 160) !== station.stationName) {
+      throw fail("MINING_OPERATION_INVALID", "Unload station name and ID do not match.");
+    }
+    unloadDestination = { stationID, stationName: station.stationName,
+      systemName: stationSystem.solarSystemName, corporationDivision: division };
+  }
   if (!Array.isArray(value.members) || value.members.length === 0) {
     throw fail("MINING_OPERATION_INVALID", "Add at least one pilot.");
   }
@@ -55,12 +71,15 @@ function normalizeDefinition(value, existing = null, now = () => new Date().toIS
     const characterID = Number(row?.characterID);
     const role = cleanText(row?.role).toUpperCase();
     const automationID = cleanText(row?.automationID, 160);
+    const routineMode = cleanText(row?.routineMode).toUpperCase() || (automationID ? "CUSTOM" : "STANDARD");
     const accountName = cleanText(row?.accountName, 120);
     if (!Number.isSafeInteger(characterID) || characterID <= 0 || seen.has(characterID)) {
       throw fail("MINING_OPERATION_INVALID", "Every member must be a different valid pilot.");
     }
     if (!ROLES.has(role)) throw fail("MINING_OPERATION_INVALID", "Every member needs an explicit role.");
-    if (!automationID && role !== "DEFENDER") throw fail("MINING_OPERATION_INVALID", "Executable members need an operation routine reference.");
+    if (!["STANDARD", "CUSTOM"].includes(routineMode)) throw fail("MINING_OPERATION_INVALID", "Choose Standard or Custom routine mode.");
+    if (routineMode === "CUSTOM" && !automationID && role !== "DEFENDER") throw fail("MINING_OPERATION_INVALID", "Custom members need an operation routine reference.");
+    if (routineMode === "STANDARD" && automationID) throw fail("MINING_OPERATION_INVALID", "A Standard member cannot also select a custom routine.");
     if (!accountName) throw fail("MINING_OPERATION_INVALID", "Every member needs its owning account reference.");
     seen.add(characterID);
     return {
@@ -68,6 +87,7 @@ function normalizeDefinition(value, existing = null, now = () => new Date().toIS
       characterName: cleanText(row.characterName, 120) || `Pilot ${characterID}`,
       accountName,
       role,
+      routineMode,
       automationID,
     };
   });
@@ -92,6 +112,7 @@ function normalizeDefinition(value, existing = null, now = () => new Date().toIS
     },
     targetPolicy: "ANY_ELIGIBLE",
     unloadPolicy,
+    unloadDestination,
     members,
     createdAt: existing?.createdAt || stamp,
     updatedAt: stamp,
@@ -103,6 +124,7 @@ function createMiningOperationStore(options) {
   const now = options.now || (() => new Date().toISOString());
   const uuid = options.uuid || (() => crypto.randomUUID());
   const resolveSystem = options.resolveSystem || staticData.getSolarSystem;
+  const resolveStation = options.resolveStation || staticData.getStation;
   const filePath = path.join(dataDir, STORE_FILENAME);
 
   function readAll() {
@@ -132,7 +154,7 @@ function createMiningOperationStore(options) {
     save(value) {
       const all = readAll();
       const index = all.findIndex((row) => row.operationID === String(value?.operationID || ""));
-      const definition = normalizeDefinition(value, index >= 0 ? all[index] : null, now, uuid, resolveSystem);
+      const definition = normalizeDefinition(value, index >= 0 ? all[index] : null, now, uuid, resolveSystem, resolveStation);
       if (index >= 0) all[index] = definition;
       else all.push(definition);
       writeAll(all);

@@ -1912,6 +1912,7 @@ export interface MiningOperationMemberDefinition {
   readonly characterName: string;
   readonly accountName: string;
   readonly role: "MINER" | "HAULER" | "DEFENDER";
+  readonly routineMode?: "STANDARD" | "CUSTOM";
   readonly automationID: string;
 }
 
@@ -1926,6 +1927,12 @@ export interface MiningOperationDefinition {
   };
   readonly targetPolicy: "ANY_ELIGIBLE";
   readonly unloadPolicy: "HAULER_SERVICE" | "SELF_UNLOAD";
+  readonly unloadDestination?: {
+    readonly stationID: number;
+    readonly stationName: string;
+    readonly systemName?: string;
+    readonly corporationDivision: number;
+  } | null;
   readonly members: readonly MiningOperationMemberDefinition[];
   readonly createdAt?: string;
   readonly updatedAt?: string;
@@ -1934,6 +1941,7 @@ export interface MiningOperationDefinition {
 export interface MiningOperationRuntime {
   readonly operationID: string;
   readonly state: string;
+  readonly statusReason?: string | null;
   readonly currentTarget: MiningOperationTarget | null;
   readonly members: readonly (MiningOperationMemberDefinition & {
     readonly runtimeState: string;
@@ -2011,6 +2019,19 @@ export async function listOperationRoutines(
   return (Array.isArray(data.routines) ? data.routines : []) as unknown as OperationRoutineSummary[];
 }
 
+export interface OperationLaunchPlanMember {
+  readonly characterID: number;
+  readonly routineMode: "STANDARD" | "CUSTOM";
+  readonly script: { readonly scriptID: string; readonly name: string; readonly rev: number; readonly doc: JsonValue };
+}
+
+export async function getMiningOperationLaunchPlan(operationID: string, options: ApiOptions = {}): Promise<{ readonly planHash: string; readonly warnings: readonly string[]; readonly members: readonly OperationLaunchPlanMember[] }> {
+  const data = await getJson(`/api/mining-operations/${encodeURIComponent(operationID)}/launch-plan`, options);
+  return { planHash: typeof data.planHash === "string" ? data.planHash : "",
+    warnings: (Array.isArray(data.warnings) ? data.warnings : []).filter((row): row is string => typeof row === "string"),
+    members: (Array.isArray(data.members) ? data.members : []) as unknown as OperationLaunchPlanMember[] };
+}
+
 export interface OperationPilotChoice {
   readonly accountName: string;
   readonly characterID: number;
@@ -2036,11 +2057,12 @@ export async function deleteMiningOperation(operationID: string, options: ApiOpt
 export async function startMiningOperation(
   operationID: string,
   grants: Readonly<Record<string, BotLaunchGrant>>,
+  planHash: string | null = null,
   options: ApiOptions = {},
 ): Promise<MiningOperationsPayload> {
   return miningOperationsPayload(await postJson(
     `/api/mining-operations/${encodeURIComponent(operationID)}/start`,
-    { grants: grants as unknown as JsonValue },
+    { grants: grants as unknown as JsonValue, planHash },
     options,
   ));
 }

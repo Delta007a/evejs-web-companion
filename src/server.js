@@ -4,7 +4,7 @@ const express = require("express");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
-const { randomUUID } = require("crypto");
+const { randomUUID, createHash } = require("crypto");
 // R17 mail: mailMgr.GetBody answers a zlib-DEFLATED buffer, and inflating it is
 // this file's job — see mailBodyText. The browser never sees a compressed byte.
 const zlib = require("zlib");
@@ -23,6 +23,7 @@ const { createLootMemory, CONTAINER_LEASE_MS } = require("./lootMemory");
 const { createBotLogStore } = require("./botLogStore");
 const { createMiningTargetBoard } = require("./miningTargetBoard");
 const { createMiningOperationStore } = require("./miningOperationStore");
+const { standardProfileFor, buildStandardProfile } = require("./miningOperationProfiles");
 const {
   createMiningOperations,
   auditMiningScript,
@@ -112,7 +113,13 @@ const botHost =
     // botHost.resume() once listening, so a BFF restart brings them back.
     persistPath: path.join(config.dataDir, "server-bots.json"),
     loadAccount: (username) => store.getAccount(username),
-    loadScript: (scriptID) => botScripts.get(scriptID),
+    loadScript: (scriptID, row) => {
+      if (!scriptID.startsWith("mcc.")) return botScripts.get(scriptID);
+      const def = miningOperationStore.get(row?.operationID);
+      const member = def?.members.find((candidate) => candidate.characterID === Number(row?.characterID));
+      const profile = member && buildStandardProfile(def, member);
+      return profile?.scriptID === scriptID ? profile : null;
+    },
     isCharacterHeld,
     errorLogger,
   });
@@ -129,7 +136,7 @@ app.locals.botScripts = botScripts;
 const beltMemory = options.beltMemory || createBeltMemory();
 app.locals.beltMemory = beltMemory;
 const miningTargetBoard = options.miningTargetBoard || createMiningTargetBoard();
-const miningOperationStore = options.miningOperationStore || createMiningOperationStore({ dataDir: config.dataDir, resolveSystem: (id) => staticData.getSolarSystem(id) });
+const miningOperationStore = options.miningOperationStore || createMiningOperationStore({ dataDir: config.dataDir, resolveSystem: (id) => staticData.getSolarSystem(id), resolveStation: (id) => staticData.getStation(id) });
 const miningOperations = options.miningOperations || createMiningOperations({
   store: miningOperationStore,
   targetBoard: miningTargetBoard,
@@ -20130,6 +20137,69 @@ app.post("/api/mining-operations/:operationID/delete", requireAuth, (req, res, n
   }
 });
 
+function prepareMiningOperationLaunch(definition) {
+  const selectedExecutable = definition.area.targetClasses.filter((kind) => EXECUTABLE_TARGET_CLASSES.includes(kind));
+  if (selectedExecutable.length === 0) return { ok: false, code: "NO_EXECUTABLE_TARGET_CLASS",
+    message: `The selected target classes are modeled but not executable yet: ${definition.area.targetClasses.join(", ")}.` };
+  const scripts = new Map();
+  const audits = new Map();
+  for (const member of definition.members) {
+    if (member.role === "DEFENDER") continue;
+    const mode = member.routineMode || (member.automationID ? "CUSTOM" : "STANDARD");
+    let script;
+    if (mode === "STANDARD") {
+      if (!standardProfileFor(definition, member)) return { ok: false, code: "STANDARD_OPERATION_PROFILE_UNAVAILABLE",
+        message: `${member.characterName}: No Standard profile exists for this target class, unload policy, and role. Choose a compatible Custom routine.` };
+      const destination = definition.unloadDestination;
+      const station = destination && staticData.getStation(destination.stationID);
+      if (!station || station.stationName !== destination.stationName ||
+          staticData.getSolarSystemName(Number(station.solarSystemID)) !== destination.systemName ||
+          !Number.isSafeInteger(destination.corporationDivision) || destination.corporationDivision < 1 || destination.corporationDivision > 7) {
+        return { ok: false, code: "STANDARD_UNLOAD_DESTINATION_REQUIRED",
+          message: "Standard Belt Hauler Service needs an explicit known unload station and corporation division 1–7. Edit the operation destination before Start." };
+      }
+      script = buildStandardProfile(definition, member);
+    } else {
+      script = botScripts.get(member.automationID);
+    }
+    if (!script) return { ok: false, code: "INCOMPATIBLE_OPERATION_ROUTINE",
+      message: `${member.characterName}: The referenced operation routine is unavailable.` };
+    scripts.set(member.characterID, script);
+    audits.set(member.characterID, auditMiningScript(script.doc));
+  }
+  const minerAudits = definition.members.filter((member) => member.role === "MINER")
+    .map((member) => audits.get(member.characterID)).filter(Boolean);
+  const hasHaulerService = definition.unloadPolicy === "HAULER_SERVICE" &&
+    definition.members.some((member) => member.role === "HAULER");
+  const commonClasses = selectedExecutable.filter((kind) => minerAudits.length > 0 &&
+    minerAudits.every((audit) => audit.targetClasses.includes(kind)) && (!hasHaulerService || kind === "BELT"));
+  if (commonClasses.length === 0) return { ok: false, code: "INCOMPATIBLE_OPERATION_ROUTINE",
+    message: "The member routines do not share an executable operation target class." };
+  for (const member of definition.members) {
+    if (member.role === "DEFENDER") continue;
+    const reason = operationRoutineCompatibility(definition, member.role, audits.get(member.characterID), commonClasses);
+    if (reason) return { ok: false, code: "INCOMPATIBLE_OPERATION_ROUTINE", message: `${member.characterName}: ${reason}` };
+  }
+  const planHash = createHash("sha256").update(JSON.stringify({ definition, scripts: [...scripts] })).digest("hex");
+  const warnings = definition.members.filter((member) => member.role === "DEFENDER")
+    .map((member) => `${member.characterName}: DEFENDER execution is not supported; Start will be DEGRADED.`);
+  return { ok: true, scripts, audits, commonClasses, planHash, warnings };
+}
+
+app.get("/api/mining-operations/:operationID/launch-plan", requireAuth, (req, res, next) => {
+  try {
+    const definition = miningOperations.definition(req.params.operationID);
+    if (!definition) { res.status(404).json({ ok: false, error: "MINING_OPERATION_NOT_FOUND" }); return; }
+    const plan = prepareMiningOperationLaunch(definition);
+    if (!plan.ok) { res.status(409).json({ ok: false, error: plan.code, message: plan.message }); return; }
+    res.json({ ok: true, planHash: plan.planHash, warnings: plan.warnings,
+      members: definition.members.filter((member) => member.role !== "DEFENDER").map((member) => ({
+      characterID: member.characterID, routineMode: member.routineMode || (member.automationID ? "CUSTOM" : "STANDARD"),
+      script: plan.scripts.get(member.characterID),
+    })) });
+  } catch (error) { next(error); }
+});
+
 app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, res, next) => {
   try {
     const definition = miningOperations.definition(req.params.operationID);
@@ -20141,48 +20211,16 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
       res.status(409).json({ ok: false, error: "MINING_OPERATION_INVALID", message: error.message });
       return;
     }
-    const selectedExecutable = definition.area.targetClasses.filter((kind) => EXECUTABLE_TARGET_CLASSES.includes(kind));
-    if (selectedExecutable.length === 0) {
-      res.status(409).json({
-        ok: false,
-        error: "NO_EXECUTABLE_TARGET_CLASS",
-        message: `The selected target classes are modeled but not executable yet: ${definition.area.targetClasses.join(", ")}.`,
-      });
+    const plan = prepareMiningOperationLaunch(definition);
+    if (!plan.ok) { res.status(409).json({ ok: false, error: plan.code, message: plan.message }); return; }
+    if (definition.members.some((member) => member.role !== "DEFENDER" &&
+        (member.routineMode || (member.automationID ? "CUSTOM" : "STANDARD")) === "STANDARD") &&
+        req.body?.planHash !== plan.planHash) {
+      res.status(409).json({ ok: false, error: "OPERATION_LAUNCH_PLAN_STALE",
+        message: "The Standard operation profile or destination changed since preflight. Review and Start again." });
       return;
     }
-    const scripts = new Map();
-    const audits = new Map();
-    for (const member of definition.members) {
-      const script = botScripts.get(member.automationID);
-      scripts.set(member.characterID, script);
-      if (script) audits.set(member.characterID, auditMiningScript(script.doc));
-    }
-    const minerAudits = definition.members
-      .filter((member) => member.role === "MINER")
-      .map((member) => audits.get(member.characterID))
-      .filter(Boolean);
-    const hasHaulerService = definition.unloadPolicy === "HAULER_SERVICE" &&
-      definition.members.some((member) => member.role === "HAULER");
-    const commonClasses = selectedExecutable.filter((kind) =>
-      minerAudits.length > 0 &&
-      minerAudits.every((audit) => audit.targetClasses.includes(kind)) &&
-      // Existing hauler automation reaches belts by static system data. It has
-      // no scanner-target travel block, so anomaly operations are currently a
-      // SELF_UNLOAD capability rather than a promise haulers cannot keep.
-      (!hasHaulerService || kind === "BELT"),
-    );
-    if (commonClasses.length === 0) {
-      res.status(409).json({ ok: false, error: "INCOMPATIBLE_OPERATION_ROUTINE", message: "The member routines do not share an executable operation target class." });
-      return;
-    }
-    for (const member of definition.members) {
-      if (member.role === "DEFENDER") continue; // Modeled role; its member row fails honestly below.
-      const reason = operationRoutineCompatibility(definition, member.role, audits.get(member.characterID), commonClasses);
-      if (reason) {
-        res.status(409).json({ ok: false, error: "INCOMPATIBLE_OPERATION_ROUTINE", message: `${member.characterName}: ${reason}`, characterID: member.characterID });
-        return;
-      }
-    }
+    const { scripts, audits, commonClasses } = plan;
     const begin = miningOperations.begin(definition.operationID, commonClasses);
     if (!begin.ok) {
       res.status(MINING_OPERATION_STATUS[begin.code] || 409).json(begin);

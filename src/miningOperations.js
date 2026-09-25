@@ -129,6 +129,10 @@ function createMiningOperations(options) {
       startedAt: null,
       stoppedAt: null,
       stopFailures: [],
+      authorityLoss: false,
+      tailClaimLoss: false,
+      recoveryAmbiguous: false,
+      completedTargetInRun: false,
     };
   }
 
@@ -178,13 +182,17 @@ function createMiningOperations(options) {
     runtime.startedAt = stamp(now);
     runtime.stoppedAt = null;
     runtime.stopFailures = [];
+    runtime.authorityLoss = false;
+    runtime.tailClaimLoss = false;
+    runtime.recoveryAmbiguous = false;
+    runtime.completedTargetInRun = false;
     for (const member of def.members) {
       runtime.members.set(member.characterID, {
         characterID: member.characterID,
         role: member.role,
         botID: null,
         runtimeState: "STARTING",
-        phase: "Starting saved automation",
+        phase: "Starting operation routine",
         reason: null,
         failureCode: null,
       });
@@ -245,6 +253,7 @@ function createMiningOperations(options) {
     const board = targetBoard.get(key);
     runtime.currentTarget = null;
     runtime.rendezvous = null;
+    runtime.authorityLoss = true;
     runtime.state = "DEGRADED";
     history(runtime, "TARGET_CLAIM_LOST", null, { targetKey: key,
       priorLeaseExpiresAt: previous.leaseExpiresAt ?? null,
@@ -256,6 +265,7 @@ function createMiningOperations(options) {
     const before = runtime.drainingTargets.length;
     runtime.drainingTargets = runtime.drainingTargets.filter((row) => row.target?.targetKey !== key);
     if (runtime.drainingTargets.length === before) return;
+    runtime.tailClaimLoss = true;
     runtime.state = "DEGRADED";
     history(runtime, "TARGET_CLAIM_LOST", null, { targetKey: key, logisticsTail: true });
   }
@@ -291,7 +301,7 @@ function createMiningOperations(options) {
     const runningMiners = [...runtime.members.values()].some(
       (member) => member.role === "MINER" && member.runtimeState === "RUNNING",
     );
-    runtime.state = failed ? "DEGRADED" : runningMiners ? "TRAVELING" : "DEGRADED";
+    runtime.state = failed ? "DEGRADED" : runningMiners ? "SELECTING" : "DEGRADED";
     return runtime;
   }
 
@@ -348,6 +358,7 @@ function createMiningOperations(options) {
     const result = targetBoard.reserve(operationID, candidate);
     if (result.acquired) {
       runtime.currentTarget = result.target;
+      runtime.authorityLoss = false;
       if (runtime.state !== "DEGRADED") runtime.state = "TRAVELING";
       history(runtime, "TARGET_RESERVED", result.target, null);
     }
@@ -410,6 +421,7 @@ function createMiningOperations(options) {
       beltMemory.markDry(target.systemName, target.targetName, null);
     }
     history(runtime, "TARGET_DEPLETED", target, proof);
+    runtime.completedTargetInRun = true;
     const required = [...runtime.members.values()]
       .filter((row) => row.role === "MINER" && ["RUNNING", "running"].includes(row.runtimeState))
       .map((row) => row.characterID);
@@ -556,9 +568,11 @@ function createMiningOperations(options) {
         row.runtimeState = bot.status;
         row.phase = bot.phase;
         row.reason = bot.why;
+        if (["running", "starting"].includes(bot.status)) row.failureCode = null;
       }
       if (runtime.state === "DRAFT" || runtime.state === "STOPPED") {
         runtime.state = "DEGRADED";
+        runtime.recoveryAmbiguous = true;
         runtime.startedAt = bot.startedAt;
         history(runtime, "RECOVERED_UNKNOWN", null, { reason: "botHost resumed without a trusted current target" });
       }
@@ -573,11 +587,33 @@ function createMiningOperations(options) {
     }
   }
 
+  function deriveState(def, runtime) {
+    if (["DRAFT", "ASSEMBLING", "STOPPING", "STOPPED"].includes(runtime.state)) return runtime.state;
+    const members = def.members.map((member) => runtime.members.get(member.characterID));
+    if (runtime.authorityLoss || runtime.tailClaimLoss || runtime.recoveryAmbiguous ||
+        members.some((row) => !row || row.runtimeState === "FAILED" ||
+          !["RUNNING", "running", "starting", "READY_FOR_RENDEZVOUS"].includes(row.runtimeState))) return "DEGRADED";
+    if (runtime.rendezvous?.kind === "SELF_UNLOAD") return "UNLOADING";
+    if (runtime.rendezvous?.kind === "MINER_CLEARANCE") return runtime.drainingTargets.length ? "DRAINING" : "RELOCATING";
+    if (runtime.currentTarget?.state === "ACTIVE") return "MINING";
+    if (runtime.drainingTargets.length || runtime.completedTargetInRun) return "RELOCATING";
+    return runtime.currentTarget?.state === "RESERVED" ? "TRAVELING" : "SELECTING";
+  }
+
   function publicRuntime(def, runtime) {
     const members = def.members.map((member) => ({ ...member, ...(runtime.members.get(member.characterID) || {}) }));
+    const unhealthy = members.find((member) => member.runtimeState === "FAILED" ||
+      !["RUNNING", "running", "starting", "READY_FOR_RENDEZVOUS"].includes(member.runtimeState));
+    const statusReason = runtime.state !== "DEGRADED" ? null : runtime.authorityLoss
+      ? "A target claim was lost; target-dependent work is gated until a new claim is reserved."
+      : runtime.tailClaimLoss ? "A logistics-tail claim was lost; its cleanup cannot be assumed complete."
+      : runtime.recoveryAmbiguous ? "Hosted members recovered without a trusted current target."
+      : unhealthy ? `${unhealthy.characterName}: ${unhealthy.reason || unhealthy.phase || "required member unavailable"}`
+      : "A required operation member is unavailable.";
     return {
       operationID: def.operationID,
       state: runtime.state,
+      statusReason,
       currentTarget: runtime.currentTarget,
       members,
       logisticsTail: runtime.drainingTargets.map((row) => ({
@@ -600,7 +636,11 @@ function createMiningOperations(options) {
   function list(bots = []) {
     reconcileBots(bots);
     renewHostedClaims(bots);
-    return store.list().map((def) => ({ definition: def, runtime: publicRuntime(def, runtimeFor(def.operationID)) }));
+    return store.list().map((def) => {
+      const runtime = runtimeFor(def.operationID);
+      runtime.state = deriveState(def, runtime);
+      return { definition: def, runtime: publicRuntime(def, runtime) };
+    });
   }
 
   function remove(operationID) {
