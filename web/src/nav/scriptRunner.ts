@@ -430,6 +430,11 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         board: memory.board,
       });
     } catch (error) {
+      record({
+        t: now(), kind: "read", run: runID, ok: false,
+        says: "script observation",
+        refusal: error instanceof Error ? error.message : String(error),
+      });
       if (deps.isSessionLost(error)) {
         setError(SESSION_LOST);
         return;

@@ -730,6 +730,48 @@ test("the running roster is mirrored to disk and cleared when the bot ends", asy
   assert.equal(readRosterFile(rosterPath).length, 0);
 });
 
+test("stopping one operation's hosted pilots leaves unrelated hosted sessions and claims alive", async () => {
+  const log = [];
+  const loggedOut = [];
+  const factory = makeFakeStack(log);
+  const host = makeHost({ log, loadStack: async () => {
+    const stack = await factory();
+    return { ...stack, createAppFlow(store, options) {
+      const flow = stack.createAppFlow(store, options);
+      let selectedCharacterID = null;
+      return { ...flow,
+        async selectCharacter(characterID) {
+          selectedCharacterID = characterID;
+          await flow.selectCharacter(characterID);
+        },
+        async logout() {
+          loggedOut.push(selectedCharacterID);
+          await flow.logout();
+        },
+      };
+    } };
+  } });
+  const started = [];
+  for (let index = 0; index < 6; index++) {
+    const characterID = 140000100 + index;
+    const result = await host.start({ ...START, characterID,
+      operationID: index < 3 ? "operation-a" : index === 5 ? "operation-b" : null,
+      operationRole: index < 3 ? "MINER" : null,
+    });
+    assert.equal(result.ok, true);
+    started.push(result.bot);
+  }
+  for (const bot of started.slice(0, 3)) {
+    assert.equal((await host.stop(bot.botID, bot.accountID)).ok, true);
+  }
+  assert.deepEqual(loggedOut.sort(), started.slice(0, 3).map((bot) => bot.characterID).sort());
+  for (const bot of started.slice(3)) {
+    assert.equal(host.claimedBy(bot.characterID), bot.botID);
+    assert.equal(host.listAll().find((row) => row.botID === bot.botID).endedAt, null);
+  }
+  await host.stopAll();
+});
+
 test("a Mining Operation association follows the exact hosted claim and persists without runtime target state", async () => {
   const rosterPath = tempRosterPath();
   const log = [];

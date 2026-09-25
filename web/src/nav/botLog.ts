@@ -47,6 +47,8 @@ export type BotLogKind =
   | "issue"
   /** How that call came back: ok, or the server's refusal. */
   | "result"
+  /** A failed observation; names the failed read and raw authority error. */
+  | "read"
   /** The run ended, and why. */
   | "end";
 

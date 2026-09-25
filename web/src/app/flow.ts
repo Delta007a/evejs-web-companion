@@ -5,6 +5,7 @@
 // it stays framework-agnostic and unit-testable under node:test.
 
 import { clearSessionToken } from "./sessionToken.ts";
+import { scriptObservationRead } from "./scriptObservationRead.ts";
 import { getCharacterSelectionData } from "../bridge/characterSelection.ts";
 import {
   getStationGuests,
@@ -9417,10 +9418,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       },
       observe: async (hint) => {
         const [flightStep, observation, targetsResult, holdsResult] = await Promise.all([
-          api.getFlightStatus(callOptions),
-          api.getScriptObservation(callOptions),
-          api.getTargets(callOptions),
-          api.getMiningHolds(callOptions),
+          scriptObservationRead("flight status", () => api.getFlightStatus(callOptions)),
+          scriptObservationRead("space and drones", () => api.getScriptObservation(callOptions)),
+          scriptObservationRead("locked targets", () => api.getTargets(callOptions)),
+          scriptObservationRead("ship holds", () => api.getMiningHolds(callOptions)),
         ]);
         // Both projections belong to this read, never a previous tick or command.
         // As before, this observer does not dispatch snapshot notifications.

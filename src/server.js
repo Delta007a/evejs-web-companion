@@ -15307,8 +15307,16 @@ async function readHeldFlight(held, webSessionID) {
     // reads (agents, inventory bind) would still target the select-time station
     // until a full re-login. Adopt a real docked station here; leave the last
     // station in place while in space (agents/inventory are docked-only). The
-    // active ship is owned by the board flow, so it is not synced here.
+    // active ship is owned by the board flow, so a known ship is not synced
+    // here. If selection omits shipID but a later flight read identifies it,
+    // fill only that initial null. Otherwise script observation and holds both
+    // reject NO_ACTIVE_SHIP forever. A later board/leave transition must retain
+    // its own ship authority.
     const flight = outcome && outcome.flight ? outcome.flight : {};
+    if (!held.activeShipID && !held.transition && !held.transitionReservation &&
+        Number.isSafeInteger(Number(flight.shipID)) && Number(flight.shipID) > 0) {
+      held.activeShipID = Number(flight.shipID);
+    }
     if (flight.docked === true && Number(flight.stationID) > 0) {
       held.stationID = Number(flight.stationID);
     }

@@ -492,10 +492,11 @@ test("repeated read failures give up with a plain reason", async () => {
   let fail = true;
   const issued: ScriptAction[] = [];
   const progress: ScriptRunnerSnapshot[] = [];
+  const lines: BotLogDraft[] = [];
   const runner = createScriptRunner({
     observe: async () => {
       if (fail) {
-        throw new Error("read failed"); // not a session loss
+        throw new BridgeCallError("NO_ACTIVE_SHIP", "ship holds: No active ship.", 409);
       }
       return calm();
     },
@@ -506,6 +507,7 @@ test("repeated read failures give up with a plain reason", async () => {
     isSessionLost: (e) => e instanceof SessionLost,
     registry,
     travelHome: home,
+    log: { write: (line) => { lines.push(line); } },
   });
   runner.start(script([macroStep("a", "undock")]));
   for (let i = 0; i < MAX_READ_FAILURES; i += 1) {
@@ -513,6 +515,8 @@ test("repeated read failures give up with a plain reason", async () => {
   }
   assert.equal(runner.getStatus(), "paused");
   assert.match(progress.at(-1)?.pauseReason ?? "", /several tries/i);
+  assert.deepEqual(lines.filter((line) => line.kind === "read").map((line) => line.refusal),
+    Array(MAX_READ_FAILURES).fill("ship holds: No active ship."));
 });
 
 test("stopping an unrelated in-flight world call does not wait for container coordination", async () => {

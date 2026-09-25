@@ -298,4 +298,27 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
   assert.equal(crewStart.response.status, 200);
   assert.equal(crewStart.payload.results.filter((row) => row.ok).length, 3);
   assert.ok(host.inputs.slice(-3).every((input) => input.callerSessionID === null));
+
+  // Stopping this fleet must not sweep unrelated hosted/recovered pilots or
+  // browser-held sessions, even when they belong to the same account.
+  const outsiders = [7004, 7005, 7006];
+  for (const [index, characterID] of outsiders.entries()) {
+    host.rows.push({
+      botID: `unrelated-${characterID}`, accountID: account.accountID, characterID,
+      operationID: index === 0 ? null : "another-operation",
+      resumedAt: index === 2 ? "2026-09-24T00:30:00.000Z" : null,
+      status: "running", endedAt: null,
+    });
+    heldSessions.set(`unrelated-session-${characterID}`, {
+      characterID, accountID: account.accountID, bridgeSessionID: `held-${characterID}`,
+    });
+  }
+  const stoppedBefore = host.stops.length;
+  const crewStopped = await request(baseUrl, `/api/mining-operations/${crewOperation.payload.definition.operationID}/stop`, {
+    method: "POST", token, body: {},
+  });
+  assert.equal(crewStopped.response.status, 200);
+  assert.deepEqual(host.stops.slice(stoppedBefore).sort(), crew.map((row) => `bot-${row.characterID}`).sort());
+  assert.ok(outsiders.every((characterID) => host.rows.find((row) => row.botID === `unrelated-${characterID}`).endedAt === null));
+  assert.ok(outsiders.every((characterID) => heldSessions.has(`unrelated-session-${characterID}`)));
 });

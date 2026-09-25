@@ -817,6 +817,49 @@ test("combined observation preserves controlled, owned lost, other-hull and fore
   assert.deepEqual(payload.inSpace, ordinary.payload.inSpace);
 });
 
+test("in-space select with no ship ID in its echo adopts the first authoritative flight ship", async () => {
+  const gateway = fakeGateway();
+  const originalSelect = gateway.selectCharacter.bind(gateway);
+  gateway.selectCharacter = async (...args) => {
+    const selected = await originalSelect(...args);
+    return { ...selected, session: { ...selected.session, shipID: null, stationID: null } };
+  };
+  const sessions = new Map();
+  const { baseUrl } = await startTestServer({ gateway, sessions });
+  await apiRequest(baseUrl, "/api/bridge/select", { method: "POST", body: { characterID: CHARACTER_ID } });
+  assert.equal(sessions.get(SESSION_ID).activeShipID, null);
+  const observed = await apiRequest(baseUrl, "/api/bridge/script/observation");
+  assert.equal(observed.response.status, 200);
+  assert.equal(observed.payload.activeShipID, SHIP_ID);
+  assert.equal(sessions.get(SESSION_ID).activeShipID, SHIP_ID);
+  const holds = await apiRequest(baseUrl, "/api/bridge/ship/ore-hold");
+  assert.equal(holds.response.status, 200);
+  assert.equal(holds.payload.activeShipID, SHIP_ID);
+});
+
+test("an actually unknown ship stays unreadable after flight; no ship is invented", async () => {
+  const gateway = fakeGateway();
+  const originalSelect = gateway.selectCharacter.bind(gateway);
+  gateway.selectCharacter = async (...args) => {
+    const selected = await originalSelect(...args);
+    return { ...selected, session: { ...selected.session, shipID: null } };
+  };
+  const originalFlight = gateway.readFlightStatus.bind(gateway);
+  gateway.readFlightStatus = async (...args) => {
+    const result = await originalFlight(...args);
+    return { ...result, flight: { ...result.flight, shipID: null } };
+  };
+  const { baseUrl } = await startTestServer({ gateway });
+  await apiRequest(baseUrl, "/api/bridge/select", { method: "POST", body: { characterID: CHARACTER_ID } });
+  const observed = await apiRequest(baseUrl, "/api/bridge/script/observation");
+  const holds = await apiRequest(baseUrl, "/api/bridge/ship/ore-hold");
+  assert.equal(observed.response.status, 409);
+  assert.equal(observed.payload.error, "NO_ACTIVE_SHIP");
+  assert.equal(holds.response.status, 409);
+  assert.equal(holds.payload.error, "NO_ACTIVE_SHIP");
+  assert.equal(gateway.calls.snapshot.length, 0);
+});
+
 test("combined observation distinguishes unreadable, empty and failed authority", async () => {
   const { gateway, baseUrl } = await inSpace();
   const read = gateway.readSpaceSnapshot.bind(gateway);
