@@ -1,7 +1,7 @@
 "use strict";
 
-const EXECUTABLE_TARGET_CLASSES = Object.freeze(["BELT"]);
-const DEFERRED_TARGET_CLASSES = Object.freeze(["ORE_ANOMALY", "ICE", "GAS"]);
+const EXECUTABLE_TARGET_CLASSES = Object.freeze(["BELT", "ORE_ANOMALY", "ICE"]);
+const DEFERRED_TARGET_CLASSES = Object.freeze(["GAS"]);
 const STOP_STATES = ["STOPPING", "PARKING", "PARKING_FAILED", "STOPPED"];
 
 function stamp(now) {
@@ -36,11 +36,11 @@ function auditMiningScript(doc) {
     const arg = row.args?.ores;
     return arg && arg.kind === "oreList" && Array.isArray(arg.ores) && arg.ores.length > 0;
   });
-  const belt = mineSteps.some((row) => row.args?.belt?.belt?.mode !== "site");
-  const oreAnomaly = names.has("warp-to-ore-anomaly") && mineSteps.some((row) => row.args?.belt?.belt?.mode === "site");
+  const resourceSteps = macros.filter(row => ["mine-at-belt", "travel-to-belt"].includes(row.macro));
+  const families = [...new Set(resourceSteps.map(row => row.args?.belt?.belt?.mode === "site" ? "ORE_ANOMALY" : row.args?.belt?.belt?.mode === "ice-site" ? "ICE" : "BELT"))];
   const siteMine = mineSteps.some((row) => row.args?.belt?.belt?.mode === "site");
   return {
-    targetClasses: [belt ? "BELT" : null, oreAnomaly ? "ORE_ANOMALY" : null].filter(Boolean),
+    targetClasses: families,
     hasOrePreference,
     miner: mineSteps.length > 0,
     hauler: names.has("travel-to-belt") && names.has("loot-containers") && names.has("deliver-ore"),
@@ -54,10 +54,9 @@ function auditMiningScript(doc) {
     invalidResourceMode: macros.some((row) => {
       if (row.macro !== "mine-at-belt" && row.macro !== "travel-to-belt") return false;
       const mode = row.args?.belt?.belt?.mode;
-      return row.macro === "travel-to-belt" ? mode !== "nearest" && mode !== "chosen"
-        : !["nearest", "site", "chosen"].includes(mode);
+      return !["nearest", "site", "ice-site", "chosen"].includes(mode);
     }),
-    mixedResourceFlow: (belt && siteMine) || (names.has("warp-to-ore-anomaly") !== siteMine),
+    mixedResourceFlow: families.length !== 1 || (names.has("warp-to-ore-anomaly") && !siteMine),
   };
 }
 
@@ -80,7 +79,7 @@ function operationRoutineCompatibility(definition, role, audit, executionClasses
   const competing = audit.macros.find((macro) => !allowed?.has(macro));
   if (competing) return `The ${competing} block is not operation-target-aware and may select a competing destination.`;
   if (role === "HAULER") {
-    if (!executionClasses.includes("BELT")) return "HAULER_SERVICE currently supports belt targets only.";
+    if (!audit.targetClasses.some(kind => executionClasses.includes(kind))) return "This HAULER routine cannot execute the operation's selected target family.";
     return audit.hauler ? null : "A HAULER routine needs Travel to belt, Loot containers, and Deliver ore blocks.";
   }
   if (!audit.miner) return "A MINER routine needs a Mine at a belt or ore site block.";
@@ -352,12 +351,18 @@ function createMiningOperations(options) {
       if (projected?.state === "DEPLETED" && projected.depletionEvidence?.source === "belt-memory") {
         targetBoard.clearDepleted(key);
       }
-    } else if (type === "ORE_ANOMALY") {
+    } else if (type === "ORE_ANOMALY" || type === "ICE") {
+      if (!Number.isSafeInteger(candidate.siteID) || candidate.siteID <= 0 ||
+          (candidate.instanceID != null && (!Number.isSafeInteger(candidate.instanceID) || candidate.instanceID <= 0)) ||
+          candidate.siteIdentity !== `site:${candidate.siteID}:instance:${candidate.instanceID ?? candidate.siteID}` ||
+          !candidate.position || ![candidate.position.x, candidate.position.y, candidate.position.z].every(Number.isFinite)) {
+        return { acquired: false, reason: "SITE_IDENTITY_UNAVAILABLE", target: null };
+      }
       // A scanner label that was confirmed absent and is visible again is
       // current authoritative evidence of a new site identity. Only that
       // disappearance proof resets; an empty rock grid may linger in the
       // scanner and must not be made claimable again merely because it lists.
-      const key = `ORE_ANOMALY:${systemID}:${String(candidate.targetName || "").trim()}`;
+      const key = `${type}:${systemID}:${candidate.siteIdentity}`;
       const projected = targetBoard.get(key);
       if (projected?.state === "DEPLETED" && projected.depletionEvidence?.scannerDisappeared === true) {
         targetBoard.clearDepleted(key);
@@ -404,6 +409,7 @@ function createMiningOperations(options) {
     // establishes the fleet-wide clearance barrier; later reports are the
     // individual confirmations that each miner has disposed of its remainder.
     if (runtime.rendezvous?.target?.targetKey === key) {
+      if (def.unloadPolicy === "HAULER_SERVICE" && evidence.partialDumpConfirmed !== true) return false;
       if (!runtime.rendezvous.ready.includes(Number(characterID))) {
         runtime.rendezvous.ready.push(Number(characterID));
       }
@@ -444,11 +450,11 @@ function createMiningOperations(options) {
         kind: "MINER_CLEARANCE",
         target: runtime.currentTarget,
         required,
-        // The reporting miner has already confirmed the forced partial dump.
-        ready: [Number(characterID)],
+        // Scanner disappearance proves depletion, not freight custody.
+        ready: evidence.partialDumpConfirmed === true ? [Number(characterID)] : [],
       };
-      member.runtimeState = "READY_FOR_RENDEZVOUS";
-      member.phase = "Clear of depleted target";
+      member.runtimeState = evidence.partialDumpConfirmed === true ? "READY_FOR_RENDEZVOUS" : "RUNNING";
+      member.phase = evidence.partialDumpConfirmed === true ? "Clear of depleted target" : "Clearing depleted target";
       if (runtime.state !== "DEGRADED") runtime.state = draining ? "DRAINING" : "RELOCATING";
       releaseRendezvousIfReady(runtime);
     } else {
@@ -478,6 +484,7 @@ function createMiningOperations(options) {
     const id = Number(characterID);
     const member = runtime?.members.get(id);
     if (!runtime || !member || member.role !== "HAULER") return false;
+    if (runtime.rendezvous?.target?.targetKey === targetKey && runtime.rendezvous.target.targetType !== "BELT") return false;
     if (!targetBoard.heartbeat(operationID, targetKey)) {
       loseDrainClaim(runtime, targetKey);
       return false;

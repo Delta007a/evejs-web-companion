@@ -1869,6 +1869,10 @@ export async function readMiningOperationAssignment(
 }
 
 export interface MiningTargetCandidate {
+  readonly siteIdentity?: string;
+  readonly siteID?: number;
+  readonly instanceID?: number | null;
+  readonly position?: import("../store/types.ts").SpaceVector;
   readonly targetType: MiningTargetType;
   readonly systemID: number;
   readonly systemName: string;
@@ -4652,6 +4656,11 @@ export async function warpToBookmark(
   options: ApiOptions = {},
 ): Promise<FlightStepResult> {
   return readFlightStep(await postJson("/api/bridge/flight/warp-bookmark", { bookmarkID, minRange }, options));
+}
+
+/** A two-day personal coordinate bookmark of THIS ship, for a site logistics tail. */
+export async function bookmarkMiningSiteLocation(shipID: number, folderID: number, name: string, comment: string, options: ApiOptions = {}): Promise<void> {
+  await postJson("/api/bridge/flight/bookmark-location", { itemID: shipID, folderID, name, comment, expiryMode: 2, confirm: true }, options);
 }
 
 /** Warp to a scanned site by its scan-signature label ("QEE-288"). */

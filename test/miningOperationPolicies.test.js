@@ -52,9 +52,9 @@ test("future policies have explicit defaults and cannot be silently enabled", ()
   assert.throws(() => normalize({ version: 2 }), /version/);
 });
 
-test("distinct profile families expose only BELT executable; Belt revisions and behavior remain pinned", () => {
+test("distinct families expose ore and ice but not gas; Belt revisions and behavior remain pinned", () => {
   const families = familyCapabilities();
-  assert.deepEqual(families.map(row => [row.family, row.executable]), [["BELT", true], ["ORE_ANOMALY", false], ["ICE", false], ["GAS", false]]);
+  assert.deepEqual(families.map(row => [row.family, row.executable]), [["BELT", true], ["ORE_ANOMALY", true], ["ICE", true], ["GAS", false]]);
   const def = { area: { targetClasses: ["BELT"] }, unloadPolicy: "HAULER_SERVICE",
     unloadDestination: { stationID: 60003760, stationName: "Home", systemName: "Jita", corporationDivision: 1 } };
   const miner = buildStandardProfile(def, { role: "MINER", routineMode: "STANDARD" });

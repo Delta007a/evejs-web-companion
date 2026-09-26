@@ -239,6 +239,8 @@ import {
   type SurveyMemory,
 } from "../nav/surveyScan.ts";
 import type { DryBelt, ScriptObservation } from "../nav/scriptConditions.ts";
+import { iceHoldFraction, iceMiningType, siteMiningFitRefusal } from "../nav/miningSite.ts";
+import { ensureSiteLogisticsBookmark } from "../nav/siteLogisticsBookmark.ts";
 import {
   THREAT_ATTRIBUTE_IDS,
   threatFromAttributes,
@@ -7385,7 +7387,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     for (const id of mining.filter(id => before.ship!.activeModuleIDs!.includes(id))) await api.deactivateModule(id, {}, callOptions);
     const after = decodeSpaceSnapshot((await api.getScriptObservation(callOptions)).space);
     if (after?.shipID !== flight.shipID || after?.ship?.activeModuleIDs == null || mining.some(id => after.ship!.activeModuleIDs!.includes(id))) {
-      throw new Error("Mining modules have not confirmed stopped; parking settlement is blocked.");
+      throw new Error("Mining modules have not confirmed stopped; parking settlement is blocked. Ice Harvesters and crystal miners may finish their current cycle first. Retry Stop after the modules stop; pilot control is retained.");
     }
   }
 
@@ -8849,6 +8851,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   interface ScriptModuleCapabilities {
     readonly shipID: number | null;
     readonly mining: readonly number[];
+    readonly iceMining: readonly number[];
+    readonly oreMining: readonly number[];
     readonly salvage: readonly number[];
     readonly defense: DefenseModuleIDs;
     readonly remoteReps: RemoteRepModuleIDs;
@@ -8994,9 +8998,21 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     // re-resolves every list above without re-asking a question whose answer a
     // module swap cannot have changed.
     const droneControlRangeM = await resolveDroneControlRange(fit);
+    let iceMining: number[] = [];
+    let oreMining: number[] = [];
+    if (options.miningOperationID && mining.length > 0) {
+      const modules = fit.slots.flatMap(slot => slot.module !== null && slot.module.online && mining.includes(slot.module.itemID) ? [slot.module] : []);
+      const facts: Readonly<Record<number, Readonly<Record<number, number>>>> = await api.fetchTypeDogma(modules.map(module => module.typeID), [77, 182, 183, 184, 1285, 1289, 1290], callOptions).catch(() => ({}));
+      iceMining = modules.filter(module => iceMiningType(facts[module.typeID])).map(module => module.itemID);
+      oreMining = modules.filter(module => (facts[module.typeID]?.[77] ?? 0) > 0 && !iceMiningType(facts[module.typeID]) &&
+        ["Mining Laser", "Strip Miner", "Frequency Mining Laser", "Citizen Mining Laser"].includes(store.names.get().resolved[nameKey("typeGroup", module.typeID)] ?? ""))
+        .map(module => module.itemID);
+    }
     return {
       shipID: fit.activeShipID,
       mining,
+      iceMining,
+      oreMining,
       salvage: resolveSalvageModuleIDs(),
       defense,
       remoteReps: resolveRemoteRepModuleIDs(),
@@ -9396,6 +9412,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     const miningOperationRequired = !parking && typeof options.miningOperationID === "string" && options.miningOperationID.length > 0;
     let miningOperationProbe: "unknown" | "member" | "none" = parking ? "none" : miningOperationRequired ? "member" : "unknown";
     const unavailableMiningTargets = new Map<string, number>();
+    const miningSiteBookmarks: Record<string, number> = {};
+    const siteBookmarkScope = `${options.miningOperationID}:${Date.now()}`;
     // The hunt's jump-distance table, computed once per home system (a full
     // breadth-first sweep over the gate graph is too much to redo every tick).
     let huntDistanceAnchor: number | null = null;
@@ -9748,6 +9766,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
                 ? []
                 : [{
                     label: site.targetID,
+                    siteID: Number.isSafeInteger(Number(site.siteID)) && Number(site.siteID) > 0 ? Number(site.siteID) : null,
+                    instanceID: Number.isSafeInteger(Number(site.fields["instanceID"])) && Number(site.fields["instanceID"]) > 0 ? Number(site.fields["instanceID"]) : null,
                     kind: siteKind(site.fields["scanStrengthAttribute"], site.fields["archetypeID"]),
                     archetypeID:
                       typeof site.fields["archetypeID"] === "number"
@@ -10276,7 +10296,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           armorRatio: ship?.armorRatio ?? null,
           hullRatio: ship?.hullRatio ?? null,
           health: lowestHealth(snapshot),
-          oreHoldFraction,
+          oreHoldFraction: (miningOperation?.logisticsTarget ?? miningOperation?.currentTarget)?.targetType === "ICE" ||
+            (miningOperation?.area.targetClasses.length === 1 && miningOperation.area.targetClasses[0] === "ICE") ? iceHoldFraction(holds) : oreHoldFraction,
           holdEmpty,
           hostileOnGrid,
           dronesOut,
@@ -10292,6 +10313,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           salvageDroneIDs: droneRoles.out?.salvage ?? null,
           unclassifiedDroneBayItemIDs: droneRoles.bay?.unknown ?? null,
           miningModuleIDs: capabilities.mining,
+          iceMiningModuleIDs: capabilities.iceMining,
+          oreMiningModuleIDs: capabilities.oreMining,
+          miningSiteBookmarks,
           salvageModuleIDs: capabilities.salvage,
           shieldRepairerIDs: capabilities.defense.shield,
           armorRepairerIDs: capabilities.defense.armor,
@@ -10496,13 +10520,31 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
               systemID: action.systemID,
               systemName: action.systemName,
               targetName: action.targetName,
+              siteIdentity: action.siteIdentity,
+              siteID: action.siteID,
+              instanceID: action.instanceID,
+              position: action.position,
             }, callOptions)) {
               unavailableMiningTargets.set(
-                `${action.targetType}:${action.systemID}:${action.targetName}`,
+                `${action.targetType}:${action.systemID}:${action.siteIdentity ?? action.targetName}`,
                 Date.now() + 35_000,
               );
             }
             return;
+          case "bookmarkMiningSite": {
+            // Revalidate ownership at the write boundary, without reading space.
+            const assignment = await api.readMiningOperationAssignment(callOptions);
+            const target = assignment?.logisticsTarget ?? assignment?.currentTarget;
+            const shipID = capabilityCache.peek().shipID;
+            if (assignment?.stopRequested || assignment?.role !== "HAULER" || target?.targetKey !== action.targetKey || target.claimedByOperationID !== assignment.operationID || !shipID) {
+              throw new Error("SITE_TARGET_AUTHORITY_LOST: cannot save a logistics return point.");
+            }
+            miningSiteBookmarks[action.targetKey] = await ensureSiteLogisticsBookmark(target, siteBookmarkScope, shipID, {
+              read: async () => decodeActiveBookmarks(await api.loadActiveBookmarks(callOptions)),
+              create: (id, folder, name, note) => api.bookmarkMiningSiteLocation(id, folder, name, note, callOptions),
+            });
+            return;
+          }
           case "activateMiningTarget":
             await api.activateMiningOperationTarget(action.targetKey, callOptions);
             return;
@@ -10888,6 +10930,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     // Seed the fitted-module cache. The runner refreshes it after a refit or
     // active-hull change; this first read only keeps tick one honest.
     const initialCapabilities = await resolveScriptModuleCapabilities();
+    if (options.miningOperationID) {
+      const refusal = siteMiningFitRefusal(doc, initialCapabilities.oreMining, initialCapabilities.iceMining);
+      if (refusal) throw Object.assign(new Error(refusal), { code: refusal.split(":")[0] });
+    }
     if (gen !== customBotGeneration) {
       return; // a newer start / a stop / a panic superseded us during the read
     }

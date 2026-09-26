@@ -62,6 +62,7 @@ import {
 // ─── The one action a tick emits ─────────────────────────────────────────────
 
 export type ScriptAction =
+  | { readonly kind: "bookmarkMiningSite"; readonly targetKey: string }
   | { readonly kind: "haulTransfer"; readonly itemID: number; readonly quantity: number; readonly from: import("../store/types.ts").InventoryPlace; readonly to: import("../store/types.ts").InventoryPlace; readonly stationID: number; readonly typeID: number; readonly sourceQuantity: number }
   | { readonly kind: "wait" }
   | { readonly kind: "undock" }
@@ -208,7 +209,11 @@ export type ScriptAction =
   /** Stored Mining Operation coordination. None of these actions reads space. */
   | {
       readonly kind: "reserveMiningTarget";
-      readonly targetType: "BELT" | "ORE_ANOMALY";
+      readonly targetType: "BELT" | "ORE_ANOMALY" | "ICE";
+      readonly siteIdentity?: string;
+      readonly siteID?: number;
+      readonly instanceID?: number | null;
+      readonly position?: import("../store/types.ts").SpaceVector;
       readonly systemID: number;
       readonly systemName: string;
       readonly targetName: string;
@@ -954,11 +959,11 @@ export function activeStepToursOreSites(script: BotScript, mem: ScriptMemory): b
     return false;
   }
   const step = activeStep(script, mem.position);
-  if (step === undefined || step === null || step.macro !== "mine-at-belt") {
+  if (step === undefined || step === null || !["mine-at-belt", "travel-to-belt"].includes(step.macro)) {
     return false;
   }
   const belt = step.args["belt"];
-  return belt !== undefined && belt.kind === "belt" && belt.belt.mode === "site";
+  return belt !== undefined && belt.kind === "belt" && ["site", "ice-site"].includes(belt.belt.mode);
 }
 
 /**
@@ -1109,7 +1114,12 @@ export function decideScriptAction(
   const picked = operationHeld ? null :
     (base.action.kind === "activate" || base.action.kind === "lock" ? base.action.targetID :
       step === null ? null : base.memory.macroMem[step.id]?.["rockID"]);
-  const rockID = typeof picked === "number" && rocks.some(r => r.itemID === picked) ? picked : null;
+  // Ice uses the existing defensive flight, but never orders ordinary Mining
+  // Drones to harvest ice. A null rock target also prevents mining-flight launch.
+  const resourceArg = step?.args["belt"];
+  const ice = obs.miningOperation?.currentTarget?.targetType === "ICE" ||
+    (resourceArg?.kind === "belt" && resourceArg.belt.mode === "ice-site");
+  const rockID = !ice && typeof picked === "number" && rocks.some(r => r.itemID === picked) ? picked : null;
   const flight = decideMiningDroneFlight(
     obs.snapshot == null || obs.hostileOnGrid === null ? null : obs.miningDrones ?? null,
     mem.miningFlight ?? freshDroneMemory(), hostileID, rockID, leaving,

@@ -30,11 +30,11 @@ test("direct Command Center route mounts its own shell, not App or pilot session
 
 test("unsupported target and defender execution are explicit, not false capabilities", () => {
   const source = readFileSync(new URL("./MiningOperations.svelte", import.meta.url), "utf8");
-  assert.match(source, /Ice — not supported yet/);
+  assert.match(source, /Ice — online Ice Harvesters required/);
   assert.match(source, /Gas — not supported yet/);
   assert.match(source, /Defender — execution not supported/);
   assert.match(source, /dynamic discovery deferred/);
-  assert.match(source, /bind:checked=\{oreAnomaly\} disabled/);
+  assert.match(source, /bind:group=\{targetFamily\} value="ORE_ANOMALY"/);
 });
 
 test("Fleet Parking uses an explicit station and defaults old definitions to Stay", () => {
@@ -83,8 +83,9 @@ test("normal BELT setup defaults to Standard profiles and keeps Custom as Advanc
   assert.match(source, /routineMode: "STANDARD"/);
   assert.match(source, /Standard \/ Automatic/);
   assert.match(source, /Custom \/ Advanced/);
-  assert.match(source, /Belt Miner \/ Hauler Service/);
-  assert.match(source, /Belt Hauler/);
+  assert.match(source, /\$\{label\} Miner \/ Hauler Service/);
+  assert.match(source, /\$\{label\} Hauler/);
+  assert.match(source, /family === "BELT" \? "Belt"/);
   assert.match(source, /getMiningOperationLaunchPlan/);
   assert.match(source, /findMapLocations\(value\.trim\(\), "station"/);
   assert.match(source, /Corporation division/);

@@ -95,6 +95,9 @@ function normalizeDefinition(value, existing = null, now = () => new Date().toIS
   if (!members.some((member) => member.role === "MINER")) {
     throw fail("MINING_OPERATION_INVALID", "A Mining Operation needs at least one MINER.");
   }
+  if (members.some(member => member.routineMode === "STANDARD") && targetClasses.length !== 1) {
+    throw fail("MINING_OPERATION_INVALID", "Standard operations require exactly one target family.");
+  }
   if (unloadPolicy === "HAULER_SERVICE" && !members.some((member) => member.role === "HAULER")) {
     throw fail("MINING_OPERATION_INVALID", "Hauler service needs at least one HAULER member.");
   }

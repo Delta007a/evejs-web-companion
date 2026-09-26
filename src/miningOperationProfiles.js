@@ -12,11 +12,33 @@ const PROFILES = Object.freeze({
 // a belt routine merely because they share a member role.
 const PROFILE_FAMILIES = Object.freeze({
   BELT: { family: "BELT", executable: true, profiles: PROFILES, build: buildBeltProfile },
-  ORE_ANOMALY: { family: "ORE_ANOMALY", executable: false, profiles: {}, reason: "Ore Anomaly profiles are not implemented." },
-  ICE: { family: "ICE", executable: false, profiles: {}, reason: "Ice profiles are not implemented." },
+  ORE_ANOMALY: { family: "ORE_ANOMALY", executable: true, profiles: siteProfiles("ore-anomaly", "Ore Anomaly"), build: buildOreAnomalyProfile },
+  ICE: { family: "ICE", executable: true, profiles: siteProfiles("ice", "Ice"), build: buildIceProfile },
   GAS: { family: "GAS", executable: false, profiles: {}, reason: "Gas profiles are not implemented." },
 });
 const familyCapabilities = () => Object.values(PROFILE_FAMILIES).map(({ build, ...metadata }) => metadata);
+
+function siteProfiles(id, name) {
+  return Object.freeze({
+    MINER: { scriptID: `mcc.${id}.hauler-service.miner`, name: `${name} Miner / Hauler Service`, rev: 1 },
+    HAULER: { scriptID: `mcc.${id}.hauler-service.hauler`, name: `${name} Hauler`, rev: 1 },
+  });
+}
+
+function buildOreAnomalyProfile(definition, member) { return buildSiteProfile(definition, member, "site"); }
+function buildIceProfile(definition, member) { return buildSiteProfile(definition, member, "ice-site"); }
+
+// Shared freight/control structure, distinct versioned semantic profiles. The
+// site modes have operation-only travel authority and never select a belt.
+function buildSiteProfile(definition, member, mode) {
+  const result = buildHaulerServiceDocument(definition, member);
+  if (!result) return null;
+  result.doc.notes = `MCC standard ${definition.area.targetClasses[0]} profile. Operation target authority only.`;
+  const body = result.doc.program[0].body;
+  const step = member.role === "MINER" ? body[1] : body[0].else[1];
+  step.args.belt.belt.mode = mode;
+  return result;
+}
 
 function standardProfileFor(definition, member) {
   if ((member?.routineMode || (member?.automationID ? "CUSTOM" : "STANDARD")) !== "STANDARD" || definition?.unloadPolicy !== "HAULER_SERVICE" ||
@@ -31,6 +53,10 @@ function buildStandardProfile(definition, member) {
 }
 
 function buildBeltProfile(definition, member) {
+  return buildHaulerServiceDocument(definition, member);
+}
+
+function buildHaulerServiceDocument(definition, member) {
   const profile = standardProfileFor(definition, member);
   if (!profile) return null;
   const destination = definition.unloadDestination;

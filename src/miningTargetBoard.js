@@ -2,7 +2,7 @@
 
 // One process-wide coordination authority for every Mining Operation. Targets
 // are keyed by stable facts that another pilot can observe too: system id plus
-// belt name or scanner label. Claims are synchronous check-and-set operations
+// belt name or authoritative site/instance identity. Claims are synchronous check-and-set operations
 // in the BFF event loop and are bounded by a renewable lease.
 
 const DEFAULT_CLAIM_LEASE_MS = 30_000;
@@ -34,6 +34,7 @@ function createMiningTargetBoard(options = {}) {
       systemID: entry.systemID,
       systemName: entry.systemName,
       targetName: entry.targetName,
+      ...(entry.siteIdentity ? { siteIdentity: entry.siteIdentity, siteID: entry.siteID, instanceID: entry.instanceID, position: { ...entry.position } } : {}),
       state: entry.state,
       claimedByOperationID: entry.claimedByOperationID,
       claimedAt: entry.claimedAt,
@@ -67,7 +68,7 @@ function createMiningTargetBoard(options = {}) {
   // Atomic in one synchronous turn: no read/await/write gap exists here.
   function reserve(operationID, target) {
     const owner = text(operationID);
-    const key = targetKey(target?.targetType, target?.systemID, target?.targetName);
+    const key = targetKey(target?.targetType, target?.systemID, target?.siteIdentity || target?.targetName);
     if (!owner || !key) return { acquired: false, reason: "INVALID_TARGET", target: null };
     let entry = entries.get(key);
     if (entry) expire(entry);
@@ -85,6 +86,7 @@ function createMiningTargetBoard(options = {}) {
         systemID: Number(target.systemID),
         systemName: text(target.systemName) || null,
         targetName: text(target.targetName),
+        ...(target.siteIdentity ? { siteIdentity: target.siteIdentity, siteID: target.siteID, instanceID: target.instanceID, position: { ...target.position } } : {}),
         state: "AVAILABLE",
         claimedByOperationID: null,
         claimedAt: null,
@@ -94,6 +96,12 @@ function createMiningTargetBoard(options = {}) {
         depletedAt: null,
       };
       entries.set(key, entry);
+    }
+    if (target.siteIdentity && entry.claimedByOperationID === null) {
+      // A confirmed reappearance can reuse identity; use THIS observation's
+      // position/warp handle, never the previous incarnation's coordinates.
+      entry.position = { ...target.position };
+      entry.targetName = text(target.targetName);
     }
     entry.state = "RESERVED";
     entry.claimedByOperationID = owner;

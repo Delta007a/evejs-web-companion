@@ -381,7 +381,9 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
   const parkedDef = await request(baseUrl, "/api/mining-operations", { method: "POST", token,
     body: { ...standardInput, policies: { parking } } });
   assert.equal(parkedDef.response.status, 200);
-  assert.equal(parkedDef.payload.capabilities.targetClasses.ORE_ANOMALY.executable, false);
+  assert.equal(parkedDef.payload.capabilities.targetClasses.ORE_ANOMALY.executable, true);
+  assert.equal(parkedDef.payload.capabilities.targetClasses.ICE.executable, true);
+  assert.equal(parkedDef.payload.capabilities.targetClasses.GAS.executable, false);
   assert.equal(parkedDef.payload.capabilities.profileFamilies.length, 4);
   const parkID = parkedDef.payload.definition.operationID;
   const parkPlan = await request(baseUrl, `/api/mining-operations/${parkID}/launch-plan`, { token });
@@ -397,4 +399,12 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
   assert.ok(outsiders.every(id => host.rows.find(row => row.characterID === id).endedAt === null));
   const repeated = await request(baseUrl, `/api/mining-operations/${parkID}/stop`, { method: "POST", token, body: {} });
   assert.equal(repeated.response.status, 202);
+  for (const [family, profileID] of [["ORE_ANOMALY", "ore-anomaly"], ["ICE", "ice"]]) {
+    const savedFamily = await request(baseUrl, "/api/mining-operations", { method: "POST", token,
+      body: { ...standardInput, area: { ...standardInput.area, targetClasses: [family] } } });
+    assert.equal(savedFamily.response.status, 200);
+    const familyPlan = await request(baseUrl, `/api/mining-operations/${savedFamily.payload.definition.operationID}/launch-plan`, { token });
+    assert.equal(familyPlan.response.status, 200, JSON.stringify(familyPlan.payload));
+    assert.ok(familyPlan.payload.members.every(row => row.script.scriptID.startsWith(`mcc.${profileID}.hauler-service.`)));
+  }
 });

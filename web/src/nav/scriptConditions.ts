@@ -53,9 +53,11 @@ import type { PropulsionModule } from "./propulsion.ts";
  * guess (see scanner/siteKind.ts).
  */
 export interface ScannedAnomaly {
+  readonly siteID?: number | null;
+  readonly instanceID?: number | null;
   readonly label: string;
   readonly kind: ExplorationSiteKind;
-  /** Raw scanner archetype, retained so operation policy can keep ICE disabled. */
+  /** Raw scanner archetype: ore sites (27) and Ice sites (28) are distinct families. */
   readonly archetypeID?: number | null;
   /**
    * Where the site sits in this solar system, in metres — the scanner row's own
@@ -80,6 +82,10 @@ export type MiningOperationRole = "MINER" | "HAULER" | "DEFENDER";
 export type MiningTargetType = "BELT" | "ORE_ANOMALY" | "ICE" | "GAS";
 
 export interface MiningOperationTarget {
+  readonly siteIdentity?: string;
+  readonly siteID?: number;
+  readonly instanceID?: number | null;
+  readonly position?: SpaceVector;
   readonly targetKey: string;
   readonly targetType: MiningTargetType;
   readonly systemID: number;
@@ -179,6 +185,9 @@ export function pickAdvertisedFleet(
 }
 
 export interface ScriptObservation {
+  readonly miningSiteBookmarks?: Readonly<Record<string, number>>;
+  readonly iceMiningModuleIDs?: readonly number[] | null;
+  readonly oreMiningModuleIDs?: readonly number[] | null;
   readonly haulDivisions?: Readonly<Record<number, readonly import("../store/types.ts").InventoryItemRow[] | null>> | null;
   readonly miningDrones?: MiningDroneState | null;
   /** Transient contention, never a refusal or evidence that a can is empty. */

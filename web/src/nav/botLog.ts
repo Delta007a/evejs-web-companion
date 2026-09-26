@@ -202,6 +202,8 @@ export function describeAction(action: ScriptAction): string {
       return `note ${action.beltName} in ${action.systemName} dry${action.groupID === null ? "" : ` of group ${action.groupID}`}`;
     case "reserveMiningTarget":
       return `reserve operation target ${action.targetName} in ${action.systemName}`;
+    case "bookmarkMiningSite":
+      return `confirm temporary logistics return point for ${action.targetKey}`;
     case "activateMiningTarget":
       return `activate operation target ${action.targetKey}`;
     case "depleteMiningTarget":

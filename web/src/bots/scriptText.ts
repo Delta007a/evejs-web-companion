@@ -72,6 +72,7 @@ function corpDivisionPhrase(division: number, name: string | null): string {
 }
 
 function beltPhrase(belt: BeltArg): string {
+  if (belt.mode === "ice-site") return "the operation's Ice site";
   if (belt.mode === "nearest") {
     return "the nearest belt";
   }

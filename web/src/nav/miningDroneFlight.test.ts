@@ -26,6 +26,17 @@ test("normal flight launches the mining stack then mines the selected asteroid",
   const out = [11, 12, 13, 14, 15].map(id => drone(id));
   assert.deepEqual(tick(state(out)).action, { kind: "mineDrones", droneIDs: out.map(d => d.itemID), targetID: 90 });
 });
+
+test("Ice's null mining target retains defensive combat flight without ever launching ore drones", () => {
+  const tick = driver();
+  assert.equal(tick(state(), null, null).action, null);
+  assert.deepEqual(tick(state(), 80, null).action, { kind: "launch", drones: [{ itemID: 2, quantity: 5 }] });
+  const combat = [drone(21, 100, 80, "fighting")];
+  tick(state(combat), null, null);
+  tick(state(combat), null, null);
+  assert.equal(tick(state(combat), null, null).action?.kind, "recallDrones");
+  for (let i = 0; i < 5; i++) assert.equal(tick(state(), null, null).action, null);
+});
 test("a correctly mining flight causes neither launch nor order spam", () => {
   const tick = driver();
   for (let i = 0; i < 12; i++) assert.equal(tick(state([drone(11, 101, 90, "mining")], 1)).action, null);

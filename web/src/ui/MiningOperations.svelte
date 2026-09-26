@@ -41,8 +41,7 @@
   let systemMatches = $state<readonly { id: number; name: string }[]>([]);
   let systemLookupSerial = 0;
   let reach = $state<"CURRENT_SYSTEM" | "CURRENT_AND_ADJACENT">("CURRENT_SYSTEM");
-  let belt = $state(true);
-  let oreAnomaly = $state(false);
+  let targetFamily = $state<"BELT" | "ORE_ANOMALY" | "ICE" | "GAS">("BELT");
   let unloadPolicy = $state<"HAULER_SERVICE" | "SELF_UNLOAD">("HAULER_SERVICE");
   let unloadStationID = $state(0);
   let unloadStationName = $state("");
@@ -66,14 +65,15 @@
   let roster = $state<OperationPilotChoice[]>(loadKnownCharacters().map(({ accountName, characterID, characterName }) => ({ accountName, characterID, characterName })));
 
   const prefs = $derived(loadHangarPrefs());
-  const selectedClasses = $derived([...(belt ? ["BELT" as const] : []), ...(oreAnomaly ? ["ORE_ANOMALY" as const] : [])]);
+  const selectedClasses = $derived([targetFamily]);
   const anchorValid = $derived(anchorSystemID > 0 && anchorSystemName.length > 0 && anchorError === null);
-  const standardAvailable = $derived(selectedClasses.length === 1 && selectedClasses[0] === "BELT" && unloadPolicy === "HAULER_SERVICE");
+  const standardAvailable = $derived(targetFamily !== "GAS" && unloadPolicy === "HAULER_SERVICE");
 
   function modeOf(member: DraftMember): "STANDARD" | "CUSTOM" { return member.routineMode ?? (member.automationID ? "CUSTOM" : "STANDARD"); }
-  function profileName(member: DraftMember): string {
+  function profileName(member: DraftMember, family: string = targetFamily): string {
     if (modeOf(member) === "CUSTOM") return scripts.find((script) => script.scriptID === member.automationID)?.name ?? "Custom routine";
-    return member.role === "MINER" ? "Belt Miner / Hauler Service · v2" : member.role === "HAULER" ? "Belt Hauler · v1" : "Not yet executable";
+    const label = family === "BELT" ? "Belt" : family === "ORE_ANOMALY" ? "Ore Anomaly" : family === "ICE" ? "Ice" : null;
+    return label === null || member.role === "DEFENDER" ? "Not yet executable" : member.role === "MINER" ? `${label} Miner / Hauler Service · v${family === "BELT" ? 2 : 1}` : `${label} Hauler · v1`;
   }
 
   function words(cause: unknown): string {
@@ -232,8 +232,7 @@
     anchorSystemName = "";
     anchorError = "Select a known solar system.";
     reach = "CURRENT_SYSTEM";
-    belt = true;
-    oreAnomaly = false;
+    targetFamily = "BELT";
     unloadPolicy = "HAULER_SERVICE";
     unloadStationID = 0;
     unloadStationName = "";
@@ -259,8 +258,7 @@
     anchorSystemName = definition.area.anchorSystemName ?? "";
     anchorError = anchorSystemName ? null : "Resolve this solar system before saving.";
     reach = definition.area.reach;
-    belt = definition.area.targetClasses.includes("BELT");
-    oreAnomaly = definition.area.targetClasses.includes("ORE_ANOMALY");
+    targetFamily = definition.area.targetClasses[0] ?? "BELT";
     unloadPolicy = definition.unloadPolicy;
     unloadStationID = definition.unloadDestination?.stationID ?? 0;
     unloadStationName = definition.unloadDestination?.stationName ?? "";
@@ -426,10 +424,10 @@
         </select>
       </label>
       <fieldset>
-        <legend>Eligible targets — any eligible resource</legend>
-        <label><input type="checkbox" bind:checked={belt} /> Belts</label>
-        <label class="disabled"><input type="checkbox" bind:checked={oreAnomaly} disabled /> Ore anomalies — profile family not implemented</label>
-        <label class="disabled"><input type="checkbox" disabled /> Ice — not supported yet</label>
+        <legend>Target family — any eligible resource in this family</legend>
+        <label><input type="radio" bind:group={targetFamily} value="BELT" /> Asteroid Belt</label>
+        <label><input type="radio" bind:group={targetFamily} value="ORE_ANOMALY" /> Ore Anomaly</label>
+        <label><input type="radio" bind:group={targetFamily} value="ICE" /> Ice — online Ice Harvesters required</label>
         <label class="disabled"><input type="checkbox" disabled /> Gas — not supported yet</label>
       </fieldset>
       <fieldset>
@@ -440,7 +438,7 @@
       {#if unloadPolicy === "HAULER_SERVICE"}
         <div class="destination">
           <h4>Hauler delivery destination</h4>
-          <p class="muted">Standard Belt Hauler requires a known station and corporation division, even when pilots start in space.</p>
+          <p class="muted">Standard Hauler requires a known station and corporation division, even when pilots start in space.</p>
           <label>Unload station <input value={unloadStationName} oninput={(event) => void searchStation(event.currentTarget.value)} placeholder="Search stations" autocomplete="off" /></label>
           {#if stationMatches.length > 0}<div class="system-matches" role="listbox" aria-label="Matching stations">
             {#each stationMatches as station (station.id)}<button type="button" role="option" aria-selected="false" onclick={() => chooseStation(station)}>{station.name} · {station.systemName}</button>{/each}
@@ -554,7 +552,7 @@
       {/each}
       <table>
         <thead><tr><th>Pilot</th><th>Role</th><th>Assignment</th><th>Bot state</th><th>Phase</th></tr></thead>
-        <tbody>{#each row.runtime.members as member (member.characterID)}<tr><td>{member.characterName}</td><td>{member.role}</td><td>{modeOf(member) === "STANDARD" && (row.definition.unloadPolicy !== "HAULER_SERVICE" || row.definition.area.targetClasses.length !== 1 || row.definition.area.targetClasses[0] !== "BELT") ? "Standard unavailable" : profileName(member)}</td><td>{member.runtimeState}</td><td>{member.runtimeState === "FAILED" ? `${member.failureCode ? `${member.failureCode}: ` : ""}${member.reason ?? member.phase ?? "Unavailable"}` : member.phase ?? member.reason ?? "—"}</td></tr>{/each}</tbody>
+        <tbody>{#each row.runtime.members as member (member.characterID)}<tr><td>{member.characterName}</td><td>{member.role}</td><td>{modeOf(member) === "STANDARD" && (row.definition.unloadPolicy !== "HAULER_SERVICE" || row.definition.area.targetClasses.length !== 1) ? "Standard unavailable" : profileName(member, row.definition.area.targetClasses[0])}</td><td>{member.runtimeState}</td><td>{member.runtimeState === "FAILED" ? `${member.failureCode ? `${member.failureCode}: ` : ""}${member.reason ?? member.phase ?? "Unavailable"}` : member.phase ?? member.reason ?? "—"}</td></tr>{/each}</tbody>
       </table>
       {#if row.runtime.stopFailures.length > 0}<div class="error"><p>Stop / Parking remains incomplete; this operation is not reported stopped.</p>{#each row.runtime.stopFailures as failure}<p>Pilot {failure.characterID}: {failure.message}</p>{/each}</div>{/if}
       {#if row.runtime.history.length > 0}<details><summary>Target history</summary><ul>{#each row.runtime.history as item}<li>{item.at} · {item.kind} · {item.target?.targetName ?? (item.evidence ? JSON.stringify(item.evidence) : "—")}</li>{/each}</ul></details>{/if}

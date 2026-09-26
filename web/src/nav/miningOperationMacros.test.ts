@@ -97,8 +97,8 @@ function oreHold(itemIDs: readonly number[]): MiningHold[] {
 // ladder, with only world IO replaced. A successful command is NOT a return:
 // recall stays visible for two further observations before the singleton bay
 // rows reappear in the same format as returned drones in the live logs.
-function standardMinerHarness(dronesEnabled = true) {
-  const profile = buildStandardProfile({ area: { targetClasses: ["BELT"] }, unloadPolicy: "HAULER_SERVICE",
+function standardMinerHarness(dronesEnabled = true, family: "BELT" | "ORE_ANOMALY" | "ICE" = "BELT") {
+  const profile = buildStandardProfile({ area: { targetClasses: [family] }, unloadPolicy: "HAULER_SERVICE",
     unloadDestination: { stationID: 60000004, stationName: "Home", systemName: "Jita", corporationDivision: 1 },
   }, { role: "MINER", routineMode: "STANDARD" });
   if (!dronesEnabled) delete profile.doc.program[0].body[1].args.drones;
@@ -114,6 +114,10 @@ function standardMinerHarness(dronesEnabled = true) {
   const rock = { ...entity(501, "Veldspar", 1000), kind: "asteroid" as const, miningYieldTypeID: 1230, beltID: 1, remainingQuantity: 10000 };
   let world = observation({ snapshot: snapshot([entity(1, "Asteroid Belt 1"), rock]),
     miningOperationRequired: true, miningModuleIDs: [71], holds: oreHold([]) });
+  if (family !== "BELT") {
+    world = { ...world, ...siteWorld(family), miningModuleIDs: [71], iceMiningModuleIDs: family === "ICE" ? [71] : [],
+      snapshot: snapshot([{ ...rock, miningResourceFamily: family === "ICE" ? "ice" : "ore" }]) };
+  }
   const actions: ScriptAction[] = [];
   const logs: BotLogDraft[] = [];
   const runner = createScriptRunner({
@@ -166,7 +170,7 @@ function standardMinerHarness(dronesEnabled = true) {
     get world() { return world; },
     setWorld(over: Partial<ScriptObservation>) { world = { ...world, ...over }; },
     setDroneReadUnavailable(value: boolean) { droneReadUnavailable = value; },
-    working: () => (world.snapshot!.ship!.activeModuleIDs ?? []).includes(71) && out.length === 5 && out.every(d => d.activity === "mining"),
+    working: () => (world.snapshot!.ship!.activeModuleIDs ?? []).includes(71) && out.length === (family === "ICE" ? 0 : 5) && out.every(d => d.activity === "mining"),
     returnFlight: () => { out = []; },
   };
 }
@@ -413,10 +417,108 @@ test("operation ore-site selection excludes ice archetype and never invents remo
   const tick = warp(siteWarpStep, observation({
     miningOperation: op,
     anomalies: [
-      { label: "ICE-100", kind: "ore", archetypeID: 28 },
-      { label: "ORE-200", kind: "ore", archetypeID: 27 },
+      { label: "ICE-100", kind: "ore", archetypeID: 28, siteID: 100, position: { x: 0, y: 0, z: 0 } },
+      { label: "ORE-200", kind: "ore", archetypeID: 27, siteID: 200, position: { x: 0, y: 0, z: 0 } },
     ],
   }), {}, {});
   assert.ok(tick.action.kind === "reserveMiningTarget" && tick.action.targetName === "ORE-200");
   assert.equal(tick.action.kind === "reserveMiningTarget" ? tick.action.systemID : 0, 30000142);
+});
+
+function siteWorld(family: "ORE_ANOMALY" | "ICE"): Partial<ScriptObservation> {
+  const site = { label: "SITE-100", kind: "ore" as const, archetypeID: family === "ICE" ? 28 : 27,
+    siteID: 100, instanceID: 101, position: { x: 0, y: 0, z: 0 } };
+  const current = target({ targetType: family, targetKey: `${family}:30000142:site:100:instance:101`, targetName: site.label,
+    siteID: 100, instanceID: 101, siteIdentity: "site:100:instance:101", position: site.position });
+  return { anomalies: [site], iceMiningModuleIDs: family === "ICE" ? [71] : [], oreMiningModuleIDs: family === "ORE_ANOMALY" ? [71] : [], miningModuleIDs: [71],
+    miningOperation: assignment({ currentTarget: current, area: { anchorSystemID: 30000142, anchorSystemName: "Jita", reach: "CURRENT_SYSTEM", targetClasses: [family] } }) };
+}
+function siteStep(family: "ORE_ANOMALY" | "ICE", travel = false): MacroStep {
+  return { id: travel ? "travel" : "mine", kind: "macro", macro: travel ? "travel-to-belt" : "mine-at-belt",
+    args: { belt: { kind: "belt", belt: { mode: family === "ICE" ? "ice-site" : "site" } } } };
+}
+
+for (const family of ["ORE_ANOMALY", "ICE"] as const) {
+  test(`${family}: depletion is not clearance until modules settle and freight is readable/empty`, () => {
+    const mine = SCRIPT_MACROS["mine-at-belt"];
+    const step = siteStep(family);
+    const world = observation({ ...siteWorld(family), snapshot: snapshot([]), holds: null });
+    let memory = {};
+    let result = mine(step, world, memory, {});
+    for (let i = 1; i < 3; i++) { memory = result.nextMem; result = mine(step, world, memory, {}); }
+    assert.equal(result.action.kind, "depleteMiningTarget");
+    assert.ok(result.action.kind === "depleteMiningTarget" && result.action.evidence.partialDumpConfirmed !== true);
+    const draining = { ...world, miningOperation: { ...world.miningOperation!, currentTarget: { ...world.miningOperation!.currentTarget!, state: "DRAINING" as const } } };
+    result = mine(step, { ...draining, snapshot: { ...world.snapshot!, ship: { ...world.snapshot!.ship!, activeModuleIDs: [71] } } }, {}, {});
+    assert.deepEqual(result.action, { kind: "deactivate", moduleID: 71 });
+    assert.ok(result.settleDrones);
+    result = mine(step, { ...draining, holds: oreHold([]), snapshot: { ...world.snapshot!, ship: { ...world.snapshot!.ship!, activeModuleIDs: null } } }, {}, {});
+    assert.equal(result.action.kind, "wait", "unknown module state is not confirmed settlement");
+    result = mine(step, draining, {}, {});
+    assert.equal(result.action.kind, "wait", "unknown holds are not confirmed empty");
+    result = mine(step, { ...draining, holds: oreHold([901]) }, {}, {});
+    assert.deepEqual(result.action, { kind: "jettison", itemIDs: [901] });
+    result = mine(step, { ...draining, holds: oreHold([]) }, {}, {});
+    assert.ok(result.action.kind === "depleteMiningTarget" && result.action.evidence.partialDumpConfirmed === true);
+  });
+
+  test(`${family} standard profile repeats mine/jettison/resume without independent selection`, async () => {
+    const h = standardMinerHarness(true, family);
+    await h.until(h.working);
+    for (let cycle = 1; cycle <= 4; cycle++) {
+      h.setWorld({ oreHoldFraction: 0.91, holds: oreHold([800 + cycle]), holdEmpty: false });
+      await h.until(() => h.count("jettison") === cycle);
+      await h.until(h.working);
+    }
+    assert.equal(h.count("warp"), 0);
+    assert.equal(h.count("reserveMiningTarget"), 0);
+    assert.equal(h.count("launchDrones"), family === "ICE" ? 0 : 5);
+    h.setWorld({ miningOperation: null });
+    const offset = h.actions.length;
+    for (let i = 0; i < 8; i++) await h.runner.tick();
+    assert.ok(h.actions.slice(offset).every(a => ["wait", "deactivate", "recallDrones"].includes(a.kind)), "claim loss must gate stale work");
+  });
+
+  test(`${family}: exact site travel, repeated disappearance, same-family no-target wait and logistics bookmark`, () => {
+    const world = observation(siteWorld(family));
+    const step = siteStep(family);
+    const mine = SCRIPT_MACROS["mine-at-belt"];
+    const distant = { ...world.miningOperation!.currentTarget!, position: { x: 1e9, y: 0, z: 0 } };
+    let action = mine(step, { ...world, miningOperation: { ...world.miningOperation!, currentTarget: distant } }, {}, {});
+    assert.equal(action.action.kind, "warpScan");
+    assert.ok(action.settleDrones);
+    let mem = {};
+    for (let i = 0; i < 3; i++) {
+      action = mine(step, { ...world, anomalies: [] }, mem, {}); mem = action.nextMem;
+      assert.equal(action.action.kind, i === 2 ? "depleteMiningTarget" : "wait");
+    }
+    action = mine(step, { ...world, anomalies: null }, mem, {});
+    assert.equal(action.action.kind, "wait", "failed scan is not confirmed disappearance");
+    action = mine(step, { ...world, anomalies: [], miningOperation: { ...world.miningOperation!, currentTarget: null } }, {}, {});
+    assert.equal(action.action.kind, "wait"); assert.equal(action.phase, "Waiting for target");
+    const hauler = { ...world, miningOperation: { ...world.miningOperation!, role: "HAULER" as const } };
+    const travel = SCRIPT_MACROS["travel-to-belt"];
+    action = travel(siteStep(family, true), hauler, {}, {});
+    assert.equal(action.action.kind, "bookmarkMiningSite", "in-space starts prepare a return point before looting");
+    action = travel(siteStep(family, true), { ...hauler, anomalies: [], miningSiteBookmarks: { [distant.targetKey]: 990 },
+      miningOperation: { ...hauler.miningOperation!, currentTarget: target(), logisticsTarget: { ...distant, state: "DRAINING" } } }, {}, {});
+    assert.deepEqual(action.action, { kind: "warpBookmark", bookmarkID: 990 });
+    const atTail = { ...hauler, miningSiteBookmarks: { [distant.targetKey]: 990 },
+      miningOperation: { ...hauler.miningOperation!, logisticsTarget: { ...world.miningOperation!.currentTarget!, state: "DRAINING" as const } } };
+    action = SCRIPT_MACROS["loot-containers"](lootStep, atTail, {}, {});
+    assert.equal(action.phase, "Looting");
+  });
+}
+
+test("Ice rejects an ore-only fit and activates only the Ice Harvester against classified Ice", () => {
+  const step = siteStep("ICE");
+  const world = observation(siteWorld("ICE"));
+  const mine = SCRIPT_MACROS["mine-at-belt"];
+  const refused = mine(step, { ...world, miningModuleIDs: [72], iceMiningModuleIDs: [] }, {}, {});
+  assert.equal(refused.outcome.kind, "blocked"); assert.match(refused.why, /Ice Harvester/);
+  const rock = { ...entity(501, "Not a classification", 1000), kind: "asteroid", miningYieldTypeID: 16265, miningResourceFamily: "ice" as const, remainingQuantity: 10 };
+  const decided = mine(step, { ...world, snapshot: snapshot([rock]), miningModuleIDs: [72, 71], iceMiningModuleIDs: [71], lockedTargetIDs: [501] }, { rockID: 501, siteTargetKey: world.miningOperation!.currentTarget!.targetKey }, {});
+  assert.deepEqual(decided.action, { kind: "activate", moduleID: 71, targetID: 501 });
+  const unknown = mine(step, { ...world, snapshot: snapshot([{ ...rock, miningResourceFamily: null }]) }, {}, {});
+  assert.equal(unknown.phase, "Resource authority unavailable");
 });

@@ -109,6 +109,7 @@ function decodeEntity(value: JsonValue): SpaceEntity | null {
     // and would send a player straight past a full belt.
     remainingQuantity: countOrNull(raw.remainingQuantity),
     miningYieldTypeID: idOrNull(raw.miningYieldTypeID),
+    miningResourceFamily: raw.miningResourceFamily === "ore" || raw.miningResourceFamily === "ice" || raw.miningResourceFamily === "gas" ? raw.miningResourceFamily : null,
     beltID: idOrNull(raw.beltID),
     // The rock's ORE GRADE (dogma 2699), stamped by the BFF from static data.
     // An ABSENT oreGrade decodes to null ("unknown"), never 0: 0-Grade ore is a

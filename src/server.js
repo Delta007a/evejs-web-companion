@@ -24,6 +24,7 @@ const { createBotLogStore } = require("./botLogStore");
 const { createMiningTargetBoard } = require("./miningTargetBoard");
 const { createMiningOperationStore } = require("./miningOperationStore");
 const { standardProfileFor, buildStandardProfile, familyCapabilities } = require("./miningOperationProfiles");
+const { miningResourceFamily } = require("./miningResourceFamily");
 const { normalizePolicies } = require("./miningOperationPolicies");
 const { createMiningOperationStopper } = require("./miningOperationStop");
 const {
@@ -17759,6 +17760,7 @@ function withOreStaticFields(space) {
       return {
         ...row,
         oreGrade: typeof grade === "number" && Number.isFinite(grade) ? grade : null,
+        miningResourceFamily: miningResourceFamily(typeof staticData.getType === "function" ? staticData.getType(oreTypeID) : null),
         oreValuePerM3: typeof value === "number" && Number.isFinite(value) ? value : null,
       };
     }),
@@ -20024,8 +20026,8 @@ function operationPayload() {
       profileFamilies: familyCapabilities(),
       targetClasses: {
         BELT: { executable: true, note: "Current-system belt discovery and mining are supported." },
-        ORE_ANOMALY: { executable: false, note: "Distinct Ore Anomaly profiles are not implemented in this BELT phase." },
-        ICE: { executable: false, note: "Not yet separately identifiable from the shared ore-site scanner path." },
+        ORE_ANOMALY: { executable: true, note: "Current-system scanner sites only; explicit Ore Anomaly profiles." },
+        ICE: { executable: true, note: "Current-system ice sites; online Ice Harvesters required. No Mining Drones." },
         GAS: { executable: false, note: "Scanner classification exists, but no gas-site travel block exists." },
       },
       reach: {
@@ -20161,7 +20163,7 @@ function prepareMiningOperationLaunch(definition) {
           staticData.getSolarSystemName(Number(station.solarSystemID)) !== destination.systemName ||
           !Number.isSafeInteger(destination.corporationDivision) || destination.corporationDivision < 1 || destination.corporationDivision > 7) {
         return { ok: false, code: "STANDARD_UNLOAD_DESTINATION_REQUIRED",
-          message: "Standard Belt Hauler Service needs an explicit known unload station and corporation division 1–7. Edit the operation destination before Start." };
+          message: "Standard Hauler Service needs an explicit known unload station and corporation division 1–7. Edit the operation destination before Start." };
       }
       script = buildStandardProfile(definition, member);
     } else {
@@ -20174,10 +20176,8 @@ function prepareMiningOperationLaunch(definition) {
   }
   const minerAudits = definition.members.filter((member) => member.role === "MINER")
     .map((member) => audits.get(member.characterID)).filter(Boolean);
-  const hasHaulerService = definition.unloadPolicy === "HAULER_SERVICE" &&
-    definition.members.some((member) => member.role === "HAULER");
   const commonClasses = selectedExecutable.filter((kind) => minerAudits.length > 0 &&
-    minerAudits.every((audit) => audit.targetClasses.includes(kind)) && (!hasHaulerService || kind === "BELT"));
+    minerAudits.every((audit) => audit.targetClasses.includes(kind)));
   if (commonClasses.length === 0) return { ok: false, code: "INCOMPATIBLE_OPERATION_ROUTINE",
     message: "The member routines do not share an executable operation target class." };
   for (const member of definition.members) {
@@ -20400,6 +20400,9 @@ app.post("/api/mining-operations/target/reserve", requireAuth, (req, res, next) 
   try {
     const claim = requireMiningOperationClaim(req, res);
     if (!claim) return;
+    if (["ORE_ANOMALY", "ICE"].includes(req.body?.targetType) && Number(req.body.systemID) !== Number(claim.held.solarSystemID)) {
+      return res.status(409).json({ ok: false, error: "SITE_SYSTEM_AUTHORITY_MISMATCH", message: "Site selection requires the pilot's current-system scanner." });
+    }
     const outcome = miningOperations.reserveCandidate(claim.association.operationID, claim.held.characterID, req.body || {});
     res.json({ ok: true, ...outcome });
   } catch (error) {

@@ -27,7 +27,7 @@ test("versioned standard BELT profiles are valid runner docs, independent of sav
     assert.equal(profile.doc.home.id, 60003760);
     assert.notEqual(profile.doc.home.starting, true);
   }
-  assert.equal(standardProfileFor({ ...definition, area: { targetClasses: ["ORE_ANOMALY"] } }, miner), null);
+  assert.equal(standardProfileFor({ ...definition, area: { targetClasses: ["GAS"] } }, miner), null);
   assert.equal(standardProfileFor({ ...definition, unloadPolicy: "SELF_UNLOAD" }, miner), null);
   assert.equal(standardProfileFor(definition, { ...miner, routineMode: "CUSTOM", automationID: "saved-script" }), null);
 });
@@ -52,4 +52,23 @@ test("standard miner and hauler use only operation-overlay resource targets and 
 test("missing explicit unload destination never produces a standard runnable doc", () => {
   assert.equal(buildStandardProfile({ ...definition, unloadDestination: null }, hauler), null);
   assert.equal(buildStandardProfile({ ...definition, unloadDestination: { ...definition.unloadDestination, corporationDivision: 8 } }, hauler), null);
+});
+
+test("site families resolve distinct v1 runner documents, never a cross-family profile", () => {
+  for (const [family, id, mode] of [["ORE_ANOMALY", "ore-anomaly", "site"], ["ICE", "ice", "ice-site"]]) {
+    const def = { ...definition, area: { targetClasses: [family] } };
+    for (const member of [miner, hauler]) {
+      const profile = buildStandardProfile(def, member);
+      assert.equal(profile.scriptID, `mcc.${id}.hauler-service.${member.role.toLowerCase()}`);
+      assert.equal(profile.rev, 1);
+      const decoded = decodeScriptValue(profile.doc);
+      assert.ok(decoded.ok, JSON.stringify(decoded));
+      const body = profile.doc.program[0].body;
+      const targetStep = member.role === "MINER" ? body[1] : body[0].else[1];
+      assert.equal(targetStep.args.belt.belt.mode, mode);
+      assert.equal(profile.doc.home.id, definition.unloadDestination.stationID);
+      if (member.role === "HAULER") assert.equal(body[1].args.seconds.value, 3);
+      assert.equal(buildStandardProfile({ ...def, area: { targetClasses: [family, "BELT"] } }, member), null);
+    }
+  }
 });

@@ -253,11 +253,67 @@ test("belt depletion is written through existing belt memory and its TTL clears 
   assert.equal(h.operations.reserveCandidate("a", 1, belt()).acquired, true, "belt memory's expiry owns respawn eligibility");
 });
 
-test("ore anomaly family remains modeled but no operation can execute it in this foundation", () => {
+test("ore anomaly requires authoritative site identity; a label alone is not executable", () => {
   const def = definition("site", [member(1, "MINER")], "SELF_UNLOAD", ["ORE_ANOMALY"]);
   const h = harness([def]);
-  assert.equal(h.operations.begin("site", ["ORE_ANOMALY"]).ok, false);
+  assert.equal(h.operations.begin("site", ["ORE_ANOMALY"]).ok, true);
   assert.equal(h.operations.reserveCandidate("site", 1, anomaly()).acquired, false);
+});
+
+for (const family of ["ORE_ANOMALY", "ICE"]) {
+  test(`${family}: atomic identity, clearance, same-family relocation, tail and scoped stop`, () => {
+    const defs = [definition("a", [member(1, "MINER"), member(2, "MINER"), member(3, "HAULER")], "HAULER_SERVICE", [family]),
+      definition("b", [member(4, "MINER"), member(5, "HAULER")], "HAULER_SERVICE", [family])];
+    const h = harness(defs);
+    startAll(h, "a", [family]); startAll(h, "b", [family]);
+    const site = (instanceID = 101) => ({ targetType: family, targetName: "ABC-123", systemID: 30000142, systemName: "Jita",
+      siteID: 100, instanceID, siteIdentity: `site:100:instance:${instanceID}`, position: { x: 1000, y: 0, z: 0 } });
+    const first = h.operations.reserveCandidate("a", 1, site());
+    assert.equal(first.acquired, true);
+    assert.equal(h.operations.reserveCandidate("b", 4, { ...site(), targetName: "changed scanner label" }).acquired, false);
+    assert.equal(h.operations.activateTarget("a", 1, first.target.targetKey), true);
+    assert.equal(h.operations.depleteTarget("a", 1, first.target.targetKey, { scannerDisappeared: true, scannerMissingReads: 3 }), true);
+    assert.equal(h.operations.runtimeFor("a").rendezvous.ready.length, 0, "disappearance does not prove partial-hold clearance");
+    assert.equal(h.operations.finishDrain("a", 3, first.target.targetKey), false, "a tail cannot close while Ice cycles / partial dumps are pending");
+    h.operations.depleteTarget("a", 1, first.target.targetKey, { partialDumpConfirmed: true });
+    assert.notEqual(h.operations.runtimeFor("a").currentTarget, null);
+    h.operations.depleteTarget("a", 2, first.target.targetKey, { partialDumpConfirmed: true });
+    assert.equal(h.operations.runtimeFor("a").currentTarget, null);
+    assert.equal(h.operations.reserveCandidate("a", 1, belt()).acquired, false);
+    const next = h.operations.reserveCandidate("a", 1, site(102));
+    assert.equal(next.acquired, true, "new instance with same display label is not poisoned");
+    const tail = h.operations.assignment("a", 3);
+    assert.equal(tail.logisticsTarget.targetKey, first.target.targetKey);
+    assert.equal(tail.currentTarget.targetKey, next.target.targetKey);
+    h.operations.finishDrain("a", 3, first.target.targetKey);
+    assert.equal(h.operations.assignment("a", 3).logisticsTarget, null);
+    const reappeared = h.operations.reserveCandidate("b", 4, { ...site(), position: { x: 5000, y: 0, z: 0 } });
+    assert.equal(reappeared.acquired, true, "confirmed disappearance can reset a reappeared site");
+    assert.equal(reappeared.target.position.x, 5000, "fresh scanner coordinates replace the previous incarnation");
+    const other = h.operations.runtimeFor("b").currentTarget.targetKey;
+    h.operations.beginStop("a");
+    assert.equal(h.board.get(other).claimedByOperationID, "b");
+    assert.equal(h.operations.runtimeFor("b").currentTarget.targetKey, other);
+  });
+}
+
+test("BELT, ORE_ANOMALY and ICE coexist without shared identity or scoped-stop collisions", () => {
+  const families = ["BELT", "ORE_ANOMALY", "ICE"];
+  const defs = families.map((family, index) => definition(family, [member(index + 1, "MINER")], "SELF_UNLOAD", [family]));
+  const h = harness(defs);
+  const keys = families.map((family, index) => {
+    startAll(h, family, [family]);
+    const result = h.operations.reserveCandidate(family, index + 1, family === "BELT" ? belt() : {
+      targetType: family, targetName: "SITE-1", systemID: 30000142, systemName: "Jita",
+      siteID: 100, instanceID: 101, siteIdentity: "site:100:instance:101", position: { x: 0, y: 0, z: 0 },
+    });
+    assert.equal(result.acquired, true);
+    return result.target.targetKey;
+  });
+  assert.equal(new Set(keys).size, 3);
+  h.operations.beginStop("ORE_ANOMALY");
+  assert.equal(h.board.get(keys[0]).claimedByOperationID, "BELT");
+  assert.equal(h.board.get(keys[2]).claimedByOperationID, "ICE");
 });
 
 test("launch waits for target selection, then travels; member failure is degraded", () => {

@@ -26,15 +26,17 @@ function observation(docked: boolean, holds: readonly MiningHold[] | null): Scri
 function hold(key: "ore" | "cargo", id: number, categoryID: number): MiningHold {
   return { key, label: key, present: true, error: null, capacity: null, items: [{ itemID: id, typeID: 1, quantity: 2, groupID: 1, categoryID }] };
 }
-function harness(options: { badHold?: boolean; refuseTravel?: boolean; refuseUnload?: boolean; initiallyDocked?: boolean } = {}) {
+function harness(options: { badHold?: boolean; refuseTravel?: boolean; refuseUnload?: boolean; initiallyDocked?: boolean; family?: "ORE_ANOMALY" | "ICE" } = {}) {
   let docked = !!options.initiallyDocked;
   let holds = [hold("ore", 10, 25), hold("cargo", 20, 7)];
+  if (options.family === "ICE") holds[0] = { ...holds[0]!, key: "ice", items: [{ itemID: 10, typeID: 16265, categoryID: 25, groupID: 465, quantity: 2 }] };
   let reads = 0;
   const actions: ScriptAction[] = [];
   const deps: ScriptRunnerDeps = {
     observe: async () => {
       if (++reads > 160) throw new Error("test exceeded bounded runner attempts");
       const obs = observation(docked, options.badHold ? null : holds);
+      if (options.family) Object.assign(obs, { miningOperation: { ...obs.miningOperation!, area: { ...obs.miningOperation!.area, targetClasses: [options.family] } } });
       return options.refuseTravel ? { ...obs, travel: { status: "paused", destinationStationID: 60003760, failureReason: "Dock refused", remainingJumps: 0 } } : obs;
     },
     issue: async action => {
@@ -67,6 +69,18 @@ test("return, dock, unload only existing freight, confirm empty freight, remain 
   assert.deepEqual(h.currentHolds()[1]!.items?.map(row => row.itemID), [20], "cargo ammunition stays aboard a hull with ore hold");
   assert.deepEqual(h.currentHolds()[0]!.items, []);
 });
+
+for (const family of ["ORE_ANOMALY", "ICE"] as const) {
+  test(`${family}: Parking returns to the explicit station, optionally delivers freight, never reserves a target`, async () => {
+    for (const mode of ["RETURN_HOME_DOCK", "RETURN_HOME_UNLOAD_DOCK"] as const) {
+      const h = harness({ family });
+      await runFleetParking(h.deps, { ...policy, mode }, Date.now() + 60_000, () => {});
+      assert.deepEqual(h.actions.map(a => a.kind), mode === "RETURN_HOME_DOCK" ? ["startRoute"] : ["startRoute", "unloadOre"]);
+      assert.deepEqual(h.currentHolds()[1]!.items?.map(item => item.itemID), [20]);
+      assert.equal(h.docked(), true);
+    }
+  });
+}
 
 test("dock-only does not unload and already parked does not undock", async () => {
   for (const initiallyDocked of [false, true]) {
