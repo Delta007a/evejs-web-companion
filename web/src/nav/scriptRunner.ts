@@ -45,6 +45,7 @@ import {
   type ScriptMemory,
 } from "./scriptDecide.ts";
 import type { ScriptObservation } from "./scriptConditions.ts";
+import { createTravelAssist, type TravelAssistDeps } from "./travelAssist.ts";
 import { describeAction, newRunID, type BotLogDraft, type BotLogSink } from "./botLog.ts";
 import {
   createRefusalLedger,
@@ -163,6 +164,7 @@ export interface ScriptRunnerSnapshot {
  * deciders (B1). All injected so the loop itself touches no globals.
  */
 export interface ScriptRunnerDeps {
+  readonly travelAssist?: Pick<TravelAssistDeps, "change">;
   /** Shared BFF authority for browser and server runners. */
   readonly containerClaims?: {
     acquire(owner: string, system: number, itemID: number, renewOnly: boolean): Promise<boolean>;
@@ -207,6 +209,8 @@ export interface ScriptRunnerController {
   resume(): void;
   /** Suspend new work and wait for any already issued tick before manual recall. */
   beginGracefulStop(): Promise<void>;
+  travelAssistPending?(): boolean;
+  confirmTravelAssistStopped?(activeModuleIDs: readonly number[] | null): void;
   blockManualStop(reason: string): void;
   stop(): Promise<void>;
   tick(): Promise<void>;
@@ -287,6 +291,9 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
   // its response was lost, and stop must release that owner's claims too.
   let attemptedClaimOwner: string | null = null;
   const claimOwner = (): string => `${runID}:${runToken}`;
+  const travelAssist = deps.travelAssist ? createTravelAssist({ ...deps.travelAssist,
+    log: why => record({ t: now(), kind: "decide", run: runID, says: "travel assist", why }),
+  }) : null;
 
   async function releaseClaims(owner: string): Promise<void> {
     if (lease?.owner === owner) lease = null;
@@ -463,6 +470,18 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     readFailures = 0;
     lastObs = obs;
 
+    const operation = obs.miningOperation;
+    const ownedTarget = operation?.role === "HAULER" ? operation.logisticsTarget ?? operation.currentTarget : operation?.currentTarget;
+    const travelAuthority = operation?.travelAssist === "AUTO" && !operation.stopRequested &&
+      !!ownedTarget && ownedTarget.claimedByOperationID === operation.operationID && ["RESERVED", "ACTIVE", "DRAINING"].includes(ownedTarget.state);
+    // Loss of authority must stand propulsion down even if the next macro's
+    // safety/return decision fails. Reuse this observation, before evaluating it.
+    if (travelAssist?.pending() && !travelAuthority && await travelAssist.beforeAction({
+      enabled: false, scope: null, action: { kind: "wait" }, snapshot: obs.snapshot ?? null,
+      inWarp: obs.inWarp ?? null, docked: obs.docked ?? null, modules: [], scrammed: obs.scrammed ?? null,
+    })) return;
+    if (token !== runToken || status !== "running") return;
+
     // ⚠ THE HULL IS GONE. A destroyed ship does not end the run on its own: the
     // session survives, the reads keep working, and the decider happily goes on
     // mining — in a pod, which has no miner, no hold and no tank. Three ships
@@ -545,8 +564,18 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       return;
     }
     if (token !== runToken || status !== "running") return;
-    // These milestones use the very same observation/decision as the runner.
-    // Never infer a launch/return from a successful write alone.
+    // Shared optional movement assistance consumes the SAME observation. The
+    // operation only grants policy/authority; profiles contain no prop logic.
+    const movementMacro = activeMacroID(script, memory);
+    if (travelAssist && await travelAssist.beforeAction({
+      enabled: travelAuthority && result.status === "running" && result.memory.latched === null && ["mine-at-belt", "loot-containers"].includes(movementMacro ?? ""),
+      scope: ownedTarget ? `${ownedTarget.targetKey}:${result.stepPath}` : null,
+      action: result.action, snapshot: obs.snapshot ?? null, inWarp: obs.inWarp ?? null, docked: obs.docked ?? null,
+      modules: obs.travelPropulsionModules ?? [], scrammed: obs.scrammed ?? null,
+    })) return; // one command; original macro memory advances only on its issue
+    if (token !== runToken || status !== "running") return;
+    // These drone milestones use the same observation/decision. Never infer a
+    // launch/return from a successful write alone.
     const droneEvent = (why: string) => record({
       t: now(), kind: "decide", run: runID, says: "mining drone lifecycle",
       phase: result.phase, stepPath: result.stepPath, why,
@@ -886,8 +915,10 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         status = "paused";
         emit({ ...last, status: "paused", phase: "Recalling drones", why: "Stopping after drones return." });
       }
-      return activeTick ?? Promise.resolve();
+      return (activeTick ?? Promise.resolve()).then(() => travelAssist?.requestStop());
     },
+    travelAssistPending: () => travelAssist?.pending() ?? false,
+    confirmTravelAssistStopped: ids => travelAssist?.confirmStopped(ids),
     blockManualStop(reason: string): void {
       gracefulStopPending = false;
       if (status === "paused") emit({ ...last, phase: "Stop blocked", why: reason, pauseReason: reason });

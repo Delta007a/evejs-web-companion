@@ -209,6 +209,7 @@ export type ScriptAction =
   /** Stored Mining Operation coordination. None of these actions reads space. */
   | {
       readonly kind: "reserveMiningTarget";
+      readonly candidates?: readonly import("../app/api.ts").MiningTargetCandidate[];
       readonly targetType: "BELT" | "ORE_ANOMALY" | "ICE";
       readonly siteIdentity?: string;
       readonly siteID?: number;

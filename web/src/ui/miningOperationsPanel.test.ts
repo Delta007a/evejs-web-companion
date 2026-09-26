@@ -63,6 +63,13 @@ test("opening and viewing Command Center adds zero readSpaceSnapshot polling", (
   assert.match(panel, /loadMiningOperations/);
 });
 
+test("new drafts offer Auto travel assist without reinterpreting old definitions", () => {
+  const source = readFileSync(new URL("./MiningOperations.svelte", import.meta.url), "utf8");
+  assert.match(source, /let travelAssist = \$state\(true\)/);
+  assert.match(source, /travelAssist = definition\.policies\?\.travelAssist\?\.mode === "AUTO"/);
+  assert.match(source, /Use fitted AB\/MWD/);
+});
+
 test("system editor resolves either side and only offers operation-compatible routines", () => {
   const source = readFileSync(new URL("./MiningOperations.svelte", import.meta.url), "utf8");
   assert.match(source, /findMapLocations\(value\.trim\(\), "system"/);

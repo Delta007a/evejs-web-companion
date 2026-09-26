@@ -438,6 +438,52 @@ function siteStep(family: "ORE_ANOMALY" | "ICE", travel = false): MacroStep {
     args: { belt: { kind: "belt", belt: { mode: family === "ICE" ? "ice-site" : "site" } } } };
 }
 
+for (const family of ["BELT", "ORE_ANOMALY", "ICE"] as const) for (const role of ["MINER", "HAULER"] as const) for (const ending of ["interaction", "claim-loss", "stop"]) {
+  test(`${family} ${role}: shared runner assists movement, then settles on ${ending}`, async () => {
+    const step = role === "HAULER" ? lootStep : family === "BELT" ? beltStep : siteStep(family);
+    const profile = buildStandardProfile({ area: { targetClasses: [family] }, unloadPolicy: "HAULER_SERVICE",
+      unloadDestination: { stationID: 60000004, stationName: "Home", systemName: "Jita", corporationDivision: 1 } }, { role });
+    const decoded = decodeScriptValue({ ...profile.doc, program: [role === "MINER" ? { ...step, until: { kind: "ore-hold-at-least", fraction: 0.9 } } : step] }); assert.ok(decoded.ok);
+    let x = 60_000, propOn = false, claimLost = false;
+    const changes: boolean[] = [], actions: ScriptAction[] = [];
+    const base = observation(family === "BELT" ? {} : siteWorld(family));
+    const op = { ...base.miningOperation!, role, travelAssist: "AUTO" as const };
+    const runner = createScriptRunner({
+      observe: async () => {
+        const resource = { ...entity(501, "Resource", x), kind: role === "HAULER" ? "container" : "asteroid", miningYieldTypeID: role === "MINER" ? 1230 : null,
+          miningResourceFamily: family === "ICE" ? "ice" as const : "ore" as const, remainingQuantity: 100 };
+        const scene = snapshot([entity(1, "Asteroid Belt 1"), resource]);
+        return { ...base, miningOperationRequired: true, miningOperation: claimLost ? null : op, miningModuleIDs: [71], lockedTargetIDs: [501],
+          snapshot: { ...scene, ship: { ...scene.ship!, mode: "follow", activeModuleIDs: propOn ? [91] : [] } },
+          travelPropulsionModules: [{ itemID: 91, typeID: 439, kind: "afterburner" }] };
+      },
+      travelAssist: { change: async (_module, on) => { propOn = on; changes.push(on); return true; } },
+      containerClaims: { acquire: async () => true, release: async () => {} },
+      issue: async action => { actions.push(action); }, sleep: async () => {}, onProgress: () => {},
+      isSessionLost: () => false, refusalReason: String, registry: SCRIPT_MACROS, travelHome: () => {
+        assert.ok(claimLost, "healthy approach must not ask for a safety return");
+        assert.equal(propOn, false, "claim-loss shutdown precedes even macro safety-return evaluation");
+        return { action: { kind: "wait" }, why: "Safety return waiting", phase: "Waiting", armed: false, outcome: { kind: "acting" }, nextMem: {} };
+      },
+    });
+    runner.start(decoded.doc);
+    for (let i = 0; i < 4; i++) await runner.tick();
+    assert.equal(changes[0], true);
+    assert.ok(actions.some(a => a.kind === (role === "MINER" ? "orbit" : "approach")));
+    const beforeEnd = actions.length;
+    if (ending === "stop") await runner.beginGracefulStop();
+    else {
+      if (ending === "interaction") x = 1_000;
+      else claimLost = true;
+      for (let i = 0; i < 5; i++) await runner.tick();
+    }
+    assert.deepEqual(changes, [true, false], JSON.stringify({ snapshot: runner.snapshot(), actions }));
+    if (ending === "interaction") assert.ok(actions.some(a => a.kind === (role === "MINER" ? "activate" : "lootContainer")));
+    else assert.ok(actions.slice(beforeEnd).every(a => ["wait", "deactivate", "recallDrones"].includes(a.kind)), "no stale work after claim loss/Stop");
+    await runner.beginGracefulStop(); assert.equal(propOn, false); await runner.stop();
+  });
+}
+
 for (const family of ["ORE_ANOMALY", "ICE"] as const) {
   test(`${family}: depletion is not clearance until modules settle and freight is readable/empty`, () => {
     const mine = SCRIPT_MACROS["mine-at-belt"];

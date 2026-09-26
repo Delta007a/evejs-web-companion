@@ -297,6 +297,53 @@ for (const family of ["ORE_ANOMALY", "ICE"]) {
   });
 }
 
+function located(h, operationID, characterID, x, systemID = 30000142) {
+  h.operations.observeMemberLocation(operationID, characterID, { solarSystemID: systemID, ship: { mode: "stop", position: { x, y: 0, z: 0 } } }, true);
+}
+const localBelts = () => [
+  { ...belt("III"), position: { x: 0, y: 0, z: 0 } },
+  { ...belt("IX"), position: { x: 1e9, y: 0, z: 0 } },
+];
+
+test("locality prefers the clustered main body, ignores hauler/failed miner, resists an outlier", () => {
+  const h = harness([definition("a", [member(1, "MINER"), member(2, "MINER"), member(3, "MINER"), member(4, "MINER"), member(5, "HAULER")])]);
+  startAll(h, "a");
+  located(h, "a", 1, 1e9); located(h, "a", 2, 1e9); located(h, "a", 3, 0); located(h, "a", 4, 0); located(h, "a", 5, -1e12);
+  h.operations.memberFailed("a", 4, "offline");
+  const result = h.operations.reserveCandidates("a", 1, localBelts());
+  assert.equal(result.target.targetName, "IX");
+  const event = h.operations.runtimeFor("a").history.find(row => row.kind === "TARGET_SELECTION");
+  assert.equal(event.evidence.candidates[0].reason, "MAIN_BODY_AT_TARGET");
+  assert.equal(event.evidence.candidates[0].anchorCount, 3);
+});
+
+test("locality ignores claimed/depleted preferences and keeps reservation atomic across operations", () => {
+  const h = harness([definition("a", [member(1, "MINER")]), definition("b", [member(2, "MINER")])]);
+  startAll(h, "a"); startAll(h, "b"); located(h, "a", 1, 1e9); located(h, "b", 2, 1e9);
+  assert.equal(h.operations.reserveCandidates("a", 1, localBelts()).target.targetName, "IX");
+  assert.equal(h.operations.reserveCandidates("b", 2, localBelts()).target.targetName, "III");
+  h.operations.beginStop("a"); h.operations.finishStop("a", []);
+  h.operations.beginStop("b"); h.operations.finishStop("b", []);
+  h.belts.markDry("Jita", "IX", null);
+  startAll(h, "a"); located(h, "a", 1, 1e9);
+  assert.equal(h.operations.reserveCandidates("a", 1, localBelts()).target.targetName, "III");
+});
+
+for (const mode of ["missing", "stale", "warp", "tie"]) test(`locality ${mode} uses deterministic identity ordering`, () => {
+  const h = harness([definition("a", [member(1, "MINER")])]); startAll(h, "a");
+  if (mode !== "missing") located(h, "a", 1, mode === "tie" ? 5e8 : 1e9);
+  if (mode === "stale") h.clock.advance(15_001);
+  if (mode === "warp") h.operations.observeMemberLocation("a", 1, { solarSystemID: 30000142, ship: { mode: "warp", position: { x: 1e9, y: 0, z: 0 } } }, true);
+  assert.equal(h.operations.reserveCandidates("a", 1, localBelts().reverse()).target.targetName, "III");
+});
+
+for (const family of ["ORE_ANOMALY", "ICE"]) test(`${family} locality remains current-system and same-family only`, () => {
+  const h = harness([definition("a", [member(1, "MINER")], "SELF_UNLOAD", [family])]); startAll(h, "a", [family]); located(h, "a", 1, 1e9);
+  const sites = localBelts().map((b, i) => ({ ...b, targetType: family, siteID: i + 10, instanceID: i + 20, siteIdentity: `site:${i + 10}:instance:${i + 20}` }));
+  const result = h.operations.reserveCandidates("a", 1, [...localBelts(), ...sites, { ...sites[0], systemID: 30000143 }, { ...sites[0], targetType: family === "ICE" ? "ORE_ANOMALY" : "ICE" }]);
+  assert.equal(result.target.targetType, family); assert.equal(result.target.targetName, "IX");
+});
+
 test("BELT, ORE_ANOMALY and ICE coexist without shared identity or scoped-stop collisions", () => {
   const families = ["BELT", "ORE_ANOMALY", "ICE"];
   const defs = families.map((family, index) => definition(family, [member(index + 1, "MINER")], "SELF_UNLOAD", [family]));

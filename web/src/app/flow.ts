@@ -241,6 +241,7 @@ import {
 import type { DryBelt, ScriptObservation } from "../nav/scriptConditions.ts";
 import { iceHoldFraction, iceMiningType, siteMiningFitRefusal } from "../nav/miningSite.ts";
 import { ensureSiteLogisticsBookmark } from "../nav/siteLogisticsBookmark.ts";
+import { fittedTravelPropulsion } from "../nav/travelAssist.ts";
 import {
   THREAT_ATTRIBUTE_IDS,
   threatFromAttributes,
@@ -7301,16 +7302,23 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     }
   }
 
-  async function confirmDronesHomeForManualStop(cleanupDeadlineMs?: () => number | null): Promise<void> {
+  async function confirmDronesHomeForManualStop(cleanupDeadlineMs?: () => number | null, controller?: ScriptRunnerController): Promise<void> {
     await recallFlightBeforeManualStop({
       read: async () => {
         const flight = decodeFlightStatus((await api.getFlightStatus(callOptions)).flight);
-        if (flight.docked) return { bay: [], out: [], maxActive: 0, roles: {} };
+        if (flight.docked) {
+          controller?.confirmTravelAssistStopped?.([]); // docked ships cannot cycle propulsion
+          return { bay: [], out: [], maxActive: 0, roles: {} };
+        }
         // One authority read can take 65 seconds. Do not begin the second read
         // after the timed-run cleanup window has closed.
         const deadline = cleanupDeadlineMs?.() ?? null;
         if (deadline !== null && Date.now() >= deadline) return null;
-        const raw = await api.getDrones(callOptions);
+        // Replace, never duplicate, the existing cleanup snapshot. This lets a
+        // finite prop cycle settle alongside drone return on the same cadence.
+        const combined = controller?.travelAssistPending?.() ? await api.getScriptObservation(callOptions) : null;
+        if (combined) controller?.confirmTravelAssistStopped?.(decodeSpaceSnapshot(combined.space)?.ship?.activeModuleIDs ?? null);
+        const raw = combined ?? await api.getDrones(callOptions);
         const out = decodeDronesInSpace(raw.inSpace);
         // The ordinary decoder treats an absent `controlled` flag as false for
         // the recovery UI. Stop needs stronger authority before letting go.
@@ -7322,6 +7330,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       recall: async ids => { await api.recallDrones(ids, callOptions); },
       sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
       deadlineMs: cleanupDeadlineMs,
+      additionalSettlement: () => !(controller?.travelAssistPending?.() ?? false),
     });
   }
 
@@ -7352,7 +7361,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       autopilot?.abort();
       try {
         await settleIssuedWork(controller.beginGracefulStop());
-        await confirmDronesHomeForManualStop(cleanupDeadlineMs);
+        await confirmDronesHomeForManualStop(cleanupDeadlineMs, controller);
         await stopCustomController();
       } catch (error) {
         controller.blockManualStop(error instanceof Error ? error.message : "Drone return could not be confirmed; Stop is paused.");
@@ -7369,7 +7378,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     if (!scriptRunner) throw new Error("The operation runner is unavailable; parking cannot take over another pilot controller.");
     await settleIssuedWork(scriptRunner.beginGracefulStop());
     autopilot?.abort(); // a route issued by the last pending tick has now settled
-    await confirmDronesHomeForManualStop();
+    await confirmDronesHomeForManualStop(undefined, scriptRunner);
     const flight = decodeFlightStatus((await api.getFlightStatus(callOptions)).flight);
     if (flight.docked === true) return;
     const mining = await resolveMiningModuleIDs();
@@ -8852,6 +8861,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     readonly shipID: number | null;
     readonly mining: readonly number[];
     readonly iceMining: readonly number[];
+    readonly travelPropulsion: readonly import("../nav/propulsion.ts").PropulsionModule[];
     readonly oreMining: readonly number[];
     readonly salvage: readonly number[];
     readonly defense: DefenseModuleIDs;
@@ -9012,6 +9022,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       shipID: fit.activeShipID,
       mining,
       iceMining,
+      travelPropulsion: fit.slotsError === null ? fittedTravelPropulsion(fit.slots.flatMap(slot => slot.module ? [{
+        itemID: slot.module.itemID, typeID: slot.module.typeID, online: slot.module.online,
+        effect: store.names.get().resolved[nameKey("propulsionEffect", slot.module.typeID)] ?? null,
+      }] : [])) : [],
       oreMining,
       salvage: resolveSalvageModuleIDs(),
       defense,
@@ -9481,6 +9495,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         acquire: (owner, system, itemID, renewOnly) => api.claimContainer(owner, system, itemID, renewOnly, callOptions),
         release: (owner) => api.releaseContainerClaims(owner, callOptions),
       },
+      travelAssist: { change: async (module, on) => {
+        const result = on ? await api.activateModule(module.itemID, { repeat: 0 }, callOptions)
+          : await api.deactivateModule(module.itemID, { typeID: module.typeID }, callOptions);
+        return on ? result.active === true : result.stopped === true;
+      } },
       observe: async (hint) => {
         const [flightStep, observation, targetsResult, holdsResult] = await Promise.all([
           scriptObservationRead("flight status", () => api.getFlightStatus(callOptions)),
@@ -10367,6 +10386,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // fleet companion's ladder runs on, resolved once by
           // `resolveDefenseModuleIDs` rather than a second time here.
           propulsionModules: capabilities.defense.propulsion,
+          travelPropulsionModules: capabilities.travelPropulsion,
           unloadedWeaponIDs: capabilities.unloadedWeaponIDs,
           jammingSourceIDs,
           scrammed,
@@ -10524,6 +10544,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
               siteID: action.siteID,
               instanceID: action.instanceID,
               position: action.position,
+              candidates: action.candidates,
             }, callOptions)) {
               unavailableMiningTargets.set(
                 `${action.targetType}:${action.systemID}:${action.siteIdentity ?? action.targetName}`,

@@ -657,13 +657,17 @@ function operationSiteTravel(obs: ScriptObservation, inputMem: MacroMemory, fami
   if (obs.inSpace !== true || obs.inWarp === true || !obs.snapshot?.ship) return held(tick(WAIT, "Waiting for a stable space observation.", "Following operation target", ACTING, false, mem));
   if (target === null) {
     if (operation.role !== "MINER") return held(tick(WAIT, "Waiting for the mining body to reserve a target.", "Waiting for target", ACTING, false, mem));
-    const candidate = (obs.anomalies ?? []).filter(site => miningSiteFamily(site) === family && siteIdentity(site) && site.position)
+    const sites = (obs.anomalies ?? []).filter(site => miningSiteFamily(site) === family && siteIdentity(site) && site.position)
       .sort((a, b) => a.label.localeCompare(b.label))
-      .find(site => !(obs.unavailableMiningTargetKeys ?? []).includes(miningOperationTargetKey(family, operation.area.anchorSystemID, siteIdentity(site)!)));
+      .filter(site => !(obs.unavailableMiningTargetKeys ?? []).includes(miningOperationTargetKey(family, operation.area.anchorSystemID, siteIdentity(site)!)));
+    const candidate = sites[0];
     if (!candidate) return held(tick(WAIT, obs.anomalies == null ? "Current-system scanner unavailable." : `No available ${family} target in this system.`, "Waiting for target", ACTING, false, mem));
     return held(tick({ kind: "reserveMiningTarget", targetType: family, systemID: operation.area.anchorSystemID,
       systemName: obs.systemName ?? operation.area.anchorSystemName ?? "", targetName: candidate.label,
       siteIdentity: siteIdentity(candidate)!, siteID: candidate.siteID!, instanceID: candidate.instanceID ?? null, position: candidate.position!,
+      candidates: sites.map(site => ({ targetType: family, systemID: operation.area.anchorSystemID,
+        systemName: obs.systemName ?? operation.area.anchorSystemName ?? "", targetName: site.label,
+        siteIdentity: siteIdentity(site)!, siteID: site.siteID!, instanceID: site.instanceID ?? null, position: site.position! })),
     }, `Reserving ${family} ${candidate.label}.`, "Selecting target", ACTING, false, mem));
   }
   if (target.targetType !== family || target.claimedByOperationID !== operation.operationID) {
@@ -883,11 +887,12 @@ function operationMineAtTarget(
     const unavailable = new Set(obs.unavailableMiningTargetKeys ?? []);
     const systemID = obs.flightStatus?.solarSystemID ?? operation.area.anchorSystemID;
     const systemName = obs.systemName ?? operation.area.anchorSystemName;
-    const candidate = snapshot.entities
+    const candidates = snapshot.entities
       .filter((entity) => /belt/i.test(entity.name ?? "") && entity.name !== null)
       .filter((entity) => !dry.has(entity.name!))
       .sort((a, b) => String(a.name).localeCompare(String(b.name)))
-      .find((entity) => !unavailable.has(miningOperationTargetKey("BELT", systemID, entity.name!)));
+      .filter((entity) => !unavailable.has(miningOperationTargetKey("BELT", systemID, entity.name!)));
+    const candidate = candidates[0];
     if (candidate === undefined || candidate.name === null || systemName === null) {
       return tick(WAIT, "No unclaimed, non-depleted belt is currently available.", "Waiting for target", ACTING, false, mem);
     }
@@ -897,6 +902,7 @@ function operationMineAtTarget(
       systemID,
       systemName,
       targetName: candidate.name,
+      candidates: candidates.map(entity => ({ targetType: "BELT", systemID, systemName, targetName: entity.name!, position: entity.position })),
     }, `Reserving ${candidate.name} for the operation.`, "Selecting target", ACTING, false, mem);
   }
 

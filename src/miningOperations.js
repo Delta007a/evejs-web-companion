@@ -1,4 +1,5 @@
 "use strict";
+const { positionValid, keyOf, rankMiningCandidates } = require("./miningLocality");
 
 const EXECUTABLE_TARGET_CLASSES = Object.freeze(["BELT", "ORE_ANOMALY", "ICE"]);
 const DEFERRED_TARGET_CLASSES = Object.freeze(["GAS"]);
@@ -192,6 +193,7 @@ function createMiningOperations(options) {
     runtime.tailClaimLoss = false;
     runtime.recoveryAmbiguous = false;
     runtime.completedTargetInRun = false;
+    runtime.lastSelectionKey = null;
     for (const member of def.members) {
       runtime.members.set(member.characterID, {
         characterID: member.characterID,
@@ -309,6 +311,44 @@ function createMiningOperations(options) {
     );
     runtime.state = failed ? "DEGRADED" : runningMiners ? "SELECTING" : "DEGRADED";
     return runtime;
+  }
+
+  function observeMemberLocation(operationID, characterID, space, inSpace, observedAt = now()) {
+    const runtime = runtimeFor(operationID);
+    const member = runtime?.members.get(Number(characterID));
+    if (!member || STOP_STATES.includes(runtime.state)) return;
+    member.location = inSpace && typeof space?.ship?.mode === "string" && !["warp", "warping"].includes(space.ship.mode.toLowerCase()) && positionValid(space?.ship?.position) && Number.isSafeInteger(space.solarSystemID)
+      ? { systemID: space.solarSystemID, position: { ...space.ship.position }, observedAt } : null;
+  }
+
+  function reserveCandidates(operationID, characterID, candidates) {
+    const def = definition(operationID), runtime = runtimeFor(operationID);
+    if (!def || !runtime || !Array.isArray(candidates) || candidates.length > 500) return { acquired: false, reason: "INVALID_CANDIDATES", target: null };
+    // Eligibility precedes locality. reserveCandidate revalidates every rule in
+    // the same synchronous turn, including depletion reset and the final claim.
+    const eligible = candidates.filter(c => c && typeof c.targetName === "string" && c.targetName.trim() && runtime.executionTargetClasses.includes(c.targetType) &&
+      def.area.targetClasses.includes(c.targetType) && c.systemID === def.area.anchorSystemID &&
+      (c.targetType === "BELT" || (Number.isSafeInteger(c.siteID) && c.siteID > 0 && positionValid(c.position) &&
+        (c.instanceID == null || (Number.isSafeInteger(c.instanceID) && c.instanceID > 0)) && c.siteIdentity === `site:${c.siteID}:instance:${c.instanceID ?? c.siteID}`)) &&
+      !(c.targetType === "BELT" && beltMemory.dryBelts(String(c.systemName || "")).some(row => row.beltName === c.targetName && row.all)))
+      .filter(c => {
+        const entry = targetBoard.get(keyOf(c));
+        if (entry?.claimedByOperationID && entry.claimedByOperationID !== operationID) return false;
+        return !entry?.depletionEvidence || entry.depletionEvidence.source === "belt-memory" || entry.depletionEvidence.scannerDisappeared === true;
+      });
+    const ranked = rankMiningCandidates(eligible, [...runtime.members.values()], now());
+    for (const row of ranked) {
+      const result = reserveCandidate(operationID, characterID, row.candidate);
+      if (result.acquired) {
+        if (runtime.lastSelectionKey !== result.target.targetKey) {
+          history(runtime, "TARGET_SELECTION", result.target, { policy: "PREFER_FLEET_LOCALITY", selected: row.key,
+            candidates: ranked.slice(0, 20).map(({ candidate, ...score }) => score) });
+          runtime.lastSelectionKey = result.target.targetKey;
+        }
+        return result;
+      }
+    }
+    return { acquired: false, reason: "NO_AVAILABLE_ELIGIBLE_TARGET", target: null };
   }
 
   function reserveCandidate(operationID, characterID, candidate) {
@@ -530,6 +570,7 @@ function createMiningOperations(options) {
       operationName: def.name,
       role: memberDef.role,
       unloadPolicy: def.unloadPolicy,
+      travelAssist: def.policies?.travelAssist?.mode ?? "DISABLED",
       area: def.area,
       state: runtime.state,
       stopRequested: stopping,
@@ -720,6 +761,8 @@ function createMiningOperations(options) {
     memberFailed,
     finishLaunch,
     reserveCandidate,
+    reserveCandidates,
+    observeMemberLocation,
     activateTarget,
     depleteTarget,
     markReady,

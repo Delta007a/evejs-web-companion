@@ -310,6 +310,8 @@ async function startTestServer(options = {}) {
     webAuth: fakeAuth(),
     staticData: fakeStaticData(),
     bridgeSessionStore: options.sessions,
+    botHost: options.botHost,
+    miningOperations: options.miningOperations,
     errorLogger() {},
   });
   const server = app.listen(0, "127.0.0.1");
@@ -753,6 +755,25 @@ test("⚠ there is NO assist, guard, unanchor or abandon route", async () => {
 });
 
 // Observation consolidation: real BFF routes, counted at the gateway authority.
+test("operation locality taps the single scoped script observation without another snapshot", async () => {
+  const gateway = fakeGateway();
+  const positions = [];
+  const { baseUrl } = await startTestServer({ gateway,
+    botHost: { claimedBy: () => null, authorizesClaim: () => true, operationForClaim: () => ({ operationID: "locality-test" }) },
+    miningOperations: { observeMemberLocation: (...args) => positions.push(args) },
+  });
+  await apiRequest(baseUrl, "/api/bridge/select", { method: "POST", body: { characterID: CHARACTER_ID } });
+  gateway.calls.snapshot.length = 0;
+  const result = await apiRequest(baseUrl, "/api/bridge/script/observation");
+  assert.equal(result.response.status, 200);
+  assert.equal(gateway.calls.snapshot.length, 1);
+  assert.equal(positions.length, 1);
+  assert.equal(positions[0][0], "locality-test");
+  assert.equal(positions[0][1], CHARACTER_ID);
+  assert.deepEqual(positions[0][2], result.payload.space);
+  assert.ok(Number.isFinite(positions[0][4]), "server request-start timestamp bounds freshness");
+});
+
 test("script observation uses one snapshot for scene and drone projections, with fresh bay/limits", async () => {
   const { gateway, baseUrl } = await inSpace();
   await apiRequest(baseUrl, "/api/bridge/space/snapshot");

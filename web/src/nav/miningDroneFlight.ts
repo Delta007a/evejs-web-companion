@@ -146,6 +146,8 @@ export async function recallFlightBeforeManualStop(deps: {
   /** Server expiry may shorten the retry window to fit its credential margin. */
   deadlineMs?(): number | null;
   now?(): number;
+  /** Additional owned equipment may settle on the SAME bounded cleanup reads. */
+  additionalSettlement?(): boolean;
 }): Promise<void> {
   let memory = freshDroneMemory();
   let lastFailure: unknown = null;
@@ -164,7 +166,7 @@ export async function recallFlightBeforeManualStop(deps: {
     }
     const decision = decideMiningDroneFlight(state, memory, null, null, true);
     memory = decision.memory;
-    if (state?.out != null && state.out.every(d => !d.controlled) && memory.returning.length === 0) return;
+    if (state?.out != null && state.out.every(d => !d.controlled) && memory.returning.length === 0 && (deps.additionalSettlement?.() ?? true)) return;
     if (deadlineReached()) break;
     if (decision.action?.kind === "recallDrones") {
       try { await deps.recall(decision.action.droneIDs); } catch (error) { lastFailure = error; }
@@ -172,6 +174,7 @@ export async function recallFlightBeforeManualStop(deps: {
     if (decision.action?.kind === "pause") break;
     if (observation + 1 < MANUAL_STOP_RECALL_OBSERVATIONS) await deps.sleep(MANUAL_STOP_RECALL_CADENCE_MS);
   }
+  if (deps.additionalSettlement?.() === false) throw new Error("Travel assist propulsion has not confirmed stopped within the cleanup window; Stop is paused and pilot control retained.");
   throw new Error(lastFailure === null
     ? "Controlled drones have not been confirmed back in the bay; Stop is paused."
     : "Drone recall or return could not be confirmed; Stop is paused.");

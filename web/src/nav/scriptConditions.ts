@@ -97,6 +97,7 @@ export interface MiningOperationTarget {
 
 /** Stored BFF coordination only. Reading this never reads the game world. */
 export interface MiningOperationAssignment {
+  readonly travelAssist?: "DISABLED" | "AUTO";
   readonly stopRequested?: boolean;
   readonly operationID: string;
   readonly operationName: string;
@@ -699,6 +700,7 @@ export interface ScriptObservation {
    * answer — plenty of hulls fly without one.
    */
   readonly propulsionModules?: readonly PropulsionModule[];
+  readonly travelPropulsionModules?: readonly PropulsionModule[];
   /**
    * Whether a live WARP SCRAMBLER — not a disruptor — is on this ship, from the
    * same jam fold as `jammingSourceIDs` above

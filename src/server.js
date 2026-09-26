@@ -17907,7 +17907,9 @@ app.get(["/api/bridge/drones", "/api/bridge/script/observation"], requireAuth, a
       return;
     }
     const observation = req.path === "/api/bridge/script/observation";
-    // Request-local ownership only. Nothing survives this observation.
+    const observationStartedAt = Date.now();
+    // Snapshot/drone projections are request-local. Only the validated member
+    // position may enter the short-lived operation locality cache below.
     const scope = { ...held };
     const readObservation = async () => {
       const outcome = await gateway.readSpaceSnapshot(scope.bridgeSessionID, { userid: scope.accountID });
@@ -17950,6 +17952,8 @@ app.get(["/api/bridge/drones", "/api/bridge/script/observation"], requireAuth, a
           message: "Pilot, ship or scene changed during the observation. Read again." });
         return;
       }
+      const association = botHost.operationForClaim?.(held.characterID, req.get(botHostModule.BOT_HEADER));
+      if (association) miningOperations.observeMemberLocation(association.operationID, held.characterID, space, !held.stationID, observationStartedAt);
     }
     const settledCode = (settled) =>
       settled.status === "rejected"
@@ -20400,10 +20404,12 @@ app.post("/api/mining-operations/target/reserve", requireAuth, (req, res, next) 
   try {
     const claim = requireMiningOperationClaim(req, res);
     if (!claim) return;
-    if (["ORE_ANOMALY", "ICE"].includes(req.body?.targetType) && Number(req.body.systemID) !== Number(claim.held.solarSystemID)) {
-      return res.status(409).json({ ok: false, error: "SITE_SYSTEM_AUTHORITY_MISMATCH", message: "Site selection requires the pilot's current-system scanner." });
+    const candidates = Array.isArray(req.body?.candidates) ? req.body.candidates : [req.body || {}];
+    if (candidates.some(candidate => !candidate || Number(candidate.systemID) !== Number(claim.held.solarSystemID))) {
+      return res.status(409).json({ ok: false, error: "SITE_SYSTEM_AUTHORITY_MISMATCH", message: "Target selection requires the pilot's current-system observation." });
     }
-    const outcome = miningOperations.reserveCandidate(claim.association.operationID, claim.held.characterID, req.body || {});
+    miningOperations.reconcileBots(botHost.listAll());
+    const outcome = miningOperations.reserveCandidates(claim.association.operationID, claim.held.characterID, candidates);
     res.json({ ok: true, ...outcome });
   } catch (error) {
     next(error);

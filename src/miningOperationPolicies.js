@@ -11,6 +11,7 @@ function normalizePolicies(input, resolveStation, resolveSystem) {
     throw invalid("Unsupported operation policy version.");
   }
   const defaults = { travelAssist: "DISABLED", resourceTarget: "ANY_ELIGIBLE", scouting: "DISABLED", defense: "EXISTING_SELF_DEFENSE" };
+  if (value.travelAssist?.mode === "AUTO") defaults.travelAssist = "AUTO";
   for (const [key, mode] of Object.entries(defaults)) {
     if (value[key] != null && (value[key].mode !== mode || Object.keys(value[key]).some(k => k !== "mode"))) {
       throw invalid(`${key} policy is not executable yet; use ${mode}.`);

@@ -43,6 +43,8 @@ test("parking station is canonical, explicit and separate from delivery or start
 test("future policies have explicit defaults and cannot be silently enabled", () => {
   const defaults = normalize();
   assert.equal(defaults.travelAssist.mode, "DISABLED");
+  assert.equal(normalize({ travelAssist: { mode: "AUTO" } }).travelAssist.mode, "AUTO");
+  assert.throws(() => normalize({ travelAssist: { mode: "AUTO", takeOver: true } }), /not executable/);
   assert.equal(defaults.resourceTarget.mode, "ANY_ELIGIBLE");
   assert.equal(defaults.scouting.mode, "DISABLED");
   assert.equal(defaults.defense.mode, "EXISTING_SELF_DEFENSE");

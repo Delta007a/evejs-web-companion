@@ -1869,6 +1869,7 @@ export async function readMiningOperationAssignment(
 }
 
 export interface MiningTargetCandidate {
+  readonly candidates?: readonly MiningTargetCandidate[];
   readonly siteIdentity?: string;
   readonly siteID?: number;
   readonly instanceID?: number | null;
@@ -1928,7 +1929,7 @@ export interface MiningOperationDefinition {
       readonly destination: { readonly stationID: number; readonly stationName: string; readonly systemName: string } | null;
       readonly corporationDivision: number | null;
     };
-    readonly travelAssist?: { readonly mode: "DISABLED" };
+    readonly travelAssist?: { readonly mode: "DISABLED" | "AUTO" };
     readonly resourceTarget?: { readonly mode: "ANY_ELIGIBLE" };
     readonly scouting?: { readonly mode: "DISABLED" };
     readonly defense?: { readonly mode: "EXISTING_SELF_DEFENSE" };

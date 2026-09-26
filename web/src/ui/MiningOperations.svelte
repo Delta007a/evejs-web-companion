@@ -52,6 +52,7 @@
   let stationLookupSerial = 0;
   type Parking = NonNullable<MiningOperationDefinition["policies"]>["parking"];
   let stopMode = $state<Parking["mode"]>("STAY_IN_PLACE");
+  let travelAssist = $state(true);
   let parkingStation = $state<Parking["destination"]>(null);
   let parkingQuery = $state("");
   let parkingDivision = $state<number | null>(null);
@@ -233,6 +234,7 @@
     anchorError = "Select a known solar system.";
     reach = "CURRENT_SYSTEM";
     targetFamily = "BELT";
+    travelAssist = true;
     unloadPolicy = "HAULER_SERVICE";
     unloadStationID = 0;
     unloadStationName = "";
@@ -259,6 +261,7 @@
     anchorError = anchorSystemName ? null : "Resolve this solar system before saving.";
     reach = definition.area.reach;
     targetFamily = definition.area.targetClasses[0] ?? "BELT";
+    travelAssist = definition.policies?.travelAssist?.mode === "AUTO";
     unloadPolicy = definition.unloadPolicy;
     unloadStationID = definition.unloadDestination?.stationID ?? 0;
     unloadStationName = definition.unloadDestination?.stationName ?? "";
@@ -318,7 +321,7 @@
           targetClasses: selectedClasses,
         },
         targetPolicy: "ANY_ELIGIBLE",
-        policies: { version: 1, parking: { mode: stopMode, destination: stopMode === "STAY_IN_PLACE" ? null : parkingStation, corporationDivision: parkingDivision } },
+        policies: { version: 1, travelAssist: { mode: travelAssist ? "AUTO" : "DISABLED" }, parking: { mode: stopMode, destination: stopMode === "STAY_IN_PLACE" ? null : parkingStation, corporationDivision: parkingDivision } },
         unloadPolicy,
         unloadDestination: unloadStationID > 0 && destinationError === null
           ? { stationID: unloadStationID, stationName: unloadStationName, systemName: unloadStationSystemName, corporationDivision: unloadDivision }
@@ -479,6 +482,8 @@
       {/if}
 
       <h4>Members</h4>
+      <label><input type="checkbox" bind:checked={travelAssist} /> Use fitted AB/MWD for useful resource/container approaches</label>
+      <p class="muted">Free targets prefer fresh main-body locality; haulers do not influence selection.</p>
       <div class="seed">
         <label>Account <input bind:value={accountLookup} placeholder="Existing EveJS account" /></label>
         <button type="button" disabled={!accountLookup.trim()} onclick={() => void loadAccount()}>Load account pilots</button>
@@ -555,7 +560,7 @@
         <tbody>{#each row.runtime.members as member (member.characterID)}<tr><td>{member.characterName}</td><td>{member.role}</td><td>{modeOf(member) === "STANDARD" && (row.definition.unloadPolicy !== "HAULER_SERVICE" || row.definition.area.targetClasses.length !== 1) ? "Standard unavailable" : profileName(member, row.definition.area.targetClasses[0])}</td><td>{member.runtimeState}</td><td>{member.runtimeState === "FAILED" ? `${member.failureCode ? `${member.failureCode}: ` : ""}${member.reason ?? member.phase ?? "Unavailable"}` : member.phase ?? member.reason ?? "—"}</td></tr>{/each}</tbody>
       </table>
       {#if row.runtime.stopFailures.length > 0}<div class="error"><p>Stop / Parking remains incomplete; this operation is not reported stopped.</p>{#each row.runtime.stopFailures as failure}<p>Pilot {failure.characterID}: {failure.message}</p>{/each}</div>{/if}
-      {#if row.runtime.history.length > 0}<details><summary>Target history</summary><ul>{#each row.runtime.history as item}<li>{item.at} · {item.kind} · {item.target?.targetName ?? (item.evidence ? JSON.stringify(item.evidence) : "—")}</li>{/each}</ul></details>{/if}
+      {#if row.runtime.history.length > 0}<details><summary>Target history</summary><ul>{#each row.runtime.history as item}<li>{item.at} · {item.kind} · {item.target?.targetName ?? (item.evidence ? JSON.stringify(item.evidence) : "—")}{#if item.kind === "TARGET_SELECTION" && item.evidence}<details><summary>Locality decision</summary><pre>{JSON.stringify(item.evidence, null, 2)}</pre></details>{/if}</li>{/each}</ul></details>{/if}
     </article>
   {/each}
 
