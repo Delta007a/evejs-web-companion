@@ -273,6 +273,8 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
   assert.deepEqual(standardPlan.payload.members.map((member) => member.script.scriptID), [
     "mcc.belt.hauler-service.miner", "mcc.belt.hauler-service.miner", "mcc.belt.hauler-service.hauler",
   ]);
+  assert.deepEqual(standardPlan.payload.members.map((member) => member.script.rev), [2, 2, 1]);
+  assert.deepEqual(standardPlan.payload.members[0].script.doc.program[0].body[1].args.drones, { kind: "toggle", enabled: true });
   assert.equal(standardPlan.payload.members[2].script.doc.program[0].body[0].then[0].args.station.ref.id, 60003760);
   const stalePlan = await request(baseUrl, `/api/mining-operations/${standardID}/start`, { method: "POST", token,
     body: { grants: {}, planHash: "not-the-reviewed-plan" } });
@@ -280,7 +282,7 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
   assert.equal(stalePlan.payload.error, "OPERATION_LAUNCH_PLAN_STALE");
   const standardStart = await request(baseUrl, `/api/mining-operations/${standardID}/start`, { method: "POST", token,
     body: { planHash: standardPlan.payload.planHash,
-      grants: Object.fromEntries(crew.map((pilot) => [pilot.characterID, { scriptRev: 1, riskClasses: [], maxRuntimeMinutes: 60 }])) } });
+      grants: Object.fromEntries(crew.map((pilot, index) => [pilot.characterID, { scriptRev: standardPlan.payload.members[index].script.rev, riskClasses: [], maxRuntimeMinutes: 60 }])) } });
   assert.equal(standardStart.response.status, 200);
   assert.equal(standardStart.payload.results.filter((row) => row.ok).length, 3);
   assert.equal(host.inputs.at(-1).callerSessionID, null, "the in-space hauler needs no selected browser workspace");

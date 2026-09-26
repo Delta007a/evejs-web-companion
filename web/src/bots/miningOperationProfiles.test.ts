@@ -18,7 +18,7 @@ test("versioned standard BELT profiles are valid runner docs, independent of sav
   const hauling = buildStandardProfile(definition, hauler);
   assert.equal(mining.scriptID, BELT_MINER_ID);
   assert.equal(hauling.scriptID, BELT_HAULER_ID);
-  assert.equal(mining.rev, 1);
+  assert.equal(mining.rev, 2);
   assert.equal(hauling.rev, 1);
   for (const profile of [mining, hauling]) {
     const decoded = decodeScriptValue(profile.doc);
@@ -36,6 +36,7 @@ test("standard miner and hauler use only operation-overlay resource targets and 
   const mining = buildStandardProfile(definition, miner).doc.program[0].body;
   assert.deepEqual(mining.map((node: { macro: string }) => node.macro), ["undock", "mine-at-belt", "jettison-ore"]);
   assert.equal(mining[1].args.belt.belt.mode, "nearest");
+  assert.deepEqual(mining[1].args.drones, { kind: "toggle", enabled: true });
   assert.equal(mining[1].until.fraction, 0.9);
   const hauling = buildStandardProfile(definition, hauler).doc.program[0].body;
   assert.equal(hauling[0].kind, "branch");

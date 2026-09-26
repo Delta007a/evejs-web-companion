@@ -30,6 +30,21 @@ test("a correctly mining flight causes neither launch nor order spam", () => {
   const tick = driver();
   for (let i = 0; i < 12; i++) assert.equal(tick(state([drone(11, 101, 90, "mining")], 1)).action, null);
 });
+
+test("drone diagnostics distinguish unreadable control/limits/bay, no target, quantities and bounded launch exhaustion", () => {
+  const decide = (s: MiningDroneState | null, rock: number | null = 90) =>
+    decideMiningDroneFlight(s, freshDroneMemory(), null, rock, false);
+  assert.match(decide(null).diagnostic, /drone control state unavailable/);
+  assert.match(decide(state(), null).diagnostic, /no current eligible target/);
+  assert.match(decide(state([], null)).diagnostic, /active-drone limit unreadable/);
+  assert.match(decide({ ...state(), bay: null }).diagnostic, /drone bay unavailable/);
+  assert.match(decide({ ...state(), bay: [{ itemID: 1, typeID: 101, quantity: 0 }] }).diagnostic, /valid quantities/);
+  const tick = driver();
+  const attempts = Array.from({ length: 25 }, () => tick(state()));
+  assert.equal(attempts.filter(r => r.action?.kind === "launch").length, 3);
+  assert.match(attempts.at(-1)!.diagnostic, /exhausted bounded launch attempts/);
+  assert.doesNotMatch(attempts.at(-1)!.diagnostic, /controlled flight confirmed/);
+});
 test("one active miner plus three in bay tops up only three", () => {
   const s = state([drone(11)]);
   assert.deepEqual(driver()({ ...s, bay: [{ itemID: 1, typeID: 101, quantity: 3 }] }).action,

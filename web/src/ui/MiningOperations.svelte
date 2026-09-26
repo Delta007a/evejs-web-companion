@@ -64,7 +64,7 @@
   function modeOf(member: DraftMember): "STANDARD" | "CUSTOM" { return member.routineMode ?? (member.automationID ? "CUSTOM" : "STANDARD"); }
   function profileName(member: DraftMember): string {
     if (modeOf(member) === "CUSTOM") return scripts.find((script) => script.scriptID === member.automationID)?.name ?? "Custom routine";
-    return member.role === "MINER" ? "Belt Miner / Hauler Service · v1" : member.role === "HAULER" ? "Belt Hauler · v1" : "Not yet executable";
+    return member.role === "MINER" ? "Belt Miner / Hauler Service · v2" : member.role === "HAULER" ? "Belt Hauler · v1" : "Not yet executable";
   }
 
   function words(cause: unknown): string {

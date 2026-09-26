@@ -793,6 +793,10 @@ function operationMineAtTarget(
 ): MacroTick | null {
   const operation = obs.miningOperation ?? null;
   if (operation === null || operation.role !== "MINER") return null;
+  // The operation can deplete/relocate without leaving the mine-at-belt step.
+  // Tell the flight wrapper explicitly: its generic combat-watch suppression
+  // must not swallow this recall, or relaunch from a cached rock while draining.
+  const settle = (result: MacroTick): MacroTick => ({ ...result, settleDrones: true });
 
   const target = operation.currentTarget;
   if (target === null) {
@@ -834,14 +838,14 @@ function operationMineAtTarget(
   if (target.state === "DEPLETED" || target.state === "DRAINING") {
     if (operation.unloadPolicy === "SELF_UNLOAD") {
       const recall = recallBeforeLeaving(obs, mem, "Returning to unload", null);
-      if (recall !== null) return recall;
+      if (recall !== null) return settle(recall);
       return tick(WAIT, "The target is depleted; unloading through the saved automation.", "Returning to unload", { kind: "done" });
     }
     if (operation.rendezvous?.thisMemberReady === true) {
-      return tick(WAIT, "Partial hold is clear; waiting for the other miners.", "Ready to relocate", ACTING, false, mem);
+      return settle(tick(WAIT, "Partial hold is clear; waiting for the other miners.", "Ready to relocate", ACTING, false, mem));
     }
     const recall = recallBeforeLeaving(obs, mem, "Clearing depleted target", null);
-    if (recall !== null) return recall;
+    if (recall !== null) return settle(recall);
     const items = freightHoldItemIDs(obs.holds ?? null);
     if (items.length > 0) {
       const attempts = num(mem, "operationDumpAttempts") ?? 0;
@@ -851,23 +855,23 @@ function operationMineAtTarget(
           reason: "The miner still has ore after five confirmed jettison attempts, so it will not silently leave custody behind.",
         });
       }
-      return tick(
+      return settle(tick(
         { kind: "jettison", itemIDs: items },
         "Dumping every remaining ore stack for the logistics tail.",
         "Clearing depleted target",
         ACTING,
         false,
         { ...mem, operationDumpAttempts: attempts + 1 },
-      );
+      ));
     }
-    return tick(
+    return settle(tick(
       { kind: "depleteMiningTarget", targetKey: target.targetKey, evidence: { emptyGridReads: OPERATION_EMPTY_CONFIRM_READS, partialDumpConfirmed: true } },
       "This miner is clear of the depleted target.",
       "Ready to relocate",
       ACTING,
       false,
       mem,
-    );
+    ));
   }
 
   const ride = rideAutopilotToSystem(obs, target.systemID, "Following the operation target");
@@ -891,7 +895,7 @@ function operationMineAtTarget(
     }
     if (!isAtBeltForTravel(belt, measurement)) {
       const recall = recallBeforeLeaving(obs, mem, "Following the operation target", belt.itemID);
-      if (recall !== null) return recall;
+      if (recall !== null) return settle(recall);
       return tick({ kind: "warp", targetID: belt.itemID }, `Warping to ${target.targetName}.`, "Following the operation target", ACTING, false, mem);
     }
   }
@@ -910,7 +914,7 @@ function operationMineAtTarget(
     });
   }
   const recall = recallBeforeLeaving(obs, mem, "Clearing depleted target", null);
-  if (recall !== null) return recall;
+  if (recall !== null) return settle(recall);
   if (operation.unloadPolicy === "HAULER_SERVICE") {
     const items = freightHoldItemIDs(obs.holds ?? null);
     if (items.length > 0) {
@@ -921,24 +925,24 @@ function operationMineAtTarget(
           reason: "The miner still has ore after five confirmed jettison attempts, so it will not silently leave custody behind.",
         });
       }
-      return tick(
+      return settle(tick(
         { kind: "jettison", itemIDs: items },
         "The target is depleted; dumping every remaining ore stack before relocation.",
         "Clearing depleted target",
         ACTING,
         false,
         { ...mem, operationEmptyReads: emptyReads, operationDumpAttempts: attempts + 1 },
-      );
+      ));
     }
   }
-  return tick(
+  return settle(tick(
     { kind: "depleteMiningTarget", targetKey: target.targetKey, evidence: { emptyGridReads: emptyReads, partialDumpConfirmed: operation.unloadPolicy === "HAULER_SERVICE" } },
     "The operation target is confirmed depleted.",
     operation.unloadPolicy === "SELF_UNLOAD" ? "Returning to unload" : "Ready to relocate",
     ACTING,
     false,
     mem,
-  );
+  ));
 }
 
 const mineAtBelt: MacroDecider = (step, obs, mem, board) => {

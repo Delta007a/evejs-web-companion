@@ -273,6 +273,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
   let runID = "";
   /** The last decision actually written, so a quiet bot writes nothing. */
   let loggedDecision = "";
+  let loggedDroneDecision = "";
   /**
    * Whether this run's end line is already written. A run ends ONCE: stopping a
    * bot that has already finished emits another terminal snapshot, and a log
@@ -544,6 +545,25 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       return;
     }
     if (token !== runToken || status !== "running") return;
+    // These milestones use the very same observation/decision as the runner.
+    // Never infer a launch/return from a successful write alone.
+    const droneEvent = (why: string) => record({
+      t: now(), kind: "decide", run: runID, says: "mining drone lifecycle",
+      phase: result.phase, stepPath: result.stepPath, why,
+    });
+    const beforeMacro = activeMacroID(script, memory);
+    const afterMacro = activeMacroID(script, result.memory);
+    if (beforeMacro === "jettison-ore" && afterMacro !== beforeMacro && result.memory.latched === null && result.status === "running") {
+      droneEvent("Jettison completed; ore-hold empty confirmed by the jettison macro.");
+    }
+    if (beforeMacro !== "mine-at-belt" && afterMacro === "mine-at-belt") {
+      droneEvent("Mining resume entered; next decision checks the current target and authoritative drone flight.");
+    }
+    if (result.droneRecallConfirmed) droneEvent("Recall confirmed: recalled drone IDs absent from the authoritative in-space list.");
+    if (result.droneDiagnostic !== undefined && result.droneDiagnostic !== loggedDroneDecision) {
+      loggedDroneDecision = result.droneDiagnostic;
+      droneEvent(result.droneDiagnostic);
+    }
     memory = result.memory;
 
     if (result.status === "paused") {
@@ -834,6 +854,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       // what tells a store to rotate the previous run's log out.
       runID = newRunID(Date.now());
       loggedDecision = "";
+      loggedDroneDecision = "";
       loggedEnd = false;
       record({ t: now(), kind: "start", run: runID, script: next.name, status: "running" });
       settle = 0;

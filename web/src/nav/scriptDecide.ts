@@ -627,6 +627,8 @@ export type MacroOutcome =
 export type ScriptBoard = Readonly<Record<string, number | string | null>>;
 
 export interface MacroTick {
+  /** Explicit same-step safety transition (e.g. operation depletion). */
+  readonly settleDrones?: boolean;
   /** Servicing intent, including approach waits; the runner must lease it. */
   readonly containerTargetID?: number;
   readonly action: ScriptAction;
@@ -992,6 +994,10 @@ export function activeStepNeedsTypeNames(script: BotScript, mem: ScriptMemory): 
 export type RunStatus = "running" | "paused" | "done";
 
 export interface ScriptTickResult {
+  readonly settleDrones?: boolean;
+  /** Existing-observation diagnostics; never a request for another read. */
+  readonly droneDiagnostic?: string;
+  readonly droneRecallConfirmed?: boolean;
   readonly containerTargetID?: number;
   readonly action: ScriptAction;
   readonly why: string;
@@ -1060,6 +1066,7 @@ export function decideScriptAction(
       : "The operation has no owned target; settling mining equipment before selecting another.";
     if (miner !== undefined || (miningDrones.length > 0 && obs.hostileOnGrid !== true)) {
       return { ...base, action: miner !== undefined ? { kind: "deactivate", moduleID: miner } : { kind: "recallDrones", droneIDs: miningDrones },
+        droneDiagnostic: `launch skipped: operation target authority unavailable; ${miner !== undefined ? "settling mining module" : "recall requested"}`,
         why, phase: assignmentMissing ? "Waiting for operation assignment" : "Target claim unavailable",
         status: "running", pauseReason: null, memory: mem, containerTargetID: undefined };
     }
@@ -1085,11 +1092,13 @@ export function decideScriptAction(
     const role = d.typeID === null ? null : obs.miningDrones?.roles[d.typeID];
     return role == null || role === "mining" || role === "combat";
   }) === true);
-  if (!enabled && mem.miningFlight === undefined && !terminalFlight) return base;
+  if (!enabled && mem.miningFlight === undefined && !terminalFlight) return mining
+    ? { ...base, droneDiagnostic: "launch skipped: mining drones disabled by routine (explicit drones toggle required)" }
+    : base;
   const origin = obs.snapshot?.ship?.position ?? { x: 0, y: 0, z: 0 };
   const hostileID = obs.snapshot === null || obs.snapshot === undefined ? null :
     hostileRows(obs.snapshot, origin)[0]?.itemID ?? null;
-  const leaving = (operationHeld && hostileID === null) || !enabled || base.status !== "running" || base.memory.latched !== null ||
+  const leaving = base.settleDrones === true || (operationHeld && hostileID === null) || !enabled || base.status !== "running" || base.memory.latched !== null ||
     activeStep(script, base.memory.position)?.id !== step?.id ||
     ["warp", "warpScan", "warpBookmark", "startRoute", "startSystemRoute", "dock", "undock"].includes(base.action.kind);
   const rocks = obs.snapshot?.entities.filter(e => !e.isSelf && (e.miningYieldTypeID !== null || e.beltID !== null)) ?? [];
@@ -1101,6 +1110,11 @@ export function decideScriptAction(
     obs.snapshot == null || obs.hostileOnGrid === null ? null : obs.miningDrones ?? null,
     mem.miningFlight ?? freshDroneMemory(), hostileID, rockID, leaving,
   );
+  base = { ...base,
+    droneDiagnostic: operationHeld ? `operation target authority unavailable; ${flight.diagnostic}` : flight.diagnostic,
+    droneRecallConfirmed: (mem.miningFlight?.returning.length ?? 0) > 0 &&
+      obs.miningDrones?.out != null && flight.memory.returning.length === 0,
+  };
   if (flight.failedDefense) {
     return { ...base, action: WAIT, status: "running", memory: { ...mem, miningFlight: flight.memory,
       latched: { interruptID: null, reason: "Combat drones could not defend the ship; heading home after recall." } } };
@@ -2281,6 +2295,7 @@ function runProgram(
 
     return {
       action: tick.action,
+      settleDrones: tick.settleDrones,
       containerTargetID: tick.containerTargetID,
       why: tick.why,
       phase: tick.phase,

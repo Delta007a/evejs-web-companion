@@ -6,6 +6,13 @@ import type { MacroStep } from "../bots/botScript.ts";
 import type { FlightStatus, MiningHold, SpaceEntity, SpaceSnapshot } from "../store/types.ts";
 import type { MiningOperationAssignment, MiningOperationTarget, ScriptObservation } from "./scriptConditions.ts";
 import { SCRIPT_MACROS } from "./scriptMacros.ts";
+import { decodeScriptValue } from "../bots/scriptCodec.ts";
+import { decodeDroneBay } from "../bridge/drones.ts";
+import type { DroneInSpace } from "../store/types.ts";
+import type { BotLogDraft } from "./botLog.ts";
+import type { ScriptAction } from "./scriptDecide.ts";
+import { createScriptRunner } from "./scriptRunner.ts";
+import { recallFlightBeforeManualStop } from "./miningDroneFlight.ts";
 const require = createRequire(import.meta.url);
 const { buildStandardProfile } = require("../../../src/miningOperationProfiles.js");
 
@@ -85,6 +92,208 @@ function oreHold(itemIDs: readonly number[]): MiningHold[] {
     items: itemIDs.map((itemID) => ({ itemID, typeID: 1230, groupID: 462, categoryID: 25, quantity: 100 })),
   }];
 }
+
+// The actual versioned profile -> codec -> runner -> real macros -> drone
+// ladder, with only world IO replaced. A successful command is NOT a return:
+// recall stays visible for two further observations before the singleton bay
+// rows reappear in the same format as returned drones in the live logs.
+function standardMinerHarness(dronesEnabled = true) {
+  const profile = buildStandardProfile({ area: { targetClasses: ["BELT"] }, unloadPolicy: "HAULER_SERVICE",
+    unloadDestination: { stationID: 60000004, stationName: "Home", systemName: "Jita", corporationDivision: 1 },
+  }, { role: "MINER", routineMode: "STANDARD" });
+  if (!dronesEnabled) delete profile.doc.program[0].body[1].args.drones;
+  const decoded = decodeScriptValue(profile.doc);
+  assert.ok(decoded.ok);
+  const ids = [81, 82, 83, 84, 85];
+  let out: DroneInSpace[] = [];
+  let recallReads = 0;
+  let droneReadUnavailable = false;
+  const bay = () => decodeDroneBay(ids.filter(id => !out.some(d => d.itemID === id))
+    .map(itemID => ({ itemID, typeID: 101, quantity: -1, singleton: true })))!;
+  const droneState = () => ({ out, bay: bay(), maxActive: 5, roles: { 101: "mining" as const } });
+  const rock = { ...entity(501, "Veldspar", 1000), kind: "asteroid" as const, miningYieldTypeID: 1230, beltID: 1, remainingQuantity: 10000 };
+  let world = observation({ snapshot: snapshot([entity(1, "Asteroid Belt 1"), rock]),
+    miningOperationRequired: true, miningModuleIDs: [71], holds: oreHold([]) });
+  const actions: ScriptAction[] = [];
+  const logs: BotLogDraft[] = [];
+  const runner = createScriptRunner({
+    observe: async () => {
+      if (recallReads > 0 && --recallReads === 0) out = [];
+      return { ...world, dronesOut: out.length > 0, miningDrones: droneReadUnavailable ? { ...droneState(), out: null } : droneState(),
+        snapshot: { ...world.snapshot!, entities: [...world.snapshot!.entities, ...out.map(d => ({
+          ...entity(d.itemID, "Mining Drone"), kind: "drone" as const, categoryID: 18,
+          controllerID: 9, typeID: d.typeID, droneActivity: d.activity, targetEntityID: d.targetID,
+        }))] } };
+    },
+    issue: async a => {
+      actions.push(a);
+      switch (a.kind) {
+        case "launchDrones":
+          assert.ok(world.miningOperation?.currentTarget, "launch requires current operation target");
+          for (const row of a.quantities ?? []) {
+            assert.equal(row.quantity, 1, "returned singleton is one real drone");
+            out.push({ itemID: row.itemID, typeID: 101, controlled: true, targetID: null, activity: "idle",
+              name: null, shieldRatio: 1, armorRatio: 1, hullRatio: 1 });
+          }
+          break;
+        case "mineDrones": out = out.map(d => ({ ...d, activity: "mining", targetID: a.targetID })); break;
+        case "recallDrones": out = out.map(d => ({ ...d, activity: "returning" })); recallReads = 3; break;
+        case "activate":
+        case "deactivate": world = { ...world, snapshot: { ...world.snapshot!, ship: { ...world.snapshot!.ship!,
+          activeModuleIDs: a.kind === "activate" ? [a.moduleID] : [] } } }; break;
+        case "lock": world = { ...world, lockedTargetIDs: [a.targetID] }; break;
+        case "unlock": world = { ...world, lockedTargetIDs: [] }; break;
+        case "jettison":
+          assert.equal(out.length, 0, "ore cannot be refilled by a flight while confirming the empty hold");
+          world = { ...world, holds: oreHold([]), oreHoldFraction: 0, holdEmpty: true }; break;
+      }
+    },
+    registry: SCRIPT_MACROS,
+    travelHome: () => { throw new Error("Unexpected home travel in healthy belt cycle"); },
+    sleep: async () => {}, onProgress: () => {}, isSessionLost: () => false, refusalReason: String,
+    log: { write: draft => logs.push(draft) },
+  });
+  runner.start(decoded.doc);
+  const count = (kind: ScriptAction["kind"]) => actions.filter(a => a.kind === kind).length;
+  async function until(predicate: () => boolean) {
+    for (let i = 0; i < 150 && !predicate(); i++) {
+      await runner.tick();
+      assert.equal(runner.getStatus(), "running", JSON.stringify(logs.slice(-4)));
+    }
+    assert.ok(predicate(), JSON.stringify(logs.slice(-8)));
+  }
+  return { runner, actions, logs, count, until, droneState,
+    get world() { return world; },
+    setWorld(over: Partial<ScriptObservation>) { world = { ...world, ...over }; },
+    setDroneReadUnavailable(value: boolean) { droneReadUnavailable = value; },
+    working: () => (world.snapshot!.ship!.activeModuleIDs ?? []).includes(71) && out.length === 5 && out.every(d => d.activity === "mining"),
+    returnFlight: () => { out = []; },
+  };
+}
+
+test("standard BELT profile keeps relaunching the authoritative singleton flight through 40 full jettison cycles", async () => {
+  const h = standardMinerHarness();
+  await h.until(h.working);
+  for (let cycle = 1; cycle <= 40; cycle++) {
+    h.setWorld({ oreHoldFraction: 0.91, holdEmpty: false, holds: oreHold([800 + cycle]) });
+    await h.until(() => h.count("jettison") === cycle);
+    await h.until(h.working);
+    assert.equal(h.count("launchDrones"), cycle + 1);
+    assert.equal(h.count("recallDrones"), cycle);
+    assert.equal(h.world.miningOperation?.currentTarget?.targetKey, target().targetKey);
+  }
+  const events = () => h.logs.filter(l => l.says === "mining drone lifecycle");
+  assert.equal(events().filter(l => l.why?.startsWith("Recall confirmed:")).length, 40);
+  assert.equal(events().filter(l => l.why?.startsWith("Jettison completed;")).length, 40);
+  assert.ok(events().some(l => l.why?.startsWith("Mining resume entered;")));
+  // Settle the last issued activation, then steady observations must not add
+  // repeated flight diagnostics (nor a second launch/recall).
+  for (let i = 0; i < 10; i++) await h.runner.tick();
+  const before = events().length;
+  for (let i = 0; i < 30; i++) await h.runner.tick();
+  assert.equal(events().length, before);
+  assert.ok(events().some(l => l.why?.includes("controlled flight confirmed")));
+  assert.equal(h.count("launchDrones"), 41);
+});
+
+test("omitted drone toggle reproduces the revision-1 modules-only bug and now logs the precise skip once", async () => {
+  const h = standardMinerHarness(false);
+  await h.until(() => h.count("activate") === 1);
+  for (let i = 0; i < 20; i++) await h.runner.tick();
+  assert.equal(h.count("launchDrones"), 0);
+  assert.equal(h.logs.filter(l => l.why?.includes("mining drones disabled by routine")).length, 1);
+});
+
+test("a successful recall command plus an unreadable return never authorizes jettison or a second flight", async () => {
+  const h = standardMinerHarness();
+  await h.until(h.working);
+  h.setWorld({ oreHoldFraction: 0.91, holds: oreHold([801]), holdEmpty: false });
+  await h.until(() => h.count("recallDrones") === 1);
+  h.setDroneReadUnavailable(true);
+  for (let i = 0; i < 20; i++) await h.runner.tick();
+  assert.equal(h.count("jettison"), 0);
+  assert.equal(h.count("launchDrones"), 1);
+  assert.ok(!h.logs.some(l => l.why?.startsWith("Recall confirmed:")));
+  h.setDroneReadUnavailable(false);
+  await h.until(() => h.count("jettison") === 1);
+  await h.until(h.working);
+  assert.equal(h.count("launchDrones"), 2);
+});
+
+test("target loss immediately after jettison cannot relaunch onto the old operation target or choose a standalone belt", async () => {
+  for (const missing of [true, false]) {
+    const h = standardMinerHarness();
+    await h.until(h.working);
+    h.setWorld({ oreHoldFraction: 0.91, holds: oreHold([801]), holdEmpty: false });
+    await h.until(() => h.count("jettison") === 1);
+    h.setWorld({ miningOperation: missing ? null : assignment({ currentTarget: null }) });
+    const offset = h.actions.length;
+    for (let i = 0; i < 30; i++) await h.runner.tick();
+    assert.ok(h.actions.slice(offset).every(a => a.kind === "reserveMiningTarget"), JSON.stringify(h.actions.slice(offset)));
+    assert.equal(h.count("launchDrones"), 1);
+    assert.ok(h.logs.some(l => l.why?.includes("operation assignment is unavailable") || l.why?.includes("operation has no owned target")));
+  }
+});
+
+test("depletion still recalls and confirms the flight before the partial dump and relocation handoff", async () => {
+  const h = standardMinerHarness();
+  await h.until(h.working);
+  h.setWorld({ snapshot: snapshot([entity(1, "Asteroid Belt 1")]), holds: oreHold([801]), oreHoldFraction: 0.27, holdEmpty: false });
+  await h.until(() => h.count("depleteMiningTarget") === 1);
+  assert.equal(h.count("recallDrones"), 1);
+  assert.equal(h.count("jettison"), 1);
+  assert.equal(h.count("launchDrones"), 1);
+  assert.ok(h.actions.findIndex(a => a.kind === "recallDrones") < h.actions.findIndex(a => a.kind === "jettison"));
+  h.setWorld({ miningOperation: assignment({ currentTarget: target({ targetName: "Asteroid Belt 2", state: "RESERVED" }) }),
+    snapshot: snapshot([entity(1, "Asteroid Belt 1"), entity(2, "Asteroid Belt 2", 300_000)]) });
+  await h.until(() => h.count("warp") === 1);
+  assert.equal(h.count("launchDrones"), 1);
+});
+
+test("shared depletion and ready-to-relocate do not relaunch against a locally cached rock", async () => {
+  const h = standardMinerHarness();
+  await h.until(h.working);
+  // Another member reported depletion; this pilot still sees an old rock row.
+  h.setWorld({ miningOperation: assignment({ currentTarget: target({ state: "DEPLETED" }) }),
+    holds: oreHold([801]), oreHoldFraction: 0.27, holdEmpty: false });
+  await h.until(() => h.count("depleteMiningTarget") === 1);
+  h.setWorld({ miningOperation: assignment({ currentTarget: target({ state: "DEPLETED" }),
+    rendezvous: { kind: "MINER_CLEARANCE", required: [1, 2], ready: [1], thisMemberReady: true } }) });
+  for (let i = 0; i < 20; i++) await h.runner.tick();
+  assert.equal(h.count("recallDrones"), 1);
+  assert.equal(h.count("launchDrones"), 1);
+});
+
+test("operation relocation recalls an active flight before warping even though the mining step has not changed", async () => {
+  const h = standardMinerHarness();
+  await h.until(h.working);
+  h.setWorld({ miningOperation: assignment({ currentTarget: target({ targetName: "Asteroid Belt 2", state: "RESERVED" }) }),
+    snapshot: snapshot([entity(1, "Asteroid Belt 1"), entity(2, "Asteroid Belt 2", 300_000)]) });
+  await h.until(() => h.count("warp") === 1);
+  assert.equal(h.count("recallDrones"), 1);
+  assert.equal(h.droneState().out.length, 0);
+  assert.equal(h.count("launchDrones"), 1);
+});
+
+test("graceful Stop after standard-profile jettison/resume still waits for authoritative drone return", async () => {
+  const h = standardMinerHarness();
+  await h.until(h.working);
+  h.setWorld({ oreHoldFraction: 0.91, holds: oreHold([801]), holdEmpty: false });
+  await h.until(() => h.count("jettison") === 1);
+  await h.until(h.working);
+  await h.runner.beginGracefulStop();
+  const before = h.actions.length;
+  await h.runner.tick();
+  assert.equal(h.actions.length, before, "no new script work during graceful stop");
+  let recalls = 0;
+  await recallFlightBeforeManualStop({ read: async () => h.droneState(),
+    recall: async ids => { assert.equal(ids.length, 5); recalls++; },
+    sleep: async () => { assert.equal(h.runner.getStatus(), "paused"); h.returnFlight(); },
+  });
+  await h.runner.stop();
+  assert.equal(recalls, 1);
+  assert.equal(h.runner.getStatus(), "stopped");
+});
 
 test("operation miner reserves one deterministic eligible belt when no target exists", () => {
   const mine = SCRIPT_MACROS["mine-at-belt"];

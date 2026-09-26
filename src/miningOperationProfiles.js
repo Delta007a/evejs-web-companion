@@ -4,10 +4,9 @@
 // while rev and botHost's document hash pin the exact granted implementation.
 const BELT_MINER_ID = "mcc.belt.hauler-service.miner";
 const BELT_HAULER_ID = "mcc.belt.hauler-service.hauler";
-const PROFILE_REV = 1;
 const PROFILES = Object.freeze({
-  MINER: { scriptID: BELT_MINER_ID, name: "Belt Miner / Hauler Service", rev: PROFILE_REV },
-  HAULER: { scriptID: BELT_HAULER_ID, name: "Belt Hauler", rev: PROFILE_REV },
+  MINER: { scriptID: BELT_MINER_ID, name: "Belt Miner / Hauler Service", rev: 2 },
+  HAULER: { scriptID: BELT_HAULER_ID, name: "Belt Hauler", rev: 1 },
 });
 
 function standardProfileFor(definition, member) {
@@ -32,7 +31,9 @@ function buildStandardProfile(definition, member) {
     program: member.role === "MINER" ? [{
       id: "loop", kind: "loop", repeat: { kind: "forever" }, body: [
         { id: "undock", kind: "macro", macro: "undock", args: {} },
-        { id: "mine", kind: "macro", macro: "mine-at-belt", args: { belt }, until: { kind: "ore-hold-at-least", fraction: 0.9 } },
+        // Drone management is opt-in in the ordinary runner, including every
+        // re-entry after jettison. Omitting this toggle leaves a modules-only miner.
+        { id: "mine", kind: "macro", macro: "mine-at-belt", args: { belt, drones: { kind: "toggle", enabled: true } }, until: { kind: "ore-hold-at-least", fraction: 0.9 } },
         { id: "jettison", kind: "macro", macro: "jettison-ore", args: {} },
       ],
     }] : [{
@@ -55,4 +56,4 @@ function buildStandardProfile(definition, member) {
   return { ...profile, doc };
 }
 
-module.exports = { BELT_MINER_ID, BELT_HAULER_ID, PROFILE_REV, PROFILES, standardProfileFor, buildStandardProfile };
+module.exports = { BELT_MINER_ID, BELT_HAULER_ID, PROFILES, standardProfileFor, buildStandardProfile };
