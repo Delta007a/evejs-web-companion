@@ -4,6 +4,9 @@ Base: `c8ea5f51ea37a223cfffc41f5121ec2856921316` in isolated 41,
 `feature/mining-operations-playable-foundation`. No gameplay, service restart,
 live data copy, runtime/mod edit, merge or promotion.
 
+Historical report: the inherited 24-hour cap described below was subsequently
+replaced by the configurable finite policy in [hosted-runtime-limit-audit.md](hosted-runtime-limit-audit.md).
+
 ## Source audit and resource policy
 
 Existing `scriptMacros.operationMineAtTarget` already gates family, target claim,

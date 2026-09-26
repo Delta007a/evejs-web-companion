@@ -52,8 +52,9 @@ function makeFakeStack(log) {
       riskClasses: Array.isArray(doc.riskClasses) ? doc.riskClasses : [],
       restartSafe: doc.restartSafe !== false,
     }),
-    validateBotLaunchGrant: (grant, scriptRev, policy) => {
-      if (grant && (grant.maxRuntimeMinutes < 1 || grant.maxRuntimeMinutes > 1440)) return { ok: false, code: "BOT_GRANT_INVALID", message: "Maximum approved runtime is 1440 minutes." };
+    validateBotLaunchGrant: (grant, scriptRev, policy, maximum) => {
+      assert.ok(Number.isSafeInteger(maximum), "host supplies deployment policy to the validator");
+      if (grant && (grant.maxRuntimeMinutes < 1 || grant.maxRuntimeMinutes > maximum)) return { ok: false, code: "BOT_GRANT_INVALID", message: `Maximum approved runtime is ${maximum} minutes.` };
       if (!grant || Number(grant.scriptRev) !== scriptRev) {
         return { ok: false, code: "BOT_GRANT_REQUIRED", message: "Review this run." };
       }
@@ -536,9 +537,9 @@ test("manual Stop and deadline expiry share one pending drone recovery", async (
   assert.equal(h.log.filter(([name]) => name === "logout").length, 1);
 });
 
-test("all four duration presets arm the same graceful expiry path", async (t) => {
+test("all configured duration presets arm the same graceful expiry path", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
-  for (const minutes of [60, 240, 720, 1440]) {
+  for (const minutes of require("./config").hostedRunPolicy.durationChoices) {
     const h = await timedFlightHarness("none");
     await h.host.start({ ...START, grant: { ...START.grant, maxRuntimeMinutes: minutes } });
     assert.equal(h.deadline.delayMs, minutes * 60_000);
@@ -1719,7 +1720,7 @@ test("extension refuses other operations/accounts, oversized grants and elapsed 
   const host = makeHost({ now: () => clock });
   const started = await host.start({ ...START, operationID: "A", operationControllerAccountID: 99 });
   for (const [operation, accountID, minutes, code] of [["B", 99, 60, "OPERATION_GRANT_FORBIDDEN"], ["A", 7, 60, "OPERATION_GRANT_FORBIDDEN"],
-    ["A", 99, 1440, "BOT_GRANT_INVALID"], ["A", 99, 1, "BOT_GRANT_INVALID"]]) {
+    ["A", 99, require("./config").hostedRunPolicy.maxRuntimeMinutes, "BOT_GRANT_INVALID"], ["A", 99, 1, "BOT_GRANT_INVALID"]]) {
     assert.equal((await host.extendOperationGrant(started.bot.botID, operation, accountID, minutes)).code, code);
   }
   clock = Date.parse(started.bot.expiresAt);
@@ -1742,4 +1743,64 @@ test("manual or natural-expiry cleanup already in progress cannot be resurrected
     assert.equal((await host.extendOperationGrant(started.bot.botID, "A", 99, 60)).code, "BOT_GRANT_NOT_ACTIVE");
     release(); await stopping; await host.stopAll();
   }
+});
+
+test("24h +24h +24h retains run/claim and performs no restart; old callbacks lose authority", async t => {
+  const log = [], timers = []; let clock = 1000;
+  const host = makeHost({ log, now: () => clock,
+    webAuth: { createBotSessionToken: () => "initial", extendBotSessionToken: (_token, deadline) => `renewed:${deadline}` },
+    setDeadlineTimeout(callback, delayMs) { const timer = { callback, delayMs, unref() {} }; timers.push(timer); return timer; }, clearDeadlineTimeout() {},
+  });
+  t.after(() => host.stopAll());
+  const started = await host.start({ ...START, operationID: "A", operationRole: "MINER", operationControllerAccountID: 99,
+    grant: { ...START.grant, maxRuntimeMinutes: 24 * 60 } });
+  const origin = Date.parse(started.bot.expiresAt);
+  for (const hours of [48, 72]) {
+    clock += 60_000;
+    const extended = await host.extendOperationGrant(started.bot.botID, "A", 99, 24 * 60);
+    assert.equal(extended.ok, true);
+    assert.equal(extended.bot.botID, started.bot.botID);
+    assert.equal(extended.bot.operationID, "A");
+    assert.equal(extended.bot.maxRuntimeMinutes, hours * 60);
+    assert.equal(Date.parse(extended.bot.expiresAt), origin + (hours - 24) * 3_600_000);
+    assert.equal(timers.at(-1).delayMs, Date.parse(extended.bot.expiresAt) - clock);
+    await timers.at(-2).callback();
+    assert.equal(host.listAll()[0].status, "running");
+    assert.equal(host.claimedBy(START.characterID), started.bot.botID);
+  }
+  for (const name of ["startCustomBot", "selectCharacter"]) assert.equal(log.filter(row => row[0] === name).length, 1);
+  assert.equal(log.filter(row => row[0] === "logout").length, 0);
+});
+
+test("long recovered run retains absolute expiry and total grant, and rejects oversized roster expiry", async t => {
+  let clock = 1000; const rosterPath = tempRosterPath();
+  const before = makeHost({ now: () => clock, persistPath: rosterPath });
+  const started = await before.start({ ...START, operationID: "A", operationControllerAccountID: 99,
+    grant: { ...START.grant, maxRuntimeMinutes: 7 * 24 * 60 } });
+  assert.equal(started.ok, true);
+  t.after(() => before.stopAll());
+  clock += 2 * 24 * 3_600_000;
+  let delay;
+  const opts = { now: () => clock, persistPath: rosterPath, loadAccount: async () => ACCOUNT,
+    loadScript: () => ({ scriptID: "s1", name: "Miner", rev: 1, doc: { valid: true } }),
+    setDeadlineTimeout(_fn, ms) { delay = ms; return { unref() {} }; }, clearDeadlineTimeout() {},
+  };
+  const after = makeHost(opts); t.after(() => after.stopAll()); await after.resume();
+  const resumed = after.listAll()[0];
+  assert.equal(resumed.status, "running"); assert.equal(resumed.expiresAt, started.bot.expiresAt);
+  assert.equal(resumed.maxRuntimeMinutes, 7 * 24 * 60); assert.equal(delay, 5 * 24 * 3_600_000);
+  assert.equal(readRosterFile(rosterPath)[0].operationControllerAccountID, 99);
+  const bad = readRosterFile(rosterPath)[0]; bad.expiresAt = new Date(clock + 30 * 24 * 3_600_000).toISOString();
+  fs.writeFileSync(rosterPath, JSON.stringify({ version: 2, bots: [bad] }));
+  const refused = makeHost(opts); t.after(() => refused.stopAll()); await refused.resume();
+  assert.notEqual(refused.listAll()[0].status, "running");
+  assert.match(refused.listAll()[0].why, /expiry exceeds/);
+});
+
+test("long run cannot be extended after operation Parking intent", async t => {
+  const host = parkingHost([]); t.after(() => host.stopAll());
+  const started = await host.start({ ...START, operationID: "A", operationControllerAccountID: 99,
+    grant: { ...START.grant, maxRuntimeMinutes: 48 * 60 } });
+  await host.prepareOperationStop(started.bot.botID, ACCOUNT.accountID, "A");
+  assert.equal((await host.extendOperationGrant(started.bot.botID, "A", 99, 24 * 60)).code, "BOT_GRANT_NOT_ACTIVE");
 });

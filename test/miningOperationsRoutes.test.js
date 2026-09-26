@@ -261,6 +261,9 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
 
   const viewed = await request(baseUrl, "/api/mining-operations", { token });
   assert.equal(viewed.response.status, 200);
+  assert.deepEqual(viewed.payload.capabilities.hostedRunPolicy, require("../src/config").hostedRunPolicy);
+  const botsPolicy = await request(baseUrl, "/api/bots", { token });
+  assert.deepEqual(botsPolicy.payload.hostedRunPolicy, viewed.payload.capabilities.hostedRunPolicy);
   assert.equal(viewed.payload.operations.find((row) => row.definition.operationID === operationID).runtime.members[0].runtimeState, "running");
 
   const stopped = await request(baseUrl, `/api/mining-operations/${operationID}/stop`, {

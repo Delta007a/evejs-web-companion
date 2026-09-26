@@ -2000,6 +2000,7 @@ export interface MiningOperationsPayload {
   }[];
   readonly targetBoard: readonly MiningOperationTarget[];
   readonly capabilities: {
+    readonly hostedRunPolicy?: import("../bots/hostedRunPolicy.ts").HostedRunPolicy;
     readonly targetClasses: Readonly<Record<MiningTargetType, { readonly executable: boolean; readonly note: string }>>;
     readonly reach: Readonly<Record<string, { readonly executable: boolean; readonly note?: string }>>;
     readonly defender: { readonly executable: boolean; readonly note: string };
@@ -3695,8 +3696,9 @@ function asLastAlert(value: JsonValue | undefined): { message: string; atMs: num
   return { message, atMs: asNumberOrNull(row.atMs) ?? 0 };
 }
 
-export async function listServerBots(options: ApiOptions = {}): Promise<ServerBot[]> {
+export async function listServerBots(options: ApiOptions = {}, onPolicy?: (policy: import("../bots/hostedRunPolicy.ts").HostedRunPolicy | null) => void): Promise<ServerBot[]> {
   const data = await getJson("/api/bots", options);
+  onPolicy?.((data.hostedRunPolicy ?? null) as unknown as import("../bots/hostedRunPolicy.ts").HostedRunPolicy | null);
   return Array.isArray(data.bots) ? data.bots.map(asServerBot) : [];
 }
 

@@ -48,6 +48,7 @@ const fs = require("fs");
 const path = require("path");
 const { pathToFileURL } = require("url");
 const { CONTAINER_LEASE_MS } = require("./lootMemory");
+const { hostedRunPolicy } = require("./config");
 
 // An unguessable per-run claim capability. The public botID is deliberately NOT
 // accepted by the select guard: account-scoped bot listings expose bot IDs, so
@@ -681,7 +682,7 @@ function createBotHost(options) {
       recordScriptName = scriptName;
     }
 
-    const grantVerdict = stack.validateBotLaunchGrant(grant, normalizedRev, runPolicy);
+    const grantVerdict = stack.validateBotLaunchGrant(grant, normalizedRev, runPolicy, hostedRunPolicy.maxRuntimeMinutes);
     if (!grantVerdict.ok) {
       return { ok: false, code: grantVerdict.code, message: grantVerdict.message };
     }
@@ -703,6 +704,12 @@ function createBotHost(options) {
         code: "BOT_GRANT_EXPIRED",
         message: "This bot's approved run time has ended. Review and start it again.",
       };
+    }
+
+    // Persisted absolute expiry is not a fresh grant. Refuse malformed or
+    // over-policy future deadlines before credentials, claims or timer creation.
+    if (deadlineMs - now() > grantVerdict.grant.maxRuntimeMinutes * 60_000) {
+      return { ok: false, code: "BOT_GRANT_INVALID", message: "Recovered expiry exceeds the approved finite runtime." };
     }
 
     if (claims.has(characterID)) {
@@ -897,9 +904,9 @@ function createBotHost(options) {
         record.status !== "running" || Date.parse(record.expiresAt) <= now()) {
       return { ok: false, code: "BOT_GRANT_NOT_ACTIVE", message: "This member is not running or its Stop/expiry boundary has begun; extension cannot resume it." };
     }
-    if (![60, 240, 720, 1440].includes(minutes)) return { ok: false, code: "BOT_GRANT_INVALID", message: "Choose +1, +4, +12 or +24 hours." };
+    if (!hostedRunPolicy.durationChoices.includes(minutes)) return { ok: false, code: "BOT_GRANT_INVALID", message: "Choose an extension offered by the configured hosted-run policy." };
     const maxRuntimeMinutes = record.maxRuntimeMinutes + minutes;
-    const verdict = stack.validateBotLaunchGrant({ scriptRev: record.scriptRev, riskClasses: record.riskClasses, maxRuntimeMinutes }, record.scriptRev, { riskClasses: record.riskClasses });
+    const verdict = stack.validateBotLaunchGrant({ scriptRev: record.scriptRev, riskClasses: record.riskClasses, maxRuntimeMinutes }, record.scriptRev, { riskClasses: record.riskClasses }, hostedRunPolicy.maxRuntimeMinutes);
     if (!verdict.ok) return { ...verdict, message: `${verdict.message} Extension adds to the already approved total, not a fresh run.` };
     const expiresAt = new Date(Date.parse(record.expiresAt) + minutes * 60_000).toISOString();
     try {

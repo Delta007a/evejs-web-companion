@@ -505,21 +505,22 @@ for (const route of ["/api/bots", "/api/logout"]) {
 }
 
 
-test("real host hands off through private-claim loopback with a 24-hour credential", async (t) => {
+for (const hours of [24, 168]) {
+test(`real host hands off through private-claim loopback with a ${hours}-hour credential`, async (t) => {
   const log = [];
   const { app, baseUrl } = await startTestServer(log, null, { loopback: true });
   t.after(() => app.locals.botHost.stopAll());
   const token = await signInAndSelect(baseUrl, 7001);
   const browser = webAuth.verifySessionToken(token);
   const result = await request(baseUrl, "/api/bots/start", {
-    method: "POST", token, body: { characterID: 7001, scriptID: "s1", grant: { ...GRANT, maxRuntimeMinutes: 1440 } },
+    method: "POST", token, body: { characterID: 7001, scriptID: "s1", grant: { ...GRANT, maxRuntimeMinutes: hours * 60 } },
   });
   assert.equal(result.response.status, 200);
   const botToken = log.find(([name]) => name === "bot-select")[2];
   const bot = webAuth.verifySessionToken(botToken);
   assert.notEqual(bot.sessionID, browser.sessionID);
   assert.equal(bot.exp, Date.parse(result.payload.bot.expiresAt) + 5 * 60 * 1000);
-  assert.ok(bot.exp - bot.iat > 24 * 60 * 60 * 1000);
+  assert.ok(bot.exp - bot.iat > hours * 60 * 60 * 1000);
   assert.equal(app.locals.bridgeSessions.has(browser.sessionID), false);
   assert.equal(app.locals.bridgeSessions.get(bot.sessionID).characterID, 7001);
   // The browser's post-success UI sync cannot log the bot out.
@@ -527,6 +528,7 @@ test("real host hands off through private-claim loopback with a 24-hour credenti
   assert.equal(app.locals.bridgeSessions.has(bot.sessionID), true);
   assert.ok(app.locals.botHost.claimedBy(7001));
 });
+}
 
 test("ambiguous gateway release failure preserves caller and never selects a bot", async (t) => {
   const log = [];

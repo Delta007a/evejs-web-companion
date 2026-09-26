@@ -20029,6 +20029,7 @@ function operationPayload() {
     operations: miningOperations.list(botHost.listAll()),
     targetBoard: miningTargetBoard.list(),
     capabilities: {
+      hostedRunPolicy: config.hostedRunPolicy,
       profileFamilies: familyCapabilities(),
       targetClasses: {
         BELT: { executable: true, note: "Current-system belt discovery and mining are supported." },
@@ -20514,7 +20515,7 @@ const BOT_START_STATUS = {
 
 app.get("/api/bots", requireAuth, (req, res, next) => {
   try {
-    res.json({ ok: true, bots: botHost.list(req.account.accountID) });
+    res.json({ ok: true, bots: botHost.list(req.account.accountID), hostedRunPolicy: config.hostedRunPolicy });
   } catch (error) {
     next(error);
   }

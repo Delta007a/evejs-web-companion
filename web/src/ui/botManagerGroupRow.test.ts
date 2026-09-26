@@ -12,6 +12,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
+import { hostedRunPolicy } from "../bots/hostedRunPolicy.ts";
 
 register("./svelteSsrHook.ts", import.meta.url);
 
@@ -52,6 +53,7 @@ function renderRow(props: Record<string, unknown>): string {
   const output = render(GroupRow as never, {
     props: {
       scripts: SCRIPTS,
+      hostedRunPolicy: hostedRunPolicy(),
       sessions: [],
       serverBots: [],
       flow: new Proxy({}, { get: () => async () => ({}) }),

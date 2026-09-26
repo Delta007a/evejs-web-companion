@@ -138,7 +138,7 @@ function createSessionToken(account) {
 // Internal-only: the host supplies its validated run deadline, never an HTTP field.
 function createBotSessionToken(account, deadlineMs) {
   const now = Date.now();
-  if (!Number.isFinite(deadlineMs) || deadlineMs <= now || deadlineMs > now + 24 * 60 * 60 * 1000) {
+  if (!Number.isFinite(deadlineMs) || deadlineMs <= now || deadlineMs > now + config.hostedRunPolicy.maxRuntimeMinutes * 60_000) {
     throw new Error("Invalid server bot authentication deadline.");
   }
   return signSessionToken(account, deadlineMs + 5 * 60 * 1000);
@@ -149,7 +149,7 @@ function createBotSessionToken(account, deadlineMs) {
 function extendBotSessionToken(token, deadlineMs) {
   const payload = verifySessionToken(token);
   if (!payload || !Number.isFinite(deadlineMs) || deadlineMs <= Date.now() ||
-      deadlineMs > Date.now() + 24 * 60 * 60 * 1000 || deadlineMs + 5 * 60 * 1000 <= payload.exp) {
+      deadlineMs > Date.now() + config.hostedRunPolicy.maxRuntimeMinutes * 60_000 || deadlineMs + 5 * 60 * 1000 <= payload.exp) {
     throw new Error("The hosted credential cannot be extended to that deadline.");
   }
   const encoded = base64UrlJson({ ...payload, exp: deadlineMs + 5 * 60 * 1000 });

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { createControlPlanePoll } from "../app/controlPlanePoll.ts";
+  import { hostedDurationLabel } from "../bots/hostedRunPolicy.ts";
   import {
     deleteMiningOperation,
     extendMiningOperation,
@@ -34,6 +35,7 @@
   let resourceQuery = $state("");
   let extensionResult = $state<string | null>(null);
   let payload = $state<MiningOperationsPayload | null>(null);
+  const runPolicy = $derived(payload?.capabilities.hostedRunPolicy ?? null);
   let scripts = $state<OperationRoutineSummary[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
@@ -96,6 +98,8 @@
 
   function received(next: MiningOperationsPayload): void {
       payload = next;
+      const policy = next.capabilities.hostedRunPolicy;
+      if (policy && !policy.durationChoices.includes(runtimeMinutes)) runtimeMinutes = policy.defaultRuntimeMinutes;
       loading = false;
       disconnected = false;
       pollError = null;
@@ -363,7 +367,7 @@
   }
 
   async function start(definition: MiningOperationDefinition & { operationID: string }): Promise<void> {
-    if (disconnected) return;
+    if (disconnected || !runPolicy) return;
     busy = definition.operationID;
     error = null;
     try {
@@ -400,7 +404,7 @@
   }
 
   async function extend(operationID: string, minutes: number): Promise<void> {
-    if (disconnected || !window.confirm(`Add ${minutes / 60} hours to current member expiries? Total approved runtime is capped at 24 hours; stopped members are not resumed.`)) return;
+    if (disconnected || !runPolicy || !window.confirm(`Add ${hostedDurationLabel(minutes)} to current member expiries? Total approved runtime is capped at ${hostedDurationLabel(runPolicy.maxRuntimeMinutes)}; stopped members are not resumed.`)) return;
     busy = operationID; extensionResult = null;
     try {
       const result = await extendMiningOperation(operationID, minutes, opts()); payload = result.payload;
@@ -436,11 +440,8 @@
     </div>
     <div class="launch-settings">
       <label>Run limit
-        <select bind:value={runtimeMinutes} aria-label="Operation run limit">
-          <option value={60}>1 hour</option>
-          <option value={240}>4 hours</option>
-          <option value={720}>12 hours</option>
-          <option value={1440}>24 hours</option>
+        <select bind:value={runtimeMinutes} aria-label="Operation run limit" disabled={!runPolicy}>
+          {#each runPolicy?.durationChoices ?? [] as minutes}<option value={minutes}>{hostedDurationLabel(minutes)}</option>{/each}
         </select>
       </label>
       <button type="button" onclick={newOperation}>+ New operation</button>
@@ -600,8 +601,8 @@
       </div></div>
       {#if row.runtime.statusReason}<p class="notice"><strong>Status:</strong> {row.runtime.statusReason}</p>{/if}
       {#if !["DRAFT", "STOPPED", "STOPPING", "PARKING", "PARKING_FAILED", "ASSEMBLING"].includes(row.runtime.state)}
-        <p><strong>Run grant:</strong> {remaining(row)} · total approval cap 24h</p>
-        <div>{#each [60, 240, 720, 1440] as minutes}<button type="button" title="Adds to current expiry; total approved runtime cannot exceed 24 hours" disabled={busy !== null || disconnected || row.runtime.members.every(member => member.runtimeState !== "running" || (member.maxRuntimeMinutes ?? 1440) + minutes > 1440)} onclick={() => void extend(row.definition.operationID, minutes)}>+{minutes / 60}h</button>{/each}</div>
+        <p><strong>Run grant:</strong> {remaining(row)} · total approval cap {runPolicy ? hostedDurationLabel(runPolicy.maxRuntimeMinutes) : "unavailable"}</p>
+        <div>{#each runPolicy?.durationChoices ?? [] as minutes}<button type="button" title="Adds to current expiry within the configured total approval cap" disabled={busy !== null || disconnected || row.runtime.members.every(member => member.runtimeState !== "running" || (member.maxRuntimeMinutes ?? Infinity) + minutes > runPolicy!.maxRuntimeMinutes)} onclick={() => void extend(row.definition.operationID, minutes)}>+{hostedDurationLabel(minutes)}</button>{/each}</div>
       {/if}
       <p><strong>Area:</strong> {row.definition.area.anchorSystemName ?? "Unknown system"} · {row.definition.area.reach === "CURRENT_SYSTEM" ? "current system" : "adjacent mode (anchor-only execution in v0.1)"}</p>
       <p><strong>Target class / unload:</strong> {row.definition.area.targetClasses.join(", ")} · {row.definition.unloadPolicy === "HAULER_SERVICE" ? "Hauler service" : "Self unload"}</p>

@@ -1,6 +1,7 @@
 "use strict";
 
 const path = require("path");
+const { hostedRunPolicy } = require("../web/src/bots/hostedRunPolicy.ts");
 
 const repoRoot = path.resolve(__dirname, "..");
 const defaultEveRoot = path.resolve(repoRoot, "..", "eve.js");
@@ -36,6 +37,7 @@ const sdeDir = path.resolve(
 );
 
 module.exports = {
+  hostedRunPolicy: hostedRunPolicy(process.env.MAX_HOSTED_RUN_HOURS),
   repoRoot,
   dataDir,
   iconCacheDir: path.resolve(process.env.EVEJS_ICON_CACHE_DIR || path.join(dataDir, "icon-cache")),

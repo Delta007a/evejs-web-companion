@@ -52,7 +52,7 @@ test("internal bot grant renewal preserves session identity and rejects expired/
   const renewed = webAuth.extendBotSessionToken(token, now + 5 * 60 * 60_000);
   assert.deepEqual(webAuth.verifySessionToken(renewed), { ...before, exp: now + (5 * 60 + 5) * 60_000 });
   assert.throws(() => webAuth.extendBotSessionToken(`${token}x`, now + 5 * 60 * 60_000));
-  assert.throws(() => webAuth.extendBotSessionToken(token, now + 25 * 60 * 60_000));
+  assert.throws(() => webAuth.extendBotSessionToken(token, now + (require("../src/config").hostedRunPolicy.maxRuntimeMinutes + 1) * 60_000));
   Date.now.mock.mockImplementation(() => now + 66 * 60_000);
   assert.equal(webAuth.verifySessionToken(token), null);
   assert.ok(webAuth.verifySessionToken(renewed));
@@ -75,4 +75,18 @@ test("bot credential covers 24 hours plus cleanup without extending browser TTL"
   assert.equal(webAuth.verifySessionToken(bot), null);
   assert.ok(webAuth.verifySessionToken(bot, { allowExpired: true }));
   assert.equal(webAuth.verifySessionToken(`${bot}tampered`, { allowExpired: true }), null);
+});
+
+test("hosted token supports seven days and renewal past 24h while preserving session identity", t => {
+  const origin = Date.now(); t.mock.method(Date, "now", () => origin);
+  const account = { username: "pilot", accountID: 42 };
+  const initial = webAuth.createBotSessionToken(account, origin + 24 * 3_600_000);
+  const first = webAuth.verifySessionToken(initial);
+  const extended = webAuth.extendBotSessionToken(initial, origin + 48 * 3_600_000);
+  assert.deepEqual(webAuth.verifySessionToken(extended), { ...first, exp: origin + 48 * 3_600_000 + 300_000 });
+  const week = webAuth.createBotSessionToken(account, origin + 168 * 3_600_000);
+  Date.now.mock.mockImplementation(() => origin + 168 * 3_600_000);
+  assert.ok(webAuth.verifySessionToken(week), "cleanup remains authenticated at expiry");
+  Date.now.mock.mockImplementation(() => origin + 168 * 3_600_000 + 301_000);
+  assert.equal(webAuth.verifySessionToken(week), null);
 });

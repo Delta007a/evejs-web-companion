@@ -59,6 +59,7 @@
   import { companionGroupRoster, pilotGroups } from "../bots/pilotGroups.ts";
   import BotManagerGroupRow from "./BotManagerGroupRow.svelte";
   import BotManagerPilotRow from "./BotManagerPilotRow.svelte";
+  import type { HostedRunPolicy } from "../bots/hostedRunPolicy.ts";
   import ActionButton from "./ActionButton.svelte";
 
   let {
@@ -97,10 +98,11 @@
   let pilotsLoaded = $state(false);
   let pilotsError = $state<string | null>(null);
   let serverBots = $state<ServerBot[]>([]);
+  let hostedRunPolicy = $state<HostedRunPolicy | null>(null);
 
   async function refreshPilots(): Promise<void> {
     try {
-      serverBots = await listServerBots(botOpts());
+      serverBots = await listServerBots(botOpts(), policy => { hostedRunPolicy = policy; });
       pilotsError = null;
     } catch {
       pilotsError = "Could not load the server's bot roster — are you still logged in?";
@@ -426,6 +428,7 @@
       <tbody>
         {#each groups as group (group.id)}
           <BotManagerGroupRow
+            {hostedRunPolicy}
             {group}
             {scripts}
             {serverBots}
@@ -472,6 +475,7 @@
                  unaddressed open would show one pilot's hull under another's
                  name — a requirement checklist about the wrong ship. -->
             <BotManagerPilotRow
+              {hostedRunPolicy}
               {session}
               serverBot={characterID === null ? null : serverBotFor(serverBots, characterID)}
               {scripts}
@@ -480,7 +484,7 @@
             />
           {/each}
           {#each extraServerBots as bot (bot.botID)}
-            <BotManagerPilotRow serverBot={bot} {scripts} onChanged={refreshPilots} />
+            <BotManagerPilotRow serverBot={bot} {scripts} {hostedRunPolicy} onChanged={refreshPilots} />
           {/each}
         </tbody>
       </table>

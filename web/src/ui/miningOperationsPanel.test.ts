@@ -37,6 +37,14 @@ test("unsupported target and defender execution are explicit, not false capabili
   assert.match(source, /bind:group=\{targetFamily\} value="ORE_ANOMALY"/);
 });
 
+test("MCC duration and extension controls consume server policy, not a local 24h cap", () => {
+  const source = readFileSync(new URL("./MiningOperations.svelte", import.meta.url), "utf8");
+  assert.match(source, /payload\?\.capabilities.hostedRunPolicy/);
+  assert.equal((source.match(/runPolicy\?\.durationChoices/g) ?? []).length, 2);
+  assert.doesNotMatch(source, /cap 24h|capped at 24|> 1440|\[60, 240, 720, 1440\]/);
+  assert.doesNotMatch(source, /readSpaceSnapshot/);
+});
+
 test("Fleet Parking uses an explicit station and defaults old definitions to Stay", () => {
   const source = readFileSync(new URL("./MiningOperations.svelte", import.meta.url), "utf8");
   assert.match(source, /On manual Stop \/ Fleet Parking/);
