@@ -1931,6 +1931,7 @@ export interface MiningOperationDefinition {
     };
     readonly travelAssist?: { readonly mode: "DISABLED" | "AUTO" };
     readonly resourceTarget?: { readonly mode: "ANY_ELIGIBLE" };
+    readonly resourcePolicy?: import("../nav/resourcePriority.ts").ResourcePolicy;
     readonly scouting?: { readonly mode: "DISABLED" };
     readonly defense?: { readonly mode: "EXISTING_SELF_DEFENSE" };
   };
@@ -1967,6 +1968,8 @@ export interface MiningOperationRuntime {
     readonly failureCode?: string | null;
     readonly parkingState?: string | null;
     readonly botID: string | null;
+    readonly expiresAt?: string | null;
+    readonly maxRuntimeMinutes?: number | null;
   })[];
   readonly logisticsTail: readonly {
     readonly target: MiningOperationTarget;
@@ -2018,6 +2021,17 @@ function miningOperationsPayload(data: Record<string, JsonValue>): MiningOperati
 /** Command Center read: definitions, botHost projection and target board only. */
 export async function loadMiningOperations(options: ApiOptions = {}): Promise<MiningOperationsPayload> {
   return miningOperationsPayload(await getJson("/api/mining-operations", options));
+}
+
+export interface MiningResourceChoice { readonly typeID: number; readonly name: string; readonly family: "ore" | "ice"; }
+export async function listMiningResources(options: ApiOptions = {}): Promise<readonly MiningResourceChoice[]> {
+  const data = await getJson("/api/mining-operations/resources", options);
+  return (data.resources ?? []) as unknown as readonly MiningResourceChoice[];
+}
+
+export async function extendMiningOperation(operationID: string, minutes: number, options: ApiOptions = {}): Promise<{ payload: MiningOperationsPayload; extension: { ok: boolean; message?: string; results?: { characterID: number; ok: boolean; error?: string; message?: string }[] } }> {
+  const data = await postJson(`/api/mining-operations/${encodeURIComponent(operationID)}/extend`, { minutes }, options);
+  return { payload: miningOperationsPayload(data), extension: data.extension as unknown as { ok: boolean; message?: string; results?: { characterID: number; ok: boolean; error?: string; message?: string }[] } };
 }
 
 export interface OperationRoutineSummary {

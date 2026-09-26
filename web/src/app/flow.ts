@@ -458,6 +458,8 @@ export interface AppFlow {
    * per-tab global, not here).
    */
   sessionToken(): string | null;
+  /** Host-only signed renewal; must retain the same held session identity. */
+  replaceHostedSessionToken(token: string): void;
   /**
    * The request options owned by THIS flow (base URL, injected fetch and its
    * per-session token). Components that call api.ts directly must use this
@@ -11439,6 +11441,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
     sessionToken() {
       return callOptions.token ?? null;
+    },
+
+    replaceHostedSessionToken(token: string): void {
+      if (!options.perSessionToken || !token) throw new Error("A hosted per-session credential is required.");
+      callOptions.token = token; // same signed sessionID; no login/select or runner mutation
     },
 
     requestOptions() {

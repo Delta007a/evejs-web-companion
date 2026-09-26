@@ -25,6 +25,8 @@ const { createMiningTargetBoard } = require("./miningTargetBoard");
 const { createMiningOperationStore } = require("./miningOperationStore");
 const { standardProfileFor, buildStandardProfile, familyCapabilities } = require("./miningOperationProfiles");
 const { miningResourceFamily } = require("./miningResourceFamily");
+const { validateResourcePolicy } = require("./miningResourcePolicy");
+const { extendMiningOperation } = require("./miningOperationGrant");
 const { normalizePolicies } = require("./miningOperationPolicies");
 const { createMiningOperationStopper } = require("./miningOperationStop");
 const {
@@ -20061,6 +20063,10 @@ app.get("/api/mining-operations", requireAuth, (req, res, next) => {
   }
 });
 
+app.get("/api/mining-operations/resources", requireAuth, (req, res, next) => {
+  try { res.json({ ok: true, resources: staticData.listMiningResources() }); } catch (error) { next(error); }
+});
+
 function canonicalOperationArea(area) {
   const systemID = Number(area?.anchorSystemID);
   const system = Number.isSafeInteger(systemID) && systemID > 0
@@ -20126,6 +20132,7 @@ app.post("/api/mining-operations", requireAuth, (req, res, next) => {
       }
     }
     const input = req.body || {};
+    validateResourcePolicy(input, input.policies?.resourcePolicy?.mode === "PREFER_LIST" ? staticData.listMiningResources() : []);
     const definition = miningOperationStore.save({ ...input, area: canonicalOperationArea(input.area) });
     res.json({ ok: true, definition, ...operationPayload() });
   } catch (error) {
@@ -20147,7 +20154,10 @@ app.post("/api/mining-operations/:operationID/delete", requireAuth, (req, res, n
 });
 
 function prepareMiningOperationLaunch(definition) {
-  try { normalizePolicies(definition.policies, staticData.getStation, staticData.getSolarSystem); }
+  try {
+    normalizePolicies(definition.policies, staticData.getStation, staticData.getSolarSystem);
+    validateResourcePolicy(definition, definition.policies?.resourcePolicy?.mode === "PREFER_LIST" ? staticData.listMiningResources() : []);
+  }
   catch (error) { return { ok: false, code: "MINING_OPERATION_INVALID", message: error.message }; }
   const selectedExecutable = definition.area.targetClasses.filter((kind) => EXECUTABLE_TARGET_CLASSES.includes(kind));
   if (selectedExecutable.length === 0 || selectedExecutable.length !== definition.area.targetClasses.length) return { ok: false, code: "NO_EXECUTABLE_TARGET_CLASS",
@@ -20300,6 +20310,7 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
           callerSessionID,
           operationID: definition.operationID,
           operationRole: member.role,
+          operationControllerAccountID: Number(req.account.accountID),
           beforeStart: callerSessionID === null ? null : async () => {
             const held = bridgeSessions.get(callerSessionID);
             if (held && Number(held.characterID) === member.characterID) {
@@ -20343,6 +20354,14 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
 });
 
 const miningOperationStopper = createMiningOperationStopper({ operations: miningOperations, botHost });
+app.post("/api/mining-operations/:operationID/extend", requireAuth, async (req, res, next) => {
+  try {
+    const extension = await extendMiningOperation({ operations: miningOperations, botHost, operationID: req.params.operationID,
+      controllerAccountID: Number(req.account.accountID), minutes: req.body?.minutes });
+    // Partial per-member results are not a transport failure; never auto-retry a write.
+    res.json({ ok: true, extension, ...operationPayload() });
+  } catch (error) { next(error); }
+});
 app.post("/api/mining-operations/:operationID/stop", requireAuth, async (req, res, next) => {
   try {
     const definition = miningOperations.definition(req.params.operationID);

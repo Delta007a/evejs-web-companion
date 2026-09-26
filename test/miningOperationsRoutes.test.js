@@ -57,11 +57,13 @@ function fakeHost(heldSessions = new Map()) {
   const rows = [];
   const stops = [];
   const inputs = [];
+  const extensions = [];
   const failures = new Map();
   return {
     rows,
     stops,
     inputs,
+    extensions,
     failures,
     async start(input) {
       inputs.push(input);
@@ -97,6 +99,7 @@ function fakeHost(heldSessions = new Map()) {
       row.status = "stopped";
       return { ok: true, bot: row };
     },
+    async extendOperationGrant(...args) { extensions.push(args); return { ok: true, bot: { expiresAt: "2026-09-25T00:00:00Z" } }; },
     async prepareOperationStop(botID, accountID, operationID) {
       return { ok: rows.some(row => row.botID === botID && row.endedAt === null && row.operationID === operationID && row.accountID === accountID) };
     },
@@ -149,6 +152,7 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
       list: () => [script, pinnedScript, crewMinerScript, crewHaulerScript],
     },
     staticData: {
+      listMiningResources: () => [{ typeID: 1230, name: "Veldspar", family: "ore" }, { typeID: 16265, name: "White Glaze", family: "ice" }],
       getStation: (id) => Number(id) === 60003760 ? { stationID: 60003760, stationName: "Jita IV - Moon 4", solarSystemID: 30000142 } : null,
       getSolarSystem: (id) => ({ 30000142: { solarSystemID: 30000142, solarSystemName: "Jita" }, 30004504: { solarSystemID: 30004504, solarSystemName: "4C-B7X" } })[Number(id)] || null,
       getSolarSystemName: (id) => ({ 30000142: "Jita", 30004504: "4C-B7X" })[Number(id)] || `System ${id}`,
@@ -178,6 +182,8 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
     body: { username: account.username, password: "local" },
   });
   const token = login.payload.sessionToken;
+  const resources = await request(baseUrl, "/api/mining-operations/resources", { token });
+  assert.equal(resources.payload.resources.length, 2);
 
   const search = await request(baseUrl, "/api/map/find?kind=system&q=4C-B", { token });
   assert.deepEqual(search.payload.matches.map((row) => [row.name, row.id]), [["4C-B7X", 30004504]]);
@@ -209,6 +215,12 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
   }
   const canonical = await request(baseUrl, "/api/mining-operations", { method: "POST", token, body: { ...operationInput, name: "Canonical", area: { ...operationInput.area, anchorSystemID: 30004504, anchorSystemName: null } } });
   assert.equal(canonical.payload.definition.area.anchorSystemName, "4C-B7X");
+  const badPreference = await request(baseUrl, "/api/mining-operations", { method: "POST", token,
+    body: { ...operationInput, policies: { resourcePolicy: { mode: "PREFER_LIST", typeIDs: [16265] } } } });
+  assert.equal(badPreference.response.status, 400);
+  const preference = await request(baseUrl, "/api/mining-operations", { method: "POST", token,
+    body: { ...operationInput, policies: { resourcePolicy: { mode: "PREFER_LIST", source: "MANUAL", typeIDs: [1230] } } } });
+  assert.deepEqual(preference.payload.definition.policies.resourcePolicy.typeIDs, [1230]);
 
   const incompatible = await request(baseUrl, "/api/mining-operations", { method: "POST", token, body: { ...operationInput, name: "Pinned", members: [{ ...operationInput.members[0], automationID: pinnedScript.scriptID }] } });
   const refused = await request(baseUrl, `/api/mining-operations/${incompatible.payload.definition.operationID}/start`, { method: "POST", token, body: { grants: {} } });
@@ -235,6 +247,17 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
   assert.equal(host.rows[0].operationID, operationID);
   assert.equal(host.rows[0].operationRole, "MINER");
   assert.equal(host.inputs[0].callerSessionID, null);
+  assert.equal(host.inputs[0].operationControllerAccountID, account.accountID);
+  const extend = await request(baseUrl, `/api/mining-operations/${operationID}/extend`, { method: "POST", token,
+    body: { minutes: 60, botID: "foreign", controllerAccountID: 999 } });
+  assert.equal(extend.payload.extension.ok, true);
+  assert.deepEqual(host.extensions, [[host.rows[0].botID, operationID, account.accountID, 60]], "body cannot redirect ownership/member selection");
+  const runningBeforeAuthLoss = JSON.stringify(host.rows);
+  const disconnected = await request(baseUrl, "/api/mining-operations", { token: "expired-token" });
+  assert.equal(disconnected.response.status, 401);
+  const reconnected = await request(baseUrl, "/api/login", { method: "POST", body: { username: account.username, password: "" } });
+  const reread = await request(baseUrl, "/api/mining-operations", { token: reconnected.payload.sessionToken });
+  assert.equal(reread.response.status, 200); assert.equal(JSON.stringify(host.rows), runningBeforeAuthLoss); assert.equal(host.stops.length, 0);
 
   const viewed = await request(baseUrl, "/api/mining-operations", { token });
   assert.equal(viewed.response.status, 200);

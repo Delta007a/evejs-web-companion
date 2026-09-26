@@ -53,6 +53,7 @@ import { canMyShipOrderDrone, distanceMeters, hostileRows, type OverviewRow } fr
 import { compressionFacilities } from "../space/compression.ts";
 import { AGENT_BUTTON } from "../bridge/agents.ts";
 import { FREIGHT_BAYS, planLootTransfers, preferredBays } from "../bridge/bayRouting.ts";
+import { preferredResources } from "./resourcePriority.ts";
 import { holdFreeM3 } from "../bridge/holdFit.ts";
 import { isUnreachable, refusalFor, shipHasNoRoom, shouldSetAside } from "./refusalLedger.ts";
 import { movableRows, pickedRows, type KeepRule } from "../bridge/keepAboard.ts";
@@ -1478,7 +1479,7 @@ function mineWithRocks(
   }
 
   if (rockID === null) {
-    const pick = pickRock(step, rocks, measurement);
+    const pick = pickRock(step, preferredResources(rocks, obs.miningOperation?.resourcePolicy), measurement);
     if (pick === null) {
       return tick(WAIT, "Nothing pickable to mine.", "Picking a rock", ACTING, true, {});
     }

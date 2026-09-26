@@ -9,6 +9,8 @@
   let accountName = $state("");
   let error = $state<string | null>(null);
   let busy = $state(false);
+  let sessionExpired = $state(false);
+  let reconnectVersion = $state(0);
 
   onMount(() => {
     const token = getSessionToken();
@@ -28,6 +30,8 @@
       // involved. Each bot later gets its own server-side account session.
       await login(accountName.trim(), "");
       authenticated = true;
+      sessionExpired = false;
+      reconnectVersion++;
     } catch (cause) {
       error = cause instanceof Error ? cause.message : "Sign-in failed.";
     } finally { busy = false; }
@@ -42,16 +46,19 @@
   </header>
   {#if !ready}
     <p>Connecting to the control plane…</p>
-  {:else if !authenticated}
+  {/if}
+  {#if ready && (!authenticated || sessionExpired)}
     <form class="sign-in" onsubmit={(event) => { event.preventDefault(); void signIn(); }}>
-      <h2>Sign in</h2>
+      <h2>{sessionExpired ? "Control plane disconnected — sign in to reconnect" : "Sign in"}</h2>
       <p>Use an existing EveJS account. No pilot workspace will be opened.</p>
+      {#if sessionExpired}<p>Hosted operations are unaffected. The fleet display below is last known state, not a Stop result.</p>{/if}
       <label>Account name <input required bind:value={accountName} autocomplete="username" /></label>
       <button type="submit" disabled={busy}>Open Command Center</button>
       {#if error}<p role="alert">{error}</p>{/if}
     </form>
-  {:else}
-    <MiningOperations />
+  {/if}
+  {#if ready && authenticated}
+    <MiningOperations {reconnectVersion} onAuthExpired={() => { sessionExpired = true; }} />
   {/if}
 </div>
 

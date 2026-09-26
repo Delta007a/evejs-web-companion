@@ -144,6 +144,18 @@ function createBotSessionToken(account, deadlineMs) {
   return signSessionToken(account, deadlineMs + 5 * 60 * 1000);
 }
 
+// Internal host-only renewal: preserve the held bridge-session identity.
+// No HTTP refresh door, login, new session, or expired-token resurrection.
+function extendBotSessionToken(token, deadlineMs) {
+  const payload = verifySessionToken(token);
+  if (!payload || !Number.isFinite(deadlineMs) || deadlineMs <= Date.now() ||
+      deadlineMs > Date.now() + 24 * 60 * 60 * 1000 || deadlineMs + 5 * 60 * 1000 <= payload.exp) {
+    throw new Error("The hosted credential cannot be extended to that deadline.");
+  }
+  const encoded = base64UrlJson({ ...payload, exp: deadlineMs + 5 * 60 * 1000 });
+  return `${encoded}.${signPayload(encoded)}`;
+}
+
 function signSessionToken(account, expiresAt) {
   const now = Date.now();
   const payload = {
@@ -203,6 +215,7 @@ module.exports = {
   countConfiguredUsers,
   createSessionToken,
   createBotSessionToken,
+  extendBotSessionToken,
   verifySessionToken,
   verifyWebPassword,
   upsertWebPassword,

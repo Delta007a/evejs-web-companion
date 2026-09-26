@@ -246,6 +246,7 @@ function createBotHost(options) {
             ...(record.operationID ? {
               operationID: record.operationID,
               operationRole: record.operationRole,
+              operationControllerAccountID: record.operationControllerAccountID,
               ...(record.operationStopRequested ? { operationStopRequested: true } : {}),
             } : {}),
           };
@@ -578,6 +579,7 @@ function createBotHost(options) {
     beforeStart = null,
     operationID = null,
     operationRole = null,
+    operationControllerAccountID = null,
   }) {
     const isCompanion = kind === "companion";
     let resumingAbandonment = null;
@@ -732,6 +734,7 @@ function createBotHost(options) {
       scriptHash: normalizedHash,
       operationID: typeof operationID === "string" && operationID.length > 0 ? operationID : null,
       operationRole: ["MINER", "HAULER", "DEFENDER"].includes(operationRole) ? operationRole : null,
+      operationControllerAccountID,
       restartSafe: runPolicy.restartSafe === true,
       riskClasses: [...runPolicy.riskClasses],
       maxRuntimeMinutes: grantVerdict.grant.maxRuntimeMinutes,
@@ -845,29 +848,7 @@ function createBotHost(options) {
         await finalize(record);
         return { ok: false, code: "BOT_START_FAILED", stage: startStage, message: `${startStage}: ${record.startError}` };
       }
-      const remainingMs = Math.max(1, Date.parse(record.expiresAt) - now());
-      record.deadlineTimer = setDeadlineTimeout(() => {
-        if (record.finalized) {
-          return;
-        }
-        record.deadlineTimer = null;
-        record.expiryRequested = true;
-        if (record.operationStopRequested) {
-          record.flow?.cancelCustomBotParking();
-          record.parking = { state: "PARKING_FAILED", reason: "Approved runtime expired before parking completed; control retained for explicit recovery." };
-          record.status = "paused";
-          record.phase = "Parking failed";
-          record.why = record.parking.reason;
-          persistRoster();
-          return;
-        }
-        // The ordinary Stop and this timer share one in-progress operation.
-        // Neither may finalize the runner before its controlled flight returns.
-        return stop(record.botID, record.accountID).catch(logError);
-      }, remainingMs);
-      if (typeof record.deadlineTimer.unref === "function") {
-        record.deadlineTimer.unref();
-      }
+      armDeadline(record);
       persistRoster();
       // First vitals sample right away (fire-and-forget), so the landing
       // page's next poll already has ship state instead of a blank line.
@@ -882,6 +863,55 @@ function createBotHost(options) {
       return { ok: false, code: "BOT_START_FAILED", stage: startStage, causeCode,
         message: `${startStage}${causeCode ? ` (${causeCode})` : ""}: ${record.why}` };
     }
+  }
+
+  function armDeadline(record) {
+    if (record.deadlineTimer !== null) clearDeadlineTimeout(record.deadlineTimer);
+    const expectedExpiry = record.expiresAt;
+    record.deadlineTimer = setDeadlineTimeout(() => {
+      // A canceled callback already queued before extension has no authority.
+      if (record.finalized || record.expiresAt !== expectedExpiry) return;
+      record.deadlineTimer = null;
+      record.expiryRequested = true;
+      if (record.operationStopRequested) {
+        record.flow?.cancelCustomBotParking();
+        record.parking = { state: "PARKING_FAILED", reason: "Approved runtime expired before parking completed; control retained for explicit recovery." };
+        record.status = "paused";
+        record.phase = "Parking failed";
+        record.why = record.parking.reason;
+        persistRoster();
+        return;
+      }
+      return stop(record.botID, record.accountID).catch(logError);
+    }, Math.max(1, Date.parse(expectedExpiry) - now()));
+    record.deadlineTimer.unref?.();
+  }
+
+  async function extendOperationGrant(botID, operationID, controllerAccountID, minutes) {
+    const stack = await loadStack();
+    const record = records.get(botID);
+    if (!record || !operationID || record.operationID !== operationID ||
+        !record.operationControllerAccountID || record.operationControllerAccountID !== Number(controllerAccountID) ||
+        claims.get(record.characterID) !== botID) return { ok: false, code: "OPERATION_GRANT_FORBIDDEN", message: "Only this run's initiating account can extend its operation-owned members. Legacy ownership cannot be inferred." };
+    if (record.finalized || record.expiryRequested || record.operationStopRequested || record.gracefulStopPromise ||
+        record.status !== "running" || Date.parse(record.expiresAt) <= now()) {
+      return { ok: false, code: "BOT_GRANT_NOT_ACTIVE", message: "This member is not running or its Stop/expiry boundary has begun; extension cannot resume it." };
+    }
+    if (![60, 240, 720, 1440].includes(minutes)) return { ok: false, code: "BOT_GRANT_INVALID", message: "Choose +1, +4, +12 or +24 hours." };
+    const maxRuntimeMinutes = record.maxRuntimeMinutes + minutes;
+    const verdict = stack.validateBotLaunchGrant({ scriptRev: record.scriptRev, riskClasses: record.riskClasses, maxRuntimeMinutes }, record.scriptRev, { riskClasses: record.riskClasses });
+    if (!verdict.ok) return { ...verdict, message: `${verdict.message} Extension adds to the already approved total, not a fresh run.` };
+    const expiresAt = new Date(Date.parse(record.expiresAt) + minutes * 60_000).toISOString();
+    try {
+      const token = auth.extendBotSessionToken(record.flow.sessionToken(), Date.parse(expiresAt));
+      record.flow.replaceHostedSessionToken(token);
+    } catch (error) { return { ok: false, code: "BOT_GRANT_CREDENTIAL_FAILED", message: error.message }; }
+    // No await between final live checks, credential replacement and timer update.
+    record.maxRuntimeMinutes = maxRuntimeMinutes;
+    record.expiresAt = expiresAt;
+    armDeadline(record);
+    persistRoster();
+    return { ok: true, bot: publicBot(record) };
   }
 
   async function stop(botID, accountID) {
@@ -1224,6 +1254,7 @@ function createBotHost(options) {
                 expectedExpiresAt: row.expiresAt,
                 operationID: row.operationID ?? null,
                 operationRole: row.operationRole ?? null,
+                operationControllerAccountID: row.operationControllerAccountID ?? null,
               })
             : await start({
                 account,
@@ -1240,6 +1271,7 @@ function createBotHost(options) {
                 expectedExpiresAt: row.expiresAt,
                 operationID: row.operationID ?? null,
                 operationRole: row.operationRole ?? null,
+                operationControllerAccountID: row.operationControllerAccountID ?? null,
               });
         if (!outcome.ok) {
           recordResumeFailure(row, outcome.message || outcome.code);
@@ -1261,6 +1293,7 @@ function createBotHost(options) {
 
   return {
     start,
+    extendOperationGrant,
     stop,
     prepareOperationStop,
     parkOperationMember,

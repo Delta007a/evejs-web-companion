@@ -317,6 +317,18 @@ test("locality prefers the clustered main body, ignores hauler/failed miner, res
   assert.equal(event.evidence.candidates[0].anchorCount, 3);
 });
 
+test("Standard receives resource policy, Custom does not; unknown target composition keeps locality", () => {
+  const def = definition("a", [member(1, "MINER"), member(2, "MINER")]);
+  def.members[0].routineMode = "STANDARD"; def.members[0].automationID = "";
+  def.policies = { resourcePolicy: { mode: "PREFER_LIST", source: "MANUAL", typeIDs: [1230] } };
+  const h = harness([def]); startAll(h, "a"); located(h, "a", 1, 1e9);
+  assert.deepEqual(h.operations.assignment("a", 1).resourcePolicy.typeIDs, [1230]);
+  assert.equal(h.operations.assignment("a", 2).resourcePolicy, null);
+  // No caller-supplied guessed composition may bias remote target ranking.
+  const candidates = localBelts(); candidates[0].resourceTypeIDs = [1230];
+  assert.equal(h.operations.reserveCandidates("a", 1, candidates).target.targetName, "IX");
+});
+
 test("locality ignores claimed/depleted preferences and keeps reservation atomic across operations", () => {
   const h = harness([definition("a", [member(1, "MINER")]), definition("b", [member(2, "MINER")])]);
   startAll(h, "a"); startAll(h, "b"); located(h, "a", 1, 1e9); located(h, "b", 2, 1e9);

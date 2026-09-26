@@ -1,7 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { createControlPlanePoll } from "../app/controlPlanePoll.ts";
   import {
     deleteMiningOperation,
+    extendMiningOperation,
+    listMiningResources,
+    type MiningResourceChoice,
     findMapLocations,
     getMiningOperationLaunchPlan,
     listOperationAccountPilots,
@@ -22,6 +26,13 @@
   import { decodeScriptValue } from "../bots/scriptCodec.ts";
   import { analyzeBotRunPolicy, createBotLaunchGrant } from "../bots/runPolicy.ts";
   const opts = () => ({});
+  let { reconnectVersion = 0, onAuthExpired = () => {} }: { reconnectVersion?: number; onAuthExpired?: () => void } = $props();
+  let disconnected = $state(false);
+  let catalog = $state<readonly MiningResourceChoice[]>([]);
+  let resourceMode = $state<"ANY_ELIGIBLE" | "PREFER_LIST">("ANY_ELIGIBLE");
+  let resourceIDs = $state<number[]>([]);
+  let resourceQuery = $state("");
+  let extensionResult = $state<string | null>(null);
   let payload = $state<MiningOperationsPayload | null>(null);
   let scripts = $state<OperationRoutineSummary[]>([]);
   let loading = $state(true);
@@ -69,6 +80,8 @@
   const selectedClasses = $derived([targetFamily]);
   const anchorValid = $derived(anchorSystemID > 0 && anchorSystemName.length > 0 && anchorError === null);
   const standardAvailable = $derived(targetFamily !== "GAS" && unloadPolicy === "HAULER_SERVICE");
+  const resourceMatches = $derived(catalog.filter(row => row.family === (targetFamily === "ICE" ? "ice" : "ore") &&
+    !resourceIDs.includes(row.typeID) && row.name.toLocaleLowerCase().includes(resourceQuery.toLocaleLowerCase())).slice(0, 15));
 
   function modeOf(member: DraftMember): "STANDARD" | "CUSTOM" { return member.routineMode ?? (member.automationID ? "CUSTOM" : "STANDARD"); }
   function profileName(member: DraftMember, family: string = targetFamily): string {
@@ -81,9 +94,10 @@
     return cause instanceof Error ? cause.message : "The Mining Operations request failed.";
   }
 
-  async function refresh(): Promise<void> {
-    try {
-      payload = await loadMiningOperations(opts());
+  function received(next: MiningOperationsPayload): void {
+      payload = next;
+      loading = false;
+      disconnected = false;
       pollError = null;
       for (const row of payload.operations) {
         if (!["DRAFT", "STOPPED"].includes(row.runtime.state)) continue;
@@ -96,23 +110,30 @@
           if (readiness[row.definition.operationID]?.key === key) readiness[row.definition.operationID] = { key, message: words(cause) };
         });
       }
-    } catch (cause) {
-      pollError = words(cause);
-    } finally {
-      loading = false;
-    }
   }
+  const poll = createControlPlanePoll({ read: () => loadMiningOperations(opts()), received,
+    failed: (cause, authLost) => {
+      loading = false; disconnected = authLost;
+      pollError = authLost ? "Control plane disconnected. Last known fleet state retained; sign in above to reconnect. Hosted operations are unaffected." : words(cause);
+      if (authLost) onAuthExpired();
+    },
+  });
+  const refresh = () => poll.refresh();
 
   onMount(() => {
     void refresh();
-    const timer = setInterval(() => void refresh(), 3000);
-    return () => clearInterval(timer);
+    return () => poll.stop();
+  });
+
+  $effect(() => {
+    if (reconnectVersion > 0) void poll.reconnect();
+    void listMiningResources(opts()).then(rows => { catalog = rows; }).catch(() => {});
   });
 
   $effect(() => {
     const classes = selectedClasses;
     const policy = unloadPolicy;
-    if (classes.length === 0) return;
+    if (classes.length === 0 || disconnected) return;
     void listOperationRoutines(classes, policy, opts()).then((rows) => { scripts = rows; }).catch((cause) => { error = words(cause); });
   });
 
@@ -235,6 +256,7 @@
     reach = "CURRENT_SYSTEM";
     targetFamily = "BELT";
     travelAssist = true;
+    resourceMode = "ANY_ELIGIBLE"; resourceIDs = []; resourceQuery = "";
     unloadPolicy = "HAULER_SERVICE";
     unloadStationID = 0;
     unloadStationName = "";
@@ -262,6 +284,8 @@
     reach = definition.area.reach;
     targetFamily = definition.area.targetClasses[0] ?? "BELT";
     travelAssist = definition.policies?.travelAssist?.mode === "AUTO";
+    resourceMode = definition.policies?.resourcePolicy?.mode ?? "ANY_ELIGIBLE";
+    resourceIDs = [...definition.policies?.resourcePolicy?.typeIDs ?? []]; resourceQuery = "";
     unloadPolicy = definition.unloadPolicy;
     unloadStationID = definition.unloadDestination?.stationID ?? 0;
     unloadStationName = definition.unloadDestination?.stationName ?? "";
@@ -306,6 +330,7 @@
   }
 
   async function save(): Promise<void> {
+    if (disconnected) return;
     if (!anchorValid) { error = anchorError ?? "Choose a known solar system."; return; }
     if (stopMode !== "STAY_IN_PLACE" && (!parkingStation || parkingError)) { error = parkingError || "Choose a parking station."; return; }
     busy = "save";
@@ -321,7 +346,7 @@
           targetClasses: selectedClasses,
         },
         targetPolicy: "ANY_ELIGIBLE",
-        policies: { version: 1, travelAssist: { mode: travelAssist ? "AUTO" : "DISABLED" }, parking: { mode: stopMode, destination: stopMode === "STAY_IN_PLACE" ? null : parkingStation, corporationDivision: parkingDivision } },
+        policies: { version: 1, resourcePolicy: { mode: resourceMode, source: "MANUAL", typeIDs: resourceMode === "PREFER_LIST" ? resourceIDs : [] }, travelAssist: { mode: travelAssist ? "AUTO" : "DISABLED" }, parking: { mode: stopMode, destination: stopMode === "STAY_IN_PLACE" ? null : parkingStation, corporationDivision: parkingDivision } },
         unloadPolicy,
         unloadDestination: unloadStationID > 0 && destinationError === null
           ? { stationID: unloadStationID, stationName: unloadStationName, systemName: unloadStationSystemName, corporationDivision: unloadDivision }
@@ -338,6 +363,7 @@
   }
 
   async function start(definition: MiningOperationDefinition & { operationID: string }): Promise<void> {
+    if (disconnected) return;
     busy = definition.operationID;
     error = null;
     try {
@@ -360,6 +386,7 @@
   }
 
   async function stop(operationID: string): Promise<void> {
+    if (disconnected) return;
     busy = operationID;
     error = null;
     try {
@@ -372,7 +399,23 @@
     }
   }
 
+  async function extend(operationID: string, minutes: number): Promise<void> {
+    if (disconnected || !window.confirm(`Add ${minutes / 60} hours to current member expiries? Total approved runtime is capped at 24 hours; stopped members are not resumed.`)) return;
+    busy = operationID; extensionResult = null;
+    try {
+      const result = await extendMiningOperation(operationID, minutes, opts()); payload = result.payload;
+      extensionResult = result.extension.message ?? result.extension.results?.map(row => `Pilot ${row.characterID}: ${row.ok ? "extended" : `${row.error}: ${row.message}`}`).join(" · ") ?? "Extension unavailable.";
+    } catch (cause) { extensionResult = words(cause); } finally { busy = null; }
+  }
+  function remaining(row: MiningOperationsPayload["operations"][number]): string {
+    const expiries = row.runtime.members.filter(member => member.runtimeState === "running" && member.expiresAt).map(member => Date.parse(member.expiresAt!));
+    if (!expiries.length) return "No running member grant";
+    const minutes = Math.max(0, Math.floor((Math.min(...expiries) - Date.now()) / 60_000));
+    return `${Math.floor(minutes / 60)}h ${minutes % 60}m (earliest running member)`;
+  }
+
   async function remove(operationID: string): Promise<void> {
+    if (disconnected) return;
     if (!window.confirm("Delete this stopped Mining Operation definition?")) return;
     busy = operationID;
     try {
@@ -406,6 +449,7 @@
 
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   {#if pollError}<p class="error" role="alert">{pollError}</p>{/if}
+  {#if extensionResult}<p class="notice" role="status">{extensionResult}</p>{/if}
   {#if loading}<p class="muted">Loading Mining Command Center…</p>{/if}
 
   {#if editing}
@@ -427,7 +471,7 @@
         </select>
       </label>
       <fieldset>
-        <legend>Target family — any eligible resource in this family</legend>
+        <legend>Target family</legend>
         <label><input type="radio" bind:group={targetFamily} value="BELT" /> Asteroid Belt</label>
         <label><input type="radio" bind:group={targetFamily} value="ORE_ANOMALY" /> Ore Anomaly</label>
         <label><input type="radio" bind:group={targetFamily} value="ICE" /> Ice — online Ice Harvesters required</label>
@@ -469,6 +513,19 @@
           {/if}
           <p class="note">Stop early enough to park within the remaining run grant. Timed expiry keeps existing graceful cleanup; it does not schedule a return trip. Cans in space may be left behind. An unavailable member reports failure; healthy members can still park.</p>
         {:else}<p class="note">Existing graceful Stop: recall drones and release control without deliberately moving or docking.</p>{/if}
+      </fieldset>
+      <fieldset>
+        <legend>Resources — Standard miners</legend>
+        <select aria-label="Resource preference" bind:value={resourceMode}><option value="ANY_ELIGIBLE">Any eligible</option><option value="PREFER_LIST">Prefer ordered list</option></select>
+        {#if resourceMode === "PREFER_LIST"}
+          {#if catalog.length === 0}<p class="notice">Resource catalog unavailable. Any eligible remains available; no resource names are guessed.</p>{/if}
+          <input aria-label="Search resource catalog" bind:value={resourceQuery} placeholder="Search resource types" />
+          <div class="system-matches">{#each resourceMatches as resource}<button type="button" disabled={resourceIDs.length >= 20} onclick={() => { resourceIDs = [...resourceIDs, resource.typeID]; resourceQuery = ""; }}>{resource.name}</button>{/each}</div>
+          <ol>{#each resourceIDs as id, index}<li>{catalog.find(row => row.typeID === id)?.name ?? `Type ${id}`}
+            <button type="button" disabled={index === 0} onclick={() => { const next = [...resourceIDs]; [next[index - 1], next[index]] = [next[index]!, next[index - 1]!]; resourceIDs = next; }}>↑</button>
+            <button type="button" onclick={() => { resourceIDs = resourceIDs.filter(value => value !== id); }}>Remove</button></li>{/each}</ol>
+          <p class="muted">Preference applies to observed resources within the assigned target, with same-family fallback. Remote contents are unknown. Custom routines keep their own strict compatibility contract.</p>
+        {/if}
       </fieldset>
 
       {#if prefs.squads.length > 0}
@@ -542,8 +599,13 @@
         {/if}
       </div></div>
       {#if row.runtime.statusReason}<p class="notice"><strong>Status:</strong> {row.runtime.statusReason}</p>{/if}
+      {#if !["DRAFT", "STOPPED", "STOPPING", "PARKING", "PARKING_FAILED", "ASSEMBLING"].includes(row.runtime.state)}
+        <p><strong>Run grant:</strong> {remaining(row)} · total approval cap 24h</p>
+        <div>{#each [60, 240, 720, 1440] as minutes}<button type="button" title="Adds to current expiry; total approved runtime cannot exceed 24 hours" disabled={busy !== null || disconnected || row.runtime.members.every(member => member.runtimeState !== "running" || (member.maxRuntimeMinutes ?? 1440) + minutes > 1440)} onclick={() => void extend(row.definition.operationID, minutes)}>+{minutes / 60}h</button>{/each}</div>
+      {/if}
       <p><strong>Area:</strong> {row.definition.area.anchorSystemName ?? "Unknown system"} · {row.definition.area.reach === "CURRENT_SYSTEM" ? "current system" : "adjacent mode (anchor-only execution in v0.1)"}</p>
       <p><strong>Target class / unload:</strong> {row.definition.area.targetClasses.join(", ")} · {row.definition.unloadPolicy === "HAULER_SERVICE" ? "Hauler service" : "Self unload"}</p>
+      <p><strong>Standard resources:</strong> {row.definition.policies?.resourcePolicy?.mode === "PREFER_LIST" ? row.definition.policies.resourcePolicy.typeIDs.map(id => catalog.find(resource => resource.typeID === id)?.name ?? `Type ${id}`).join(" → ") + " → any eligible" : "Any eligible"}</p>
       <p><strong>On Stop:</strong> {stopLabels[row.definition.policies?.parking.mode ?? "STAY_IN_PLACE"]}{row.definition.policies?.parking.destination ? ` · ${row.definition.policies.parking.destination.stationName}` : ""}</p>
       {#if row.definition.unloadPolicy === "HAULER_SERVICE"}<p><strong>Delivery:</strong> {row.definition.unloadDestination ? `${row.definition.unloadDestination.stationName} · Corporation Division ${row.definition.unloadDestination.corporationDivision}` : row.definition.members.some((member) => modeOf(member) === "STANDARD") ? "Not configured — Standard Start blocked" : "Configured in custom routine"}</p>{/if}
       {#if ["DRAFT", "STOPPED"].includes(row.runtime.state)}<p class={readiness[row.definition.operationID]?.message ? "notice" : "muted"}><strong>Start readiness:</strong> {readiness[row.definition.operationID]?.message ?? "Routine preflight ready; pilot ownership and run grant are checked at Start."}</p>{/if}

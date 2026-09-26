@@ -97,6 +97,7 @@ export interface MiningOperationTarget {
 
 /** Stored BFF coordination only. Reading this never reads the game world. */
 export interface MiningOperationAssignment {
+  readonly resourcePolicy?: import("./resourcePriority.ts").ResourcePolicy | null;
   readonly travelAssist?: "DISABLED" | "AUTO";
   readonly stopRequested?: boolean;
   readonly operationID: string;

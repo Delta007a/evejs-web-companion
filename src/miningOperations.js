@@ -84,7 +84,7 @@ function operationRoutineCompatibility(definition, role, audit, executionClasses
     return audit.hauler ? null : "A HAULER routine needs Travel to belt, Loot containers, and Deliver ore blocks.";
   }
   if (!audit.miner) return "A MINER routine needs a Mine at a belt or ore site block.";
-  if (audit.hasOrePreference) return "Mining Operations v0.1 supports any eligible target, not an ore preference list.";
+  if (audit.hasOrePreference) return "An operation routine cannot own an independent ore preference list. Use a Standard profile and the operation resource policy.";
   if (!audit.targetClasses.some((kind) => executionClasses.includes(kind))) {
     return "This MINER routine cannot execute the operation's selected target class.";
   }
@@ -571,6 +571,9 @@ function createMiningOperations(options) {
       role: memberDef.role,
       unloadPolicy: def.unloadPolicy,
       travelAssist: def.policies?.travelAssist?.mode ?? "DISABLED",
+      // Custom routines retain their strict preflight/explicit resource semantics.
+      resourcePolicy: (memberDef.routineMode || (memberDef.automationID ? "CUSTOM" : "STANDARD")) === "STANDARD"
+        ? def.policies?.resourcePolicy ?? { mode: "ANY_ELIGIBLE", source: "MANUAL", typeIDs: [] } : null,
       area: def.area,
       state: runtime.state,
       stopRequested: stopping,
@@ -658,6 +661,8 @@ function createMiningOperations(options) {
       const runtime = runtimeFor(bot.operationID);
       const row = runtime.members.get(Number(bot.characterID));
       if (row) {
+        row.expiresAt = bot.expiresAt ?? null;
+        row.maxRuntimeMinutes = bot.maxRuntimeMinutes ?? null;
         row.botID = bot.botID;
         row.runtimeState = bot.status;
         row.phase = bot.phase;

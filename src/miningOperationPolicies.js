@@ -1,4 +1,5 @@
 "use strict";
+const { normalizeResourcePolicy } = require("./miningResourcePolicy");
 
 const STOP_MODES = Object.freeze(["STAY_IN_PLACE", "RETURN_HOME_DOCK", "RETURN_HOME_UNLOAD_DOCK"]);
 function invalid(message) {
@@ -17,7 +18,7 @@ function normalizePolicies(input, resolveStation, resolveSystem) {
       throw invalid(`${key} policy is not executable yet; use ${mode}.`);
     }
   }
-  if (Object.keys(value).some(key => !["version", "parking", ...Object.keys(defaults)].includes(key))) throw invalid("Unknown operation policy.");
+  if (Object.keys(value).some(key => !["version", "parking", "resourcePolicy", ...Object.keys(defaults)].includes(key))) throw invalid("Unknown operation policy.");
   const parking = value.parking ?? { mode: "STAY_IN_PLACE" };
   if (!STOP_MODES.includes(parking.mode)) throw invalid("Choose a supported Stop / Parking policy.");
   let destination = null;
@@ -35,6 +36,7 @@ function normalizePolicies(input, resolveStation, resolveSystem) {
   const division = parking.corporationDivision ?? null;
   if (division !== null && (!Number.isSafeInteger(division) || division < 1 || division > 7)) throw invalid("Parking unload division must be 1–7, or personal hangar.");
   return { version: 1,
+    resourcePolicy: normalizeResourcePolicy(value.resourcePolicy),
     parking: { mode: parking.mode, destination, corporationDivision: division },
     ...Object.fromEntries(Object.entries(defaults).map(([key, mode]) => [key, { mode }])),
   };

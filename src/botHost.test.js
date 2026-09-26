@@ -53,6 +53,7 @@ function makeFakeStack(log) {
       restartSafe: doc.restartSafe !== false,
     }),
     validateBotLaunchGrant: (grant, scriptRev, policy) => {
+      if (grant && (grant.maxRuntimeMinutes < 1 || grant.maxRuntimeMinutes > 1440)) return { ok: false, code: "BOT_GRANT_INVALID", message: "Maximum approved runtime is 1440 minutes." };
       if (!grant || Number(grant.scriptRev) !== scriptRev) {
         return { ok: false, code: "BOT_GRANT_REQUIRED", message: "Review this run." };
       }
@@ -147,8 +148,11 @@ function makeFakeStack(log) {
       return store;
     },
     createAppFlow: (store, options) => {
+      let sessionToken = options.initialSessionToken;
       log.push(["createAppFlow", options.baseUrl, options.perSessionToken, options.initialSessionToken, options.browserPilotRecovery, options.miningOperationID]);
       return {
+        sessionToken: () => sessionToken,
+        replaceHostedSessionToken(token) { sessionToken = token; log.push(["replaceHostedSessionToken", token]); },
         async selectCharacter(characterID) {
           log.push(["selectCharacter", characterID]);
           store._set({ station: { online: { characterID, characterName: "Test Pilot" } } });
@@ -1688,4 +1692,54 @@ test("preflight refusal never invokes the browser-release hook", async () => {
   assert.equal(result.ok, false);
   assert.equal(released, false);
   assert.equal(host.claimedBy(START.characterID), null);
+});
+
+test("operation extension adds to expiry, renews same runner credential, and cancels stale expiry callback", async () => {
+  const log = [], timers = []; let clock = 1_000;
+  const host = makeHost({ log, now: () => clock,
+    webAuth: { createBotSessionToken: () => "original", extendBotSessionToken: (token, deadline) => { assert.equal(token, "original"); return `renewed:${deadline}`; } },
+    setDeadlineTimeout(callback, delayMs) { const timer = { callback, delayMs, unref() {} }; timers.push(timer); return timer; }, clearDeadlineTimeout() {},
+  });
+  const started = await host.start({ ...START, operationID: "A", operationRole: "MINER", operationControllerAccountID: 99 });
+  const oldExpiry = Date.parse(started.bot.expiresAt), oldToken = host.claimedBy(START.characterID);
+  clock += 11 * 60 * 60_000;
+  const extended = await host.extendOperationGrant(started.bot.botID, "A", 99, 240);
+  assert.equal(extended.ok, true); assert.equal(Date.parse(extended.bot.expiresAt), oldExpiry + 240 * 60_000);
+  assert.equal(extended.bot.maxRuntimeMinutes, 960); assert.equal(timers[1].delayMs, 5 * 60 * 60_000);
+  await timers[0].callback();
+  assert.equal(host.list(ACCOUNT.accountID)[0].status, "running"); assert.equal(host.claimedBy(START.characterID), oldToken);
+  assert.equal(log.filter(row => row[0] === "startCustomBot").length, 1);
+  assert.equal(log.filter(row => row[0] === "selectCharacter").length, 1);
+  assert.equal(log.filter(row => row[0] === "logout").length, 0);
+  await host.stopAll();
+});
+
+test("extension refuses other operations/accounts, oversized grants and elapsed deadlines", async () => {
+  let clock = 1000;
+  const host = makeHost({ now: () => clock });
+  const started = await host.start({ ...START, operationID: "A", operationControllerAccountID: 99 });
+  for (const [operation, accountID, minutes, code] of [["B", 99, 60, "OPERATION_GRANT_FORBIDDEN"], ["A", 7, 60, "OPERATION_GRANT_FORBIDDEN"],
+    ["A", 99, 1440, "BOT_GRANT_INVALID"], ["A", 99, 1, "BOT_GRANT_INVALID"]]) {
+    assert.equal((await host.extendOperationGrant(started.bot.botID, operation, accountID, minutes)).code, code);
+  }
+  clock = Date.parse(started.bot.expiresAt);
+  assert.equal((await host.extendOperationGrant(started.bot.botID, "A", 99, 60)).code, "BOT_GRANT_NOT_ACTIVE");
+  await host.stopAll();
+});
+
+test("manual or natural-expiry cleanup already in progress cannot be resurrected", async () => {
+  for (const expiry of [false, true]) {
+    let release, expire;
+    const gate = new Promise(resolve => { release = resolve; });
+    const factory = makeFakeStack([]);
+    const host = makeHost({ loadStack: async () => {
+      const stack = await factory(); return { ...stack, createAppFlow(store, options) {
+        return { ...stack.createAppFlow(store, options), gracefulStopCustomBot: () => gate };
+      } };
+    }, setDeadlineTimeout(callback) { expire = callback; return { unref() {} }; }, clearDeadlineTimeout() {} });
+    const started = await host.start({ ...START, operationID: "A", operationControllerAccountID: 99 });
+    const stopping = expiry ? expire() : host.stop(started.bot.botID, ACCOUNT.accountID);
+    assert.equal((await host.extendOperationGrant(started.bot.botID, "A", 99, 60)).code, "BOT_GRANT_NOT_ACTIVE");
+    release(); await stopping; await host.stopAll();
+  }
 });

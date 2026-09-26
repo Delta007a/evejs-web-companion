@@ -568,3 +568,24 @@ test("Ice rejects an ore-only fit and activates only the Ice Harvester against c
   const unknown = mine(step, { ...world, snapshot: snapshot([{ ...rock, miningResourceFamily: null }]) }, {}, {});
   assert.equal(unknown.phase, "Resource authority unavailable");
 });
+
+for (const family of ["BELT", "ORE_ANOMALY", "ICE"] as const) {
+  test(`${family}: resource preference outranks distance, falls through A/B/other without target depletion`, () => {
+    const base = observation(family === "BELT" ? { miningModuleIDs: [71] } : siteWorld(family));
+    const policy = { mode: "PREFER_LIST" as const, source: "MANUAL" as const, typeIDs: [100, 200] };
+    const rock = (itemID: number, yieldID: number, x: number) => ({ ...entity(itemID, "Not authoritative", x), kind: "asteroid", miningYieldTypeID: yieldID,
+      miningResourceFamily: family === "ICE" ? "ice" as const : "ore" as const, remainingQuantity: 100 });
+    const aFar = rock(501, 100, 80_000), aNear = rock(502, 100, 40_000), b = rock(503, 200, 20_000), other = rock(504, 300, 1000);
+    const decide = (resources: ReturnType<typeof rock>[], mode: "ANY_ELIGIBLE" | "PREFER_LIST" = "PREFER_LIST", mem = {}) => SCRIPT_MACROS["mine-at-belt"](
+      family === "BELT" ? beltStep : siteStep(family), { ...base, miningOperation: { ...base.miningOperation!, resourcePolicy: { ...policy, mode } },
+        snapshot: snapshot([entity(1, "Asteroid Belt 1"), ...resources]) }, mem, {});
+    for (const [resources, expected] of [[[aFar, aNear, b, other], 502], [[b, other], 503], [[other], 504]] as const) {
+      const next = decide([...resources]); assert.equal(next.action.kind, "orbit");
+      assert.equal(next.action.kind === "orbit" ? next.action.targetID : null, expected);
+      assert.notEqual(next.phase, "Confirming depletion");
+    }
+    const any = decide([aFar, b, other], "ANY_ELIGIBLE"); assert.equal(any.action.kind === "orbit" ? any.action.targetID : null, 504);
+    const exhausted = decide([b, other], "PREFER_LIST", { rockID: aNear.itemID });
+    assert.equal(exhausted.action.kind === "orbit" ? exhausted.action.targetID : null, b.itemID);
+  });
+}
