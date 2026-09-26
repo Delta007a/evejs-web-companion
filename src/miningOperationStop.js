@@ -1,0 +1,68 @@
+"use strict";
+
+// Control-plane orchestration only. botHost retains every pilot's authority;
+// the ordinary flow/runner performs settlement, travel and freight delivery.
+function createMiningOperationStopper({ operations, botHost }) {
+  const pending = new Map();
+  function stop(definition) {
+    const id = definition.operationID;
+    if (pending.has(id)) return pending.get(id);
+    if (operations.runtimeFor(id)?.state === "STOPPED") return Promise.resolve([]);
+    operations.beginStop(id);
+    const task = (async () => {
+      const parking = definition.policies?.parking ?? { mode: "STAY_IN_PLACE" };
+      const returning = parking.mode !== "STAY_IN_PLACE";
+      const hosted = botHost.listAll().filter(bot => bot.operationID === id && bot.endedAt === null);
+      const settled = [];
+      const failures = [];
+      const fail = (characterID, outcome) => {
+        failures.push({ characterID, code: outcome.code, message: outcome.message || "Stop / Parking did not complete." });
+        operations.memberParking(id, characterID, returning ? "PARKING_FAILED" : "STOP_BLOCKED", failures.at(-1).message);
+      };
+      if (returning) {
+        for (const member of definition.members) {
+          const previous = operations.runtimeFor(id)?.members.get(member.characterID);
+          if (!hosted.some(bot => bot.characterID === member.characterID) && previous?.parkingState !== "PARKED") {
+            fail(member.characterID, { code: "PARKING_MEMBER_UNAVAILABLE", message: "No active operation-owned pilot control exists; parking cannot be confirmed." });
+          }
+        }
+      }
+      // Establish the settlement boundary before issuing any new route. Each
+      // preparation has the existing bounded recall/tick-settlement contract;
+      // a failed peer does not prevent successfully settled members parking.
+      if (returning) await Promise.all(hosted.map(async bot => {
+        try {
+          operations.memberParking(id, bot.characterID, "SETTLING");
+          const ready = await botHost.prepareOperationStop(bot.botID, bot.accountID, id);
+          if (!ready.ok) { fail(bot.characterID, ready); return; }
+          settled.push(bot);
+        } catch (error) {
+          fail(bot.characterID, { code: "PARKING_PREPARE_FAILED", message: error.message });
+        }
+      }));
+      if (returning && settled.length === hosted.length) operations.releaseStopTargets(id);
+      await Promise.all((returning ? settled : hosted).map(async bot => {
+        try {
+          if (returning) {
+            operations.memberParking(id, bot.characterID, "PARKING");
+            const result = await botHost.parkOperationMember(bot.botID, bot.accountID, id, parking);
+            if (!result.ok) { fail(bot.characterID, result); return; }
+            operations.memberParking(id, bot.characterID, "PARKED");
+          } else {
+            const result = await botHost.stop(bot.botID, bot.accountID);
+            if (!result.ok) fail(bot.characterID, result);
+          }
+        } catch (error) {
+          fail(bot.characterID, { code: "PARKING_FAILED", message: error.message });
+        }
+      }));
+      operations.finishStop(id, failures, returning);
+      return failures;
+    })();
+    pending.set(id, task);
+    void task.finally(() => { if (pending.get(id) === task) pending.delete(id); }).catch(() => {});
+    return task;
+  }
+  return { stop };
+}
+module.exports = { createMiningOperationStopper };

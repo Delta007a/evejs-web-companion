@@ -1917,6 +1917,18 @@ export interface MiningOperationMemberDefinition {
 }
 
 export interface MiningOperationDefinition {
+  readonly policies?: {
+    readonly version: 1;
+    readonly parking: {
+      readonly mode: "STAY_IN_PLACE" | "RETURN_HOME_DOCK" | "RETURN_HOME_UNLOAD_DOCK";
+      readonly destination: { readonly stationID: number; readonly stationName: string; readonly systemName: string } | null;
+      readonly corporationDivision: number | null;
+    };
+    readonly travelAssist?: { readonly mode: "DISABLED" };
+    readonly resourceTarget?: { readonly mode: "ANY_ELIGIBLE" };
+    readonly scouting?: { readonly mode: "DISABLED" };
+    readonly defense?: { readonly mode: "EXISTING_SELF_DEFENSE" };
+  };
   readonly operationID?: string;
   readonly name: string;
   readonly area: {
@@ -1948,6 +1960,7 @@ export interface MiningOperationRuntime {
     readonly phase: string | null;
     readonly reason: string | null;
     readonly failureCode?: string | null;
+    readonly parkingState?: string | null;
     readonly botID: string | null;
   })[];
   readonly logisticsTail: readonly {

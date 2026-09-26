@@ -34,6 +34,19 @@ test("unsupported target and defender execution are explicit, not false capabili
   assert.match(source, /Gas — not supported yet/);
   assert.match(source, /Defender — execution not supported/);
   assert.match(source, /dynamic discovery deferred/);
+  assert.match(source, /bind:checked=\{oreAnomaly\} disabled/);
+});
+
+test("Fleet Parking uses an explicit station and defaults old definitions to Stay", () => {
+  const source = readFileSync(new URL("./MiningOperations.svelte", import.meta.url), "utf8");
+  assert.match(source, /On manual Stop \/ Fleet Parking/);
+  assert.match(source, /definition\.policies\?\.parking.mode \?\? "STAY_IN_PLACE"/);
+  assert.match(source, /Use hauler delivery station as parking station/);
+  assert.match(source, /resolved\.stationID === Number\(value\)/);
+  assert.match(source, /stopMode !== "STAY_IN_PLACE" && \(!parkingStation \|\| parkingError\)/);
+  assert.match(source, /Retry parking/);
+  assert.match(source, /failure\.message/);
+  assert.doesNotMatch(source, /createAppFlow|runFleetParking|getScriptObservation/);
 });
 
 test("opening and viewing Command Center adds zero readSpaceSnapshot polling", () => {

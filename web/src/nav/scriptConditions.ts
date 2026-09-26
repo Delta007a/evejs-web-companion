@@ -91,6 +91,7 @@ export interface MiningOperationTarget {
 
 /** Stored BFF coordination only. Reading this never reads the game world. */
 export interface MiningOperationAssignment {
+  readonly stopRequested?: boolean;
   readonly operationID: string;
   readonly operationName: string;
   readonly role: MiningOperationRole;

@@ -252,6 +252,97 @@ function settle() {
   return new Promise((resolve) => setTimeout(resolve, 10));
 }
 
+function parkingHost(log, callbacks = {}, options = {}) {
+  return makeHost({ log, ...options, loadStack: async () => {
+    const stack = await makeFakeStack(log)();
+    return { ...stack, createAppFlow(store, opts) {
+      const flow = stack.createAppFlow(store, opts);
+      return { ...flow,
+        async prepareCustomBotParking() {
+          log.push(["prepareParking", store.station.get().online.characterID]);
+          store._set({ customBot: { ...IDLE_SLICE, status: "paused", phase: "Settling drones" } });
+          await callbacks.prepare?.();
+        },
+        async parkCustomBot(policy, deadline) {
+          log.push(["park", policy, deadline]);
+          // Switching and finishing the finite script emits ordinary terminal
+          // progress. Neither emission may release the host claim early.
+          store._set({ customBot: { ...IDLE_SLICE, status: "stopped" } });
+          await callbacks.park?.();
+          store._set({ customBot: { ...IDLE_SLICE, status: "stopped", phase: "Docked" } });
+        },
+        cancelCustomBotParking() { log.push(["cancelParking"]); callbacks.cancel?.(); },
+      };
+    } };
+  } });
+}
+
+test("parking keeps the exact host claim through script replacement and releases only after confirmed docking + graceful Stop", async t => {
+  const log = [];
+  let arrive;
+  const docked = new Promise(resolve => { arrive = resolve; });
+  const host = parkingHost(log, { park: () => docked });
+  t.after(() => host.stopAll());
+  const started = await host.start({ ...START, operationID: "A", operationRole: "MINER" });
+  const id = started.bot.botID;
+  assert.equal((await host.prepareOperationStop(id, ACCOUNT.accountID, "B")).ok, false);
+  assert.equal((await host.prepareOperationStop(id, ACCOUNT.accountID + 1, "A")).ok, false);
+  assert.equal((await host.prepareOperationStop(id, ACCOUNT.accountID, "A")).ok, true);
+  const pending = host.parkOperationMember(id, ACCOUNT.accountID, "A", { mode: "RETURN_HOME_DOCK" });
+  await settle();
+  assert.equal(host.claimedBy(START.characterID), id);
+  assert.equal(log.some(row => row[0] === "logout"), false);
+  arrive();
+  assert.equal((await pending).ok, true);
+  assert.equal(host.claimedBy(START.characterID), null);
+  assert.deepEqual(log.filter(row => ["prepareParking", "park", "gracefulStopCustomBot", "logout"].includes(row[0])).map(row => row[0]), ["prepareParking", "park", "gracefulStopCustomBot", "logout"]);
+  assert.equal(log.find(row => row[0] === "park")[2], Date.parse(started.bot.expiresAt));
+});
+
+test("parking failure retains pilot authority and never resurrects the old mining routine after restart", async t => {
+  const log = [];
+  const rosterPath = tempRosterPath();
+  const before = parkingHost(log, { park: () => { throw new Error("Docking unconfirmed"); } }, { persistPath: rosterPath });
+  t.after(() => before.stopAll());
+  const started = await before.start({ ...START, operationID: "A", operationRole: "MINER" });
+  await before.prepareOperationStop(started.bot.botID, ACCOUNT.accountID, "A");
+  assert.equal(readRosterFile(rosterPath)[0].operationStopRequested, true);
+  const failed = await before.parkOperationMember(started.bot.botID, ACCOUNT.accountID, "A", {});
+  assert.equal(failed.ok, false);
+  assert.match(failed.message, /Docking unconfirmed/);
+  assert.equal(before.claimedBy(START.characterID), started.bot.botID);
+  assert.equal(log.some(row => row[0] === "logout"), false);
+  const resumeLog = [];
+  await before.sampleAllVitals();
+  assert.equal(before.listAll()[0].status, "paused");
+  assert.equal(before.listAll()[0].why, "Docking unconfirmed", "ordinary store refresh must not erase the host failure");
+  const after = makeHost({ log: resumeLog, persistPath: rosterPath });
+  t.after(() => after.stopAll());
+  await after.resume();
+  assert.equal(resumeLog.some(row => ["selectCharacter", "startCustomBot"].includes(row[0])), false);
+  assert.equal(after.listAll()[0].parking.state, "PARKING_FAILED");
+  assert.match(after.listAll()[0].why, /interrupted/);
+});
+
+test("duration expiry during parking cancels travel without claiming docking or logging the member out", async t => {
+  const log = [];
+  let expire, cancel;
+  const trip = new Promise((resolve, reject) => { cancel = () => reject(new Error("Parking duration expired")); });
+  const host = parkingHost(log, { park: () => trip, cancel: () => cancel() }, {
+    setDeadlineTimeout(callback) { expire = callback; return { unref() {} }; }, clearDeadlineTimeout() {},
+  });
+  t.after(() => host.stopAll());
+  const started = await host.start({ ...START, operationID: "A", operationRole: "MINER" });
+  await host.prepareOperationStop(started.bot.botID, ACCOUNT.accountID, "A");
+  const pending = host.parkOperationMember(started.bot.botID, ACCOUNT.accountID, "A", {});
+  expire();
+  assert.equal((await pending).ok, false);
+  assert.equal(host.claimedBy(START.characterID), started.bot.botID);
+  assert.equal(host.listAll()[0].parking.state, "PARKING_FAILED");
+  assert.ok(log.some(row => row[0] === "cancelParking"));
+  assert.equal(log.some(row => row[0] === "logout"), false);
+});
+
 test("start flies the character on its own session and lists it", async () => {
   const log = [];
   const host = makeHost({ log });

@@ -4,6 +4,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const staticData = require("./staticData");
+const { normalizePolicies } = require("./miningOperationPolicies");
 
 const STORE_FILENAME = "mining-operations.json";
 const ROLES = new Set(["MINER", "HAULER", "DEFENDER"]);
@@ -113,6 +114,7 @@ function normalizeDefinition(value, existing = null, now = () => new Date().toIS
     targetPolicy: "ANY_ELIGIBLE",
     unloadPolicy,
     unloadDestination,
+    policies: normalizePolicies(value.policies, resolveStation, resolveSystem),
     members,
     createdAt: existing?.createdAt || stamp,
     updatedAt: stamp,
@@ -130,7 +132,9 @@ function createMiningOperationStore(options) {
   function readAll() {
     try {
       const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
-      return parsed && Array.isArray(parsed.operations) ? parsed.operations : [];
+      return parsed && Array.isArray(parsed.operations) ? parsed.operations.map(row => ({ ...row,
+        policies: normalizePolicies(row.policies, resolveStation, resolveSystem),
+      })) : [];
     } catch (error) {
       if (error.code === "ENOENT") return [];
       throw error;

@@ -23,7 +23,9 @@ const { createLootMemory, CONTAINER_LEASE_MS } = require("./lootMemory");
 const { createBotLogStore } = require("./botLogStore");
 const { createMiningTargetBoard } = require("./miningTargetBoard");
 const { createMiningOperationStore } = require("./miningOperationStore");
-const { standardProfileFor, buildStandardProfile } = require("./miningOperationProfiles");
+const { standardProfileFor, buildStandardProfile, familyCapabilities } = require("./miningOperationProfiles");
+const { normalizePolicies } = require("./miningOperationPolicies");
+const { createMiningOperationStopper } = require("./miningOperationStop");
 const {
   createMiningOperations,
   auditMiningScript,
@@ -20019,9 +20021,10 @@ function operationPayload() {
     operations: miningOperations.list(botHost.listAll()),
     targetBoard: miningTargetBoard.list(),
     capabilities: {
+      profileFamilies: familyCapabilities(),
       targetClasses: {
         BELT: { executable: true, note: "Current-system belt discovery and mining are supported." },
-        ORE_ANOMALY: { executable: true, note: "Current-system onboard scanner authority is supported with SELF_UNLOAD." },
+        ORE_ANOMALY: { executable: false, note: "Distinct Ore Anomaly profiles are not implemented in this BELT phase." },
         ICE: { executable: false, note: "Not yet separately identifiable from the shared ore-site scanner path." },
         GAS: { executable: false, note: "Scanner classification exists, but no gas-site travel block exists." },
       },
@@ -20138,8 +20141,10 @@ app.post("/api/mining-operations/:operationID/delete", requireAuth, (req, res, n
 });
 
 function prepareMiningOperationLaunch(definition) {
+  try { normalizePolicies(definition.policies, staticData.getStation, staticData.getSolarSystem); }
+  catch (error) { return { ok: false, code: "MINING_OPERATION_INVALID", message: error.message }; }
   const selectedExecutable = definition.area.targetClasses.filter((kind) => EXECUTABLE_TARGET_CLASSES.includes(kind));
-  if (selectedExecutable.length === 0) return { ok: false, code: "NO_EXECUTABLE_TARGET_CLASS",
+  if (selectedExecutable.length === 0 || selectedExecutable.length !== definition.area.targetClasses.length) return { ok: false, code: "NO_EXECUTABLE_TARGET_CLASS",
     message: `The selected target classes are modeled but not executable yet: ${definition.area.targetClasses.join(", ")}.` };
   const scripts = new Map();
   const audits = new Map();
@@ -20183,6 +20188,9 @@ function prepareMiningOperationLaunch(definition) {
   const planHash = createHash("sha256").update(JSON.stringify({ definition, scripts: [...scripts] })).digest("hex");
   const warnings = definition.members.filter((member) => member.role === "DEFENDER")
     .map((member) => `${member.characterName}: DEFENDER execution is not supported; Start will be DEGRADED.`);
+  if (definition.policies?.parking.mode !== undefined && definition.policies.parking.mode !== "STAY_IN_PLACE") {
+    warnings.push(`On manual Stop: ${definition.policies.parking.mode} at ${definition.policies.parking.destination.stationName}. Parking uses the remaining run grant; stop before it expires. Cans left in space are not collected as part of Stop.`);
+  }
   return { ok: true, scripts, audits, commonClasses, planHash, warnings };
 }
 
@@ -20213,11 +20221,12 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
     }
     const plan = prepareMiningOperationLaunch(definition);
     if (!plan.ok) { res.status(409).json({ ok: false, error: plan.code, message: plan.message }); return; }
-    if (definition.members.some((member) => member.role !== "DEFENDER" &&
-        (member.routineMode || (member.automationID ? "CUSTOM" : "STANDARD")) === "STANDARD") &&
+    if ((definition.members.some((member) => member.role !== "DEFENDER" &&
+        (member.routineMode || (member.automationID ? "CUSTOM" : "STANDARD")) === "STANDARD") ||
+        (definition.policies?.parking.mode && definition.policies.parking.mode !== "STAY_IN_PLACE")) &&
         req.body?.planHash !== plan.planHash) {
       res.status(409).json({ ok: false, error: "OPERATION_LAUNCH_PLAN_STALE",
-        message: "The Standard operation profile or destination changed since preflight. Review and Start again." });
+        message: "The operation profile or destination changed since preflight. Review and Start again." });
       return;
     }
     const { scripts, audits, commonClasses } = plan;
@@ -20329,6 +20338,7 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
   }
 });
 
+const miningOperationStopper = createMiningOperationStopper({ operations: miningOperations, botHost });
 app.post("/api/mining-operations/:operationID/stop", requireAuth, async (req, res, next) => {
   try {
     const definition = miningOperations.definition(req.params.operationID);
@@ -20336,16 +20346,18 @@ app.post("/api/mining-operations/:operationID/stop", requireAuth, async (req, re
       res.status(404).json({ ok: false, error: "MINING_OPERATION_NOT_FOUND" });
       return;
     }
-    miningOperations.beginStop(definition.operationID);
-    const running = botHost.listAll().filter((bot) => bot.operationID === definition.operationID && bot.endedAt === null);
-    const failures = [];
-    for (const bot of running) {
-      const outcome = await botHost.stop(bot.botID, bot.accountID);
-      if (!outcome.ok) {
-        failures.push({ characterID: bot.characterID, code: outcome.code, message: outcome.message || "Graceful Stop is blocked." });
-      }
+    if (miningOperations.runtimeFor(definition.operationID)?.state === "ASSEMBLING") {
+      res.status(409).json({ ok: false, error: "OPERATION_START_IN_PROGRESS", message: "Pilot acquisition is still finishing. Retry Stop when assembly completes." });
+      return;
     }
-    miningOperations.finishStop(definition.operationID, failures);
+    const policy = normalizePolicies(definition.policies, staticData.getStation, staticData.getSolarSystem);
+    const pending = miningOperationStopper.stop({ ...definition, policies: policy });
+    if (policy.parking.mode !== "STAY_IN_PLACE") {
+      void pending.catch(errorLogger);
+      res.status(202).json({ ok: true, ...operationPayload() });
+      return;
+    }
+    const failures = await pending;
     res.status(failures.length > 0 ? 409 : 200).json({ ok: failures.length === 0, failures, ...operationPayload() });
   } catch (error) {
     next(error);

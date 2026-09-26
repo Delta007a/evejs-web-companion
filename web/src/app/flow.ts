@@ -227,6 +227,7 @@ import {
   type CapabilityScope,
 } from "../nav/scriptCapabilities.ts";
 import { SCRIPT_MACROS, resolveStationRef, scriptTravelHome } from "../nav/scriptMacros.ts";
+import { runFleetParking, parkingScript, type FleetParkingPolicy } from "../nav/fleetParking.ts";
 import {
   EMPTY_SURVEY_MEMORY,
   decideSurveyScan,
@@ -1144,6 +1145,9 @@ export interface AppFlow {
   stopCustomBot(): Promise<void>;
   /** User Stop or timed expiry; rejects while drone return is unconfirmed. */
   gracefulStopCustomBot(cleanupDeadlineMs?: () => number | null): Promise<void>;
+  prepareCustomBotParking(): Promise<void>;
+  parkCustomBot(policy: FleetParkingPolicy, deadlineMs: number): Promise<void>;
+  cancelCustomBotParking(): void;
   /** The character's saved-fitting library (for the Bot Builder's fitting picker). */
   listSavedFittings(): Promise<readonly import("../bridge/fittings.ts").SavedFitting[]>;
   /** The character's saved bookmarks (for the Bot Builder's saved-spot picker). */
@@ -7357,6 +7361,48 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     return customManualStop;
   }
 
+  async function prepareCustomBotParking(): Promise<void> {
+    customBotGeneration += 1;
+    autopilot?.abort();
+    if (!scriptRunner) throw new Error("The operation runner is unavailable; parking cannot take over another pilot controller.");
+    await settleIssuedWork(scriptRunner.beginGracefulStop());
+    autopilot?.abort(); // a route issued by the last pending tick has now settled
+    await confirmDronesHomeForManualStop();
+    const flight = decodeFlightStatus((await api.getFlightStatus(callOptions)).flight);
+    if (flight.docked === true) return;
+    const mining = await resolveMiningModuleIDs();
+    const fit = store.fitting.get();
+    const names = store.names.get().resolved;
+    if (!flight.shipID || fit.activeShipID !== flight.shipID || fit.slotsError !== null ||
+        ungroupedHighSlotModules(fit.slots, id => names[nameKey("type", id)] ?? null,
+          id => names[nameKey("typeGroup", id)] ?? null).length > 0) {
+      throw new Error("Mining module state is unreadable; parking settlement is blocked.");
+    }
+    // One-off Stop verification, not another polling loop. A refused/slow module
+    // shutdown fails closed and is retried only by an explicit Stop request.
+    const before = decodeSpaceSnapshot((await api.getScriptObservation(callOptions)).space);
+    if (before?.shipID !== flight.shipID || before?.ship?.activeModuleIDs == null) throw new Error("Active module state is unreadable; parking settlement is blocked.");
+    for (const id of mining.filter(id => before.ship!.activeModuleIDs!.includes(id))) await api.deactivateModule(id, {}, callOptions);
+    const after = decodeSpaceSnapshot((await api.getScriptObservation(callOptions)).space);
+    if (after?.shipID !== flight.shipID || after?.ship?.activeModuleIDs == null || mining.some(id => after.ship!.activeModuleIDs!.includes(id))) {
+      throw new Error("Mining modules have not confirmed stopped; parking settlement is blocked.");
+    }
+  }
+
+  async function parkCustomBot(policy: FleetParkingPolicy, deadlineMs: number): Promise<void> {
+    requireAutomationReady();
+    const doc = parkingScript(policy);
+    await stopCustomController();
+    const capabilities = await resolveScriptModuleCapabilities();
+    store.apply({ type: "custom-bot/started", name: doc.name });
+    try {
+      await runFleetParking(makeScriptRunnerDeps(capabilities, null, doc.home, new Set(), true), policy, deadlineMs,
+        runner => { scriptRunner = runner; });
+    } finally {
+      autopilot?.abort();
+    }
+  }
+
   function stopCompanionController(): void {
     fleetCompanion?.stop();
     liveCompanionRequest = null;
@@ -9330,6 +9376,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     startingStationID: number | null,
     home: WorldRef,
     watchedKinds: ReadonlySet<string> = new Set<string>(),
+    parking = false,
   ): ScriptRunnerDeps {
     const walletWatched = watchedKinds.has("wallet-below") || watchedKinds.has("wallet-above");
     const cargoWatched = watchedKinds.has("cargo-full");
@@ -9346,8 +9393,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     // A non-operation run proves that fact once. Operation runs keep reading so
     // the same lightweight call renews the bounded target lease and observes
     // target changes made by another member.
-    const miningOperationRequired = typeof options.miningOperationID === "string" && options.miningOperationID.length > 0;
-    let miningOperationProbe: "unknown" | "member" | "none" = miningOperationRequired ? "member" : "unknown";
+    const miningOperationRequired = !parking && typeof options.miningOperationID === "string" && options.miningOperationID.length > 0;
+    let miningOperationProbe: "unknown" | "member" | "none" = parking ? "none" : miningOperationRequired ? "member" : "unknown";
     const unavailableMiningTargets = new Map<string, number>();
     // The hunt's jump-distance table, computed once per home system (a full
     // breadth-first sweep over the gate graph is too much to redo every tick).
@@ -10804,7 +10851,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           note: snapshot.note,
           refusals: snapshot.refusals,
         });
-        if (snapshot.status === "error") {
+        if (snapshot.status === "error" && !parking) {
           stopLiveStream();
           store.apply({ type: "character/offline" });
         }
@@ -11978,6 +12025,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       return stopCustomController();
     },
     gracefulStopCustomBot,
+    prepareCustomBotParking,
+    parkCustomBot,
+    cancelCustomBotParking() { scriptRunner?.pause(); autopilot?.abort(); },
 
     panicRecallAndDock,
 

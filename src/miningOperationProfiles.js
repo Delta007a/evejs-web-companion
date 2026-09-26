@@ -8,14 +8,29 @@ const PROFILES = Object.freeze({
   MINER: { scriptID: BELT_MINER_ID, name: "Belt Miner / Hauler Service", rev: 2 },
   HAULER: { scriptID: BELT_HAULER_ID, name: "Belt Hauler", rev: 1 },
 });
+// Families own distinct implementations. Future families cannot route through
+// a belt routine merely because they share a member role.
+const PROFILE_FAMILIES = Object.freeze({
+  BELT: { family: "BELT", executable: true, profiles: PROFILES, build: buildBeltProfile },
+  ORE_ANOMALY: { family: "ORE_ANOMALY", executable: false, profiles: {}, reason: "Ore Anomaly profiles are not implemented." },
+  ICE: { family: "ICE", executable: false, profiles: {}, reason: "Ice profiles are not implemented." },
+  GAS: { family: "GAS", executable: false, profiles: {}, reason: "Gas profiles are not implemented." },
+});
+const familyCapabilities = () => Object.values(PROFILE_FAMILIES).map(({ build, ...metadata }) => metadata);
 
 function standardProfileFor(definition, member) {
   if ((member?.routineMode || (member?.automationID ? "CUSTOM" : "STANDARD")) !== "STANDARD" || definition?.unloadPolicy !== "HAULER_SERVICE" ||
-      definition.area?.targetClasses?.length !== 1 || definition.area.targetClasses[0] !== "BELT") return null;
-  return PROFILES[member.role] || null;
+      definition.area?.targetClasses?.length !== 1) return null;
+  const family = PROFILE_FAMILIES[definition.area.targetClasses[0]];
+  return family?.executable ? family.profiles[member.role] || null : null;
 }
 
 function buildStandardProfile(definition, member) {
+  const family = PROFILE_FAMILIES[definition?.area?.targetClasses?.[0]];
+  return family?.executable ? family.build(definition, member) : null;
+}
+
+function buildBeltProfile(definition, member) {
   const profile = standardProfileFor(definition, member);
   if (!profile) return null;
   const destination = definition.unloadDestination;
@@ -56,4 +71,4 @@ function buildStandardProfile(definition, member) {
   return { ...profile, doc };
 }
 
-module.exports = { BELT_MINER_ID, BELT_HAULER_ID, PROFILES, standardProfileFor, buildStandardProfile };
+module.exports = { BELT_MINER_ID, BELT_HAULER_ID, PROFILES, PROFILE_FAMILIES, familyCapabilities, standardProfileFor, buildStandardProfile };

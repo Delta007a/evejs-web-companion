@@ -1,7 +1,8 @@
 "use strict";
 
-const EXECUTABLE_TARGET_CLASSES = Object.freeze(["BELT", "ORE_ANOMALY"]);
-const DEFERRED_TARGET_CLASSES = Object.freeze(["ICE", "GAS"]);
+const EXECUTABLE_TARGET_CLASSES = Object.freeze(["BELT"]);
+const DEFERRED_TARGET_CLASSES = Object.freeze(["ORE_ANOMALY", "ICE", "GAS"]);
+const STOP_STATES = ["STOPPING", "PARKING", "PARKING_FAILED", "STOPPED"];
 
 function stamp(now) {
   return new Date(now()).toISOString();
@@ -170,18 +171,24 @@ function createMiningOperations(options) {
   function begin(operationID, executionTargetClasses) {
     const def = definition(operationID);
     if (!def) return { ok: false, code: "MINING_OPERATION_NOT_FOUND", message: "That Mining Operation no longer exists." };
+    const classes = executionTargetClasses ?? def.area.targetClasses;
+    if (!classes.length || classes.some(kind => !EXECUTABLE_TARGET_CLASSES.includes(kind)) ||
+        def.area.targetClasses.some(kind => !EXECUTABLE_TARGET_CLASSES.includes(kind))) {
+      return { ok: false, code: "NO_EXECUTABLE_TARGET_CLASS", message: "Only the BELT profile family is executable in this foundation." };
+    }
     const runtime = runtimeFor(operationID);
     if (!["DRAFT", "STOPPED"].includes(runtime.state)) {
       return { ok: false, code: "MINING_OPERATION_ACTIVE", message: "That Mining Operation is already active." };
     }
     runtime.state = "ASSEMBLING";
     runtime.currentTarget = null;
-    runtime.executionTargetClasses = [...new Set(executionTargetClasses)];
+    runtime.executionTargetClasses = [...new Set(classes)];
     runtime.drainingTargets = [];
     runtime.rendezvous = null;
     runtime.startedAt = stamp(now);
     runtime.stoppedAt = null;
     runtime.stopFailures = [];
+    runtime.parkingTargetsReleased = false;
     runtime.authorityLoss = false;
     runtime.tailClaimLoss = false;
     runtime.recoveryAmbiguous = false;
@@ -254,7 +261,7 @@ function createMiningOperations(options) {
     runtime.currentTarget = null;
     runtime.rendezvous = null;
     runtime.authorityLoss = true;
-    runtime.state = "DEGRADED";
+    if (!STOP_STATES.includes(runtime.state)) runtime.state = "DEGRADED";
     history(runtime, "TARGET_CLAIM_LOST", null, { targetKey: key,
       priorLeaseExpiresAt: previous.leaseExpiresAt ?? null,
       boardState: board?.state ?? null,
@@ -266,7 +273,7 @@ function createMiningOperations(options) {
     runtime.drainingTargets = runtime.drainingTargets.filter((row) => row.target?.targetKey !== key);
     if (runtime.drainingTargets.length === before) return;
     runtime.tailClaimLoss = true;
-    runtime.state = "DEGRADED";
+    if (!STOP_STATES.includes(runtime.state)) runtime.state = "DEGRADED";
     history(runtime, "TARGET_CLAIM_LOST", null, { targetKey: key, logisticsTail: true });
   }
 
@@ -308,6 +315,7 @@ function createMiningOperations(options) {
   function reserveCandidate(operationID, characterID, candidate) {
     const def = definition(operationID);
     const runtime = runtimeFor(operationID);
+    if (runtime && STOP_STATES.includes(runtime.state)) return { acquired: false, reason: "Operation is stopping; target reservation is disabled.", target: null };
     const member = runtime?.members.get(Number(characterID));
     if (!def || !runtime || !member || member.role !== "MINER") {
       return { acquired: false, reason: "NOT_OPERATION_MINER", target: null };
@@ -323,7 +331,7 @@ function createMiningOperations(options) {
     }
     const type = String(candidate?.targetType || "").toUpperCase();
     const systemID = Number(candidate?.systemID);
-    if (!runtime.executionTargetClasses.includes(type) || !def.area.targetClasses.includes(type)) {
+    if (!EXECUTABLE_TARGET_CLASSES.includes(type) || !runtime.executionTargetClasses.includes(type) || !def.area.targetClasses.includes(type)) {
       return { acquired: false, reason: "TARGET_CLASS_NOT_EXECUTABLE", target: null };
     }
     // v0.1's discovery authority is current-system only. CURRENT_AND_ADJACENT is
@@ -367,6 +375,7 @@ function createMiningOperations(options) {
 
   function activateTarget(operationID, characterID, key) {
     const runtime = runtimeFor(operationID);
+    if (runtime && STOP_STATES.includes(runtime.state)) return false;
     const member = runtime?.members.get(Number(characterID));
     if (!runtime || !member || member.role !== "MINER" || runtime.currentTarget?.targetKey !== key) return false;
     if (!targetBoard.activate(operationID, key)) {
@@ -383,6 +392,7 @@ function createMiningOperations(options) {
   function depleteTarget(operationID, characterID, key, evidence = {}) {
     const def = definition(operationID);
     const runtime = runtimeFor(operationID);
+    if (runtime && STOP_STATES.includes(runtime.state)) return false;
     const member = runtime?.members.get(Number(characterID));
     const target = runtime?.currentTarget;
     if (!def || !runtime || !member || member.role !== "MINER" || target?.targetKey !== key) return false;
@@ -451,6 +461,7 @@ function createMiningOperations(options) {
 
   function markReady(operationID, characterID) {
     const runtime = runtimeFor(operationID);
+    if (runtime && STOP_STATES.includes(runtime.state)) return false;
     const id = Number(characterID);
     const member = runtime?.members.get(id);
     if (!runtime?.rendezvous || !member || member.role !== "MINER") return false;
@@ -463,6 +474,7 @@ function createMiningOperations(options) {
 
   function finishDrain(operationID, characterID, targetKey) {
     const runtime = runtimeFor(operationID);
+    if (runtime && STOP_STATES.includes(runtime.state)) return false;
     const id = Number(characterID);
     const member = runtime?.members.get(id);
     if (!runtime || !member || member.role !== "HAULER") return false;
@@ -492,6 +504,7 @@ function createMiningOperations(options) {
     const memberDef = def?.members.find((row) => row.characterID === Number(characterID));
     const member = runtime?.members.get(Number(characterID));
     if (!def || !runtime || !memberDef || !member) return null;
+    const stopping = STOP_STATES.includes(runtime.state);
     if (runtime.currentTarget?.claimedByOperationID === operationID) {
       const key = runtime.currentTarget.targetKey;
       if (targetBoard.heartbeat(operationID, key)) {
@@ -512,8 +525,9 @@ function createMiningOperations(options) {
       unloadPolicy: def.unloadPolicy,
       area: def.area,
       state: runtime.state,
-      currentTarget: runtime.currentTarget,
-      logisticsTarget: tail?.target ?? null,
+      stopRequested: stopping,
+      currentTarget: stopping ? null : runtime.currentTarget,
+      logisticsTarget: stopping ? null : tail?.target ?? null,
       rendezvous: runtime.rendezvous === null ? null : {
         kind: runtime.rendezvous.kind,
         required: [...runtime.rendezvous.required],
@@ -531,12 +545,34 @@ function createMiningOperations(options) {
     return runtime;
   }
 
-  function finishStop(operationID, failures) {
+  function memberParking(operationID, characterID, state, reason = null) {
+    const runtime = runtimeFor(operationID);
+    const member = runtime?.members.get(Number(characterID));
+    if (!member) return;
+    member.parkingState = state;
+    member.phase = state === "PARKED" ? "Parked safely" : state;
+    member.reason = reason;
+    if (state === "PARKED") member.runtimeState = "STOPPED";
+    if (state === "PARKING") runtime.state = "PARKING";
+  }
+
+  function releaseStopTargets(operationID) {
+    const runtime = runtimeFor(operationID);
+    if (!runtime || !STOP_STATES.includes(runtime.state) || runtime.parkingTargetsReleased) return;
+    history(runtime, "TARGET_RELEASED_ON_STOP", runtime.currentTarget);
+    targetBoard.releaseOperation(operationID);
+    runtime.currentTarget = null;
+    runtime.drainingTargets = [];
+    runtime.rendezvous = null;
+    runtime.parkingTargetsReleased = true;
+  }
+
+  function finishStop(operationID, failures, parking = false) {
     const runtime = runtimeFor(operationID);
     if (!runtime) return null;
     runtime.stopFailures = failures.map((row) => ({ ...row }));
     if (failures.length > 0) {
-      runtime.state = "STOPPING";
+      runtime.state = parking ? "PARKING_FAILED" : "STOPPING";
       return runtime;
     }
     targetBoard.releaseOperation(operationID);
@@ -548,7 +584,7 @@ function createMiningOperations(options) {
     for (const member of runtime.members.values()) {
       if (member.runtimeState !== "FAILED") {
         member.runtimeState = "STOPPED";
-        member.phase = "Stopped safely";
+        member.phase = parking ? "Parked safely" : "Stopped safely";
       }
     }
     return runtime;
@@ -557,6 +593,16 @@ function createMiningOperations(options) {
   function reconcileBots(bots) {
     const active = new Map();
     for (const bot of bots || []) {
+      if (bot.operationID && bot.operationStopRequested && bot.parking?.state === "PARKING_FAILED" && bot.endedAt) {
+        const recovered = runtimeFor(bot.operationID);
+        if (recovered && ["DRAFT", "PARKING_FAILED"].includes(recovered.state)) {
+          recovered.state = "PARKING_FAILED";
+          if (!recovered.stopFailures.some(row => row.characterID === bot.characterID)) {
+            recovered.stopFailures.push({ characterID: bot.characterID, message: bot.parking.reason });
+          }
+          memberParking(bot.operationID, bot.characterID, "PARKING_FAILED", bot.parking.reason);
+        }
+      }
       if (!bot.operationID || bot.endedAt) continue;
       active.set(Number(bot.characterID), bot);
       const def = definition(bot.operationID);
@@ -568,6 +614,10 @@ function createMiningOperations(options) {
         row.runtimeState = bot.status;
         row.phase = bot.phase;
         row.reason = bot.why;
+        if (bot.parking) {
+          row.parkingState = bot.parking.state;
+          row.reason = bot.parking.reason || bot.why;
+        }
         if (["running", "starting"].includes(bot.status)) row.failureCode = null;
       }
       if (runtime.state === "DRAFT" || runtime.state === "STOPPED") {
@@ -578,7 +628,7 @@ function createMiningOperations(options) {
       }
     }
     for (const [operationID, runtime] of runtimes) {
-      if (["DRAFT", "STOPPED", "STOPPING"].includes(runtime.state)) continue;
+      if (["DRAFT", ...STOP_STATES].includes(runtime.state)) continue;
       for (const row of runtime.members.values()) {
         if (row.botID && !active.has(row.characterID) && !["FAILED", "STOPPED"].includes(row.runtimeState)) {
           memberFailed(operationID, row.characterID, "The hosted automation is no longer running.");
@@ -588,7 +638,7 @@ function createMiningOperations(options) {
   }
 
   function deriveState(def, runtime) {
-    if (["DRAFT", "ASSEMBLING", "STOPPING", "STOPPED"].includes(runtime.state)) return runtime.state;
+    if (["DRAFT", "ASSEMBLING", ...STOP_STATES].includes(runtime.state)) return runtime.state;
     const members = def.members.map((member) => runtime.members.get(member.characterID));
     if (runtime.authorityLoss || runtime.tailClaimLoss || runtime.recoveryAmbiguous ||
         members.some((row) => !row || row.runtimeState === "FAILED" ||
@@ -670,6 +720,8 @@ function createMiningOperations(options) {
     assignment,
     beginStop,
     finishStop,
+    memberParking,
+    releaseStopTargets,
     reconcileBots,
     renewHostedClaims,
     remove,

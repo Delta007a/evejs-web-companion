@@ -1047,6 +1047,10 @@ export function decideScriptAction(
   script: BotScript, obs: ScriptObservation, mem: ScriptMemory,
   registry: MacroRegistry, travelHome: HomeTravelDecider,
 ): ScriptTickResult {
+  if (obs.miningOperation?.stopRequested) {
+    return { action: WAIT, why: "Operation Stop requested; target-dependent work is disabled while botHost settles this pilot.",
+      phase: "Stopping operation", stepPath: null, interruptID: null, status: "running", pauseReason: null, memory: mem };
+  }
   let base = decideScriptCore(script, obs, mem, registry, travelHome);
   const assignmentMissing = obs.miningOperationRequired === true && obs.miningOperation == null;
   const minerTargetMissing = obs.miningOperationRequired === true &&

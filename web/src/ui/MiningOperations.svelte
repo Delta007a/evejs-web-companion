@@ -51,6 +51,15 @@
   let stationMatches = $state<readonly { id: number; name: string; systemName: string }[]>([]);
   let destinationError = $state<string | null>(null);
   let stationLookupSerial = 0;
+  type Parking = NonNullable<MiningOperationDefinition["policies"]>["parking"];
+  let stopMode = $state<Parking["mode"]>("STAY_IN_PLACE");
+  let parkingStation = $state<Parking["destination"]>(null);
+  let parkingQuery = $state("");
+  let parkingDivision = $state<number | null>(null);
+  let parkingError = $state<string | null>(null);
+  let parkingMatches = $state<NonNullable<Parking["destination"]>[]>([]);
+  let parkingLookupSerial = 0;
+  const stopLabels: Record<Parking["mode"], string> = { STAY_IN_PLACE: "Stay in place", RETURN_HOME_DOCK: "Return home and dock", RETURN_HOME_UNLOAD_DOCK: "Return home, unload and dock" };
   let members = $state<DraftMember[]>([]);
   let seedSquadID = $state("");
   let accountLookup = $state("");
@@ -184,6 +193,38 @@
     stationMatches = [];
   }
 
+  function chooseParking(station: NonNullable<Parking["destination"]>): void {
+    ++parkingLookupSerial;
+    parkingStation = station;
+    parkingQuery = station.stationName;
+    parkingMatches = [];
+    parkingError = null;
+  }
+
+  async function searchParking(value: string): Promise<void> {
+    const serial = ++parkingLookupSerial;
+    parkingQuery = value;
+    parkingStation = null;
+    parkingMatches = [];
+    parkingError = "Select a known parking station.";
+    if (value.trim().length < 2) return;
+    try {
+      if (/^\d+$/.test(value.trim())) {
+        const resolved = await resolveDestination(Number(value), opts());
+        if (serial !== parkingLookupSerial) return;
+        if (resolved.kind === "station" && resolved.stationID === Number(value) && resolved.stationName && resolved.systemName) {
+          chooseParking({ stationID: Number(value), stationName: resolved.stationName, systemName: resolved.systemName });
+        }
+        return;
+      }
+      const found = await findMapLocations(value.trim(), "station", opts());
+      if (serial !== parkingLookupSerial) return;
+      parkingMatches = found.matches.filter(row => row.kind === "station").map(row => ({ stationID: row.id, stationName: row.name, systemName: row.solarSystemName ?? "" }));
+      const exact = parkingMatches.find(row => row.stationName.toLowerCase() === value.trim().toLowerCase());
+      if (exact) chooseParking(exact);
+    } catch (cause) { if (serial === parkingLookupSerial) parkingError = words(cause); }
+  }
+
   function newOperation(): void {
     operationID = undefined;
     name = "";
@@ -200,6 +241,13 @@
     unloadDivision = 1;
     destinationError = null;
     members = [];
+    stopMode = "STAY_IN_PLACE";
+    parkingStation = null;
+    parkingQuery = "";
+    parkingDivision = null;
+    parkingError = null;
+    parkingMatches = [];
+    ++parkingLookupSerial;
     seedSquadID = "";
     editing = true;
   }
@@ -220,6 +268,13 @@
     unloadDivision = definition.unloadDestination?.corporationDivision ?? 1;
     destinationError = null;
     members = definition.members.map((member) => ({ ...member, routineMode: modeOf(member) }));
+    stopMode = definition.policies?.parking.mode ?? "STAY_IN_PLACE";
+    parkingStation = definition.policies?.parking.destination ?? null;
+    parkingQuery = parkingStation?.stationName ?? "";
+    parkingDivision = definition.policies?.parking.corporationDivision ?? null;
+    parkingError = null;
+    parkingMatches = [];
+    ++parkingLookupSerial;
     editing = true;
   }
 
@@ -251,6 +306,7 @@
 
   async function save(): Promise<void> {
     if (!anchorValid) { error = anchorError ?? "Choose a known solar system."; return; }
+    if (stopMode !== "STAY_IN_PLACE" && (!parkingStation || parkingError)) { error = parkingError || "Choose a parking station."; return; }
     busy = "save";
     error = null;
     try {
@@ -264,6 +320,7 @@
           targetClasses: selectedClasses,
         },
         targetPolicy: "ANY_ELIGIBLE",
+        policies: { version: 1, parking: { mode: stopMode, destination: stopMode === "STAY_IN_PLACE" ? null : parkingStation, corporationDivision: parkingDivision } },
         unloadPolicy,
         unloadDestination: unloadStationID > 0 && destinationError === null
           ? { stationID: unloadStationID, stationName: unloadStationName, systemName: unloadStationSystemName, corporationDivision: unloadDivision }
@@ -371,7 +428,7 @@
       <fieldset>
         <legend>Eligible targets — any eligible resource</legend>
         <label><input type="checkbox" bind:checked={belt} /> Belts</label>
-        <label><input type="checkbox" bind:checked={oreAnomaly} /> Ore anomalies — self unload in v0.1</label>
+        <label class="disabled"><input type="checkbox" bind:checked={oreAnomaly} disabled /> Ore anomalies — profile family not implemented</label>
         <label class="disabled"><input type="checkbox" disabled /> Ice — not supported yet</label>
         <label class="disabled"><input type="checkbox" disabled /> Gas — not supported yet</label>
       </fieldset>
@@ -393,6 +450,25 @@
           <label>Corporation division <select bind:value={unloadDivision}>{#each [1, 2, 3, 4, 5, 6, 7] as division}<option value={division}>Division {division}</option>{/each}</select></label>
         </div>
       {/if}
+
+      <fieldset>
+        <legend>On manual Stop / Fleet Parking</legend>
+        <label>Policy <select bind:value={stopMode}>{#each Object.entries(stopLabels) as [mode, label]}<option value={mode}>{label}</option>{/each}</select></label>
+        {#if stopMode !== "STAY_IN_PLACE"}
+          <label>Parking station <input required value={parkingQuery} oninput={(event) => void searchParking(event.currentTarget.value)} placeholder="Station name or ID" autocomplete="off" /></label>
+          {#if parkingMatches.length > 0}<div class="system-matches" role="listbox" aria-label="Matching parking stations">
+            {#each parkingMatches as station (station.stationID)}<button type="button" role="option" aria-selected="false" onclick={() => chooseParking(station)}>{station.stationName} · {station.systemName}</button>{/each}
+          </div>{/if}
+          {#if unloadPolicy === "HAULER_SERVICE" && unloadStationID > 0 && !destinationError}<button type="button" onclick={() => chooseParking({ stationID: unloadStationID, stationName: unloadStationName, systemName: unloadStationSystemName })}>Use hauler delivery station as parking station</button>{/if}
+          {#if parkingStation}<p class="muted">Station {parkingStation.stationID} · {parkingStation.systemName}</p>{/if}
+          {#if parkingError}<p class="error" role="status">{parkingError}</p>{/if}
+          {#if stopMode === "RETURN_HOME_UNLOAD_DOCK"}
+            <label>Freight destination <select bind:value={parkingDivision}><option value={null}>Personal hangar</option>{#each [1, 2, 3, 4, 5, 6, 7] as division}<option value={division}>Corporation Division {division}</option>{/each}</select></label>
+            <p class="note">Uses existing ore-delivery freight rules: mining holds, or cargo fallback on ships without mining holds. Not an empty-every-bay action.</p>
+          {/if}
+          <p class="note">Stop early enough to park within the remaining run grant. Timed expiry keeps existing graceful cleanup; it does not schedule a return trip. Cans in space may be left behind. An unavailable member reports failure; healthy members can still park.</p>
+        {:else}<p class="note">Existing graceful Stop: recall drones and release control without deliberately moving or docking.</p>{/if}
+      </fieldset>
 
       {#if prefs.squads.length > 0}
         <div class="seed">
@@ -459,16 +535,17 @@
           <button type="button" disabled={busy !== null} onclick={() => void start(row.definition)}>Start operation</button>
           <button type="button" class="danger" disabled={busy !== null} onclick={() => void remove(row.definition.operationID)}>Delete</button>
         {:else}
-          <button type="button" class="danger" disabled={busy !== null} onclick={() => void stop(row.definition.operationID)}>Stop operation</button>
+          <button type="button" class="danger" disabled={busy !== null} onclick={() => void stop(row.definition.operationID)}>{row.runtime.state === "PARKING_FAILED" ? "Retry parking" : "Stop operation"}</button>
         {/if}
       </div></div>
       {#if row.runtime.statusReason}<p class="notice"><strong>Status:</strong> {row.runtime.statusReason}</p>{/if}
       <p><strong>Area:</strong> {row.definition.area.anchorSystemName ?? "Unknown system"} · {row.definition.area.reach === "CURRENT_SYSTEM" ? "current system" : "adjacent mode (anchor-only execution in v0.1)"}</p>
       <p><strong>Target class / unload:</strong> {row.definition.area.targetClasses.join(", ")} · {row.definition.unloadPolicy === "HAULER_SERVICE" ? "Hauler service" : "Self unload"}</p>
+      <p><strong>On Stop:</strong> {stopLabels[row.definition.policies?.parking.mode ?? "STAY_IN_PLACE"]}{row.definition.policies?.parking.destination ? ` · ${row.definition.policies.parking.destination.stationName}` : ""}</p>
       {#if row.definition.unloadPolicy === "HAULER_SERVICE"}<p><strong>Delivery:</strong> {row.definition.unloadDestination ? `${row.definition.unloadDestination.stationName} · Corporation Division ${row.definition.unloadDestination.corporationDivision}` : row.definition.members.some((member) => modeOf(member) === "STANDARD") ? "Not configured — Standard Start blocked" : "Configured in custom routine"}</p>{/if}
       {#if ["DRAFT", "STOPPED"].includes(row.runtime.state)}<p class={readiness[row.definition.operationID]?.message ? "notice" : "muted"}><strong>Start readiness:</strong> {readiness[row.definition.operationID]?.message ?? "Routine preflight ready; pilot ownership and run grant are checked at Start."}</p>{/if}
-      <p><strong>Current target:</strong> {row.runtime.currentTarget?.targetName ?? "Waiting for selection"} {row.runtime.currentTarget ? `· ${row.runtime.currentTarget.state}` : ""}</p>
-      <p><strong>Current system:</strong> {row.runtime.currentTarget?.systemName ?? (row.runtime.currentTarget ? String(row.runtime.currentTarget.systemID) : "Awaiting target")}</p>
+      <p><strong>Current target:</strong> {row.runtime.currentTarget?.targetName ?? (["STOPPING", "PARKING", "PARKING_FAILED", "STOPPED"].includes(row.runtime.state) ? "Released / no current target" : "Waiting for selection")} {row.runtime.currentTarget ? `· ${row.runtime.currentTarget.state}` : ""}</p>
+      <p><strong>Current system:</strong> {row.runtime.currentTarget?.systemName ?? (row.runtime.currentTarget ? String(row.runtime.currentTarget.systemID) : "No current mining target")}</p>
       {#if row.runtime.rendezvous}
         <p class="notice"><strong>Rendezvous:</strong> {row.runtime.rendezvous.ready.length}/{row.runtime.rendezvous.required.length} required miners ready.</p>
       {/if}
@@ -479,7 +556,7 @@
         <thead><tr><th>Pilot</th><th>Role</th><th>Assignment</th><th>Bot state</th><th>Phase</th></tr></thead>
         <tbody>{#each row.runtime.members as member (member.characterID)}<tr><td>{member.characterName}</td><td>{member.role}</td><td>{modeOf(member) === "STANDARD" && (row.definition.unloadPolicy !== "HAULER_SERVICE" || row.definition.area.targetClasses.length !== 1 || row.definition.area.targetClasses[0] !== "BELT") ? "Standard unavailable" : profileName(member)}</td><td>{member.runtimeState}</td><td>{member.runtimeState === "FAILED" ? `${member.failureCode ? `${member.failureCode}: ` : ""}${member.reason ?? member.phase ?? "Unavailable"}` : member.phase ?? member.reason ?? "—"}</td></tr>{/each}</tbody>
       </table>
-      {#if row.runtime.stopFailures.length > 0}<p class="error">Graceful Stop remains blocked for {row.runtime.stopFailures.length} member(s); this operation is not reported stopped.</p>{/if}
+      {#if row.runtime.stopFailures.length > 0}<div class="error"><p>Stop / Parking remains incomplete; this operation is not reported stopped.</p>{#each row.runtime.stopFailures as failure}<p>Pilot {failure.characterID}: {failure.message}</p>{/each}</div>{/if}
       {#if row.runtime.history.length > 0}<details><summary>Target history</summary><ul>{#each row.runtime.history as item}<li>{item.at} · {item.kind} · {item.target?.targetName ?? (item.evidence ? JSON.stringify(item.evidence) : "—")}</li>{/each}</ul></details>{/if}
     </article>
   {/each}

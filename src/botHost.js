@@ -246,6 +246,7 @@ function createBotHost(options) {
             ...(record.operationID ? {
               operationID: record.operationID,
               operationRole: record.operationRole,
+              ...(record.operationStopRequested ? { operationStopRequested: true } : {}),
             } : {}),
           };
           if (record.kind === "companion") {
@@ -310,6 +311,8 @@ function createBotHost(options) {
       scriptHash: record.scriptHash,
       operationID: record.operationID,
       operationRole: record.operationRole,
+      operationStopRequested: record.operationStopRequested === true,
+      parking: record.parking || null,
       restartSafe: record.restartSafe,
       riskClasses: record.riskClasses,
       maxRuntimeMinutes: record.maxRuntimeMinutes,
@@ -442,6 +445,15 @@ function createBotHost(options) {
     record.note = snapshot.note;
     if (snapshot.lastAlert) {
       record.lastAlert = { message: String(snapshot.lastAlert.message), atMs: Number(snapshot.lastAlert.atMs) };
+    }
+    if (record.operationStopRequested && record.parking?.state === "PARKING_FAILED") {
+      // The paused/terminal finite runner can still receive ordinary store
+      // updates. Those must not erase the host-owned parking failure or make
+      // the live claim look ended (and stop renewing a still-unsafe target).
+      record.status = "paused";
+      record.phase = "Parking failed";
+      record.why = record.parking.reason;
+      record.pauseReason = record.parking.reason;
     }
   }
 
@@ -815,7 +827,7 @@ function createBotHost(options) {
         if (snapshot.status === "running" || snapshot.status === "paused") {
           sawRunning = true;
         }
-        if (sawRunning && ENDED_STATUSES.has(snapshot.status)) {
+        if (sawRunning && ENDED_STATUSES.has(snapshot.status) && !record.operationStopRequested) {
           void finalize(record);
         }
       });
@@ -840,6 +852,15 @@ function createBotHost(options) {
         }
         record.deadlineTimer = null;
         record.expiryRequested = true;
+        if (record.operationStopRequested) {
+          record.flow?.cancelCustomBotParking();
+          record.parking = { state: "PARKING_FAILED", reason: "Approved runtime expired before parking completed; control retained for explicit recovery." };
+          record.status = "paused";
+          record.phase = "Parking failed";
+          record.why = record.parking.reason;
+          persistRoster();
+          return;
+        }
         // The ordinary Stop and this timer share one in-progress operation.
         // Neither may finalize the runner before its controlled flight returns.
         return stop(record.botID, record.accountID).catch(logError);
@@ -896,6 +917,65 @@ function createBotHost(options) {
     })();
     record.gracefulStopPromise = pending;
     try { return await pending; } finally { if (record.gracefulStopPromise === pending) record.gracefulStopPromise = null; }
+  }
+
+  function operationRecord(botID, accountID, operationID) {
+    const record = records.get(botID);
+    return record && !record.finalized && record.accountID === Number(accountID) &&
+      record.operationID === operationID && claims.get(record.characterID) === record.botID ? record : null;
+  }
+
+  async function prepareOperationStop(botID, accountID, operationID) {
+    const record = operationRecord(botID, accountID, operationID);
+    if (!record) return { ok: false, code: "PARKING_MEMBER_UNAVAILABLE", message: "Operation does not own this live pilot." };
+    if (record.prepareParkingPromise) return record.prepareParkingPromise;
+    // Persist the stop intent BEFORE any await. Restart must never resurrect
+    // the old mining routine after the user asked to park it.
+    record.operationStopRequested = true;
+    record.parking = { state: "SETTLING", reason: null };
+    persistRoster();
+    const pending = (async () => {
+      try {
+        await record.flow.prepareCustomBotParking();
+        record.parking = { state: "READY", reason: null };
+        return { ok: true };
+      } catch (error) {
+        record.parking = { state: "PARKING_FAILED", reason: error.message };
+        record.status = "paused";
+        record.phase = "Parking settlement blocked";
+        record.why = error.message;
+        return { ok: false, code: "PARKING_PREPARE_FAILED", message: error.message };
+      }
+    })();
+    record.prepareParkingPromise = pending;
+    try { return await pending; } finally { record.prepareParkingPromise = null; }
+  }
+
+  async function parkOperationMember(botID, accountID, operationID, policy) {
+    const record = operationRecord(botID, accountID, operationID);
+    if (!record) return { ok: false, code: "PARKING_MEMBER_UNAVAILABLE", message: "Operation does not own this live pilot." };
+    if (record.parkingPromise) return record.parkingPromise;
+    if (record.parking?.state !== "READY") return { ok: false, code: "PARKING_NOT_SETTLED", message: "Settle the operation member before parking." };
+    const pending = (async () => {
+      try {
+        record.parking = { state: "PARKING", reason: null };
+        await record.flow.parkCustomBot(policy, Date.parse(record.expiresAt));
+        record.parking = { state: "PARKED", reason: null };
+        // Final scoped release still crosses the existing graceful Stop path.
+        const stopped = await stop(botID, accountID);
+        if (!stopped.ok) throw new Error(stopped.message || "Final graceful Stop could not complete.");
+        return stopped;
+      } catch (error) {
+        record.status = "paused";
+        record.phase = "Parking failed";
+        record.why = error.message;
+        record.parking = { state: "PARKING_FAILED", reason: error.message };
+        persistRoster();
+        return { ok: false, code: "PARKING_FAILED", message: error.message };
+      }
+    })();
+    record.parkingPromise = pending;
+    try { return await pending; } finally { record.parkingPromise = null; }
   }
 
   function list(accountID) {
@@ -1041,6 +1121,8 @@ function createBotHost(options) {
       scriptHash: String(row.scriptHash || ""),
       operationID: typeof row.operationID === "string" ? row.operationID : null,
       operationRole: ["MINER", "HAULER", "DEFENDER"].includes(row.operationRole) ? row.operationRole : null,
+      operationStopRequested: row.operationStopRequested === true,
+      parking: row.operationStopRequested ? { state: "PARKING_FAILED", reason: "Parking interrupted by WC restart; arrival is unknown. Review and recover this pilot explicitly." } : null,
       restartSafe: false,
       riskClasses: Array.isArray(row.riskClasses) ? row.riskClasses.map(String) : [],
       maxRuntimeMinutes: Number(row.maxRuntimeMinutes || 0),
@@ -1075,6 +1157,10 @@ function createBotHost(options) {
   async function resume() {
     const rows = readRoster();
     for (const row of rows) {
+      if (row.operationStopRequested === true) {
+        recordResumeFailure(row, "operation parking was interrupted. The old mining routine was not resumed; docking/unload are unconfirmed.");
+        continue;
+      }
       const characterID = Number(row.characterID);
       const kind = row.kind === "companion" ? "companion" : "script";
       try {
@@ -1176,6 +1262,8 @@ function createBotHost(options) {
   return {
     start,
     stop,
+    prepareOperationStop,
+    parkOperationMember,
     list,
     listAll,
     claimedBy,

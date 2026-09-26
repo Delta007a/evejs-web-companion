@@ -97,6 +97,10 @@ function fakeHost(heldSessions = new Map()) {
       row.status = "stopped";
       return { ok: true, bot: row };
     },
+    async prepareOperationStop(botID, accountID, operationID) {
+      return { ok: rows.some(row => row.botID === botID && row.endedAt === null && row.operationID === operationID && row.accountID === accountID) };
+    },
+    async parkOperationMember(botID) { return this.stop(botID); },
     listAll: () => rows.map((row) => ({ ...row })),
     list: () => rows.map((row) => ({ ...row })),
     claimedBy: () => null,
@@ -369,4 +373,28 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
   assert.deepEqual(host.stops.slice(stoppedBefore).sort(), crew.map((row) => `bot-${row.characterID}`).sort());
   assert.ok(outsiders.every((characterID) => host.rows.find((row) => row.botID === `unrelated-${characterID}`).endedAt === null));
   assert.ok(outsiders.every((characterID) => heldSessions.has(`unrelated-session-${characterID}`)));
+
+  const parking = { mode: "RETURN_HOME_UNLOAD_DOCK", destination: { stationID: 60003760 }, corporationDivision: 1 };
+  const invalidParking = await request(baseUrl, "/api/mining-operations", { method: "POST", token,
+    body: { ...standardInput, policies: { parking: { ...parking, destination: { stationID: 1 } } } } });
+  assert.equal(invalidParking.response.status, 400);
+  const parkedDef = await request(baseUrl, "/api/mining-operations", { method: "POST", token,
+    body: { ...standardInput, policies: { parking } } });
+  assert.equal(parkedDef.response.status, 200);
+  assert.equal(parkedDef.payload.capabilities.targetClasses.ORE_ANOMALY.executable, false);
+  assert.equal(parkedDef.payload.capabilities.profileFamilies.length, 4);
+  const parkID = parkedDef.payload.definition.operationID;
+  const parkPlan = await request(baseUrl, `/api/mining-operations/${parkID}/launch-plan`, { token });
+  assert.match(parkPlan.payload.warnings.join(" "), /manual Stop.*remaining run grant/);
+  const parkingStart = await request(baseUrl, `/api/mining-operations/${parkID}/start`, { method: "POST", token, body: {
+    planHash: parkPlan.payload.planHash,
+    grants: Object.fromEntries(crew.map((pilot, index) => [pilot.characterID, { scriptRev: parkPlan.payload.members[index].script.rev, riskClasses: [], maxRuntimeMinutes: 60 }])) } });
+  assert.equal(parkingStart.response.status, 200);
+  const parkingStop = await request(baseUrl, `/api/mining-operations/${parkID}/stop`, { method: "POST", token, body: {} });
+  assert.equal(parkingStop.response.status, 202, "parking is asynchronous control-plane work");
+  const completed = await request(baseUrl, "/api/mining-operations", { token });
+  assert.equal(completed.payload.operations.find(row => row.definition.operationID === parkID).runtime.state, "STOPPED");
+  assert.ok(outsiders.every(id => host.rows.find(row => row.characterID === id).endedAt === null));
+  const repeated = await request(baseUrl, `/api/mining-operations/${parkID}/stop`, { method: "POST", token, body: {} });
+  assert.equal(repeated.response.status, 202);
 });

@@ -253,15 +253,11 @@ test("belt depletion is written through existing belt memory and its TTL clears 
   assert.equal(h.operations.reserveCandidate("a", 1, belt()).acquired, true, "belt memory's expiry owns respawn eligibility");
 });
 
-test("a confirmed anomaly disappearance can be reclaimed only after that scanner label reappears", () => {
+test("ore anomaly family remains modeled but no operation can execute it in this foundation", () => {
   const def = definition("site", [member(1, "MINER")], "SELF_UNLOAD", ["ORE_ANOMALY"]);
   const h = harness([def]);
-  startAll(h, "site", ["ORE_ANOMALY"]);
-  const reserved = h.operations.reserveCandidate("site", 1, anomaly());
-  h.operations.depleteTarget("site", 1, reserved.target.targetKey, { scannerDisappeared: true });
-  h.operations.markReady("site", 1);
-  assert.equal(h.board.get(reserved.target.targetKey).state, "DEPLETED");
-  assert.equal(h.operations.reserveCandidate("site", 1, anomaly()).acquired, true);
+  assert.equal(h.operations.begin("site", ["ORE_ANOMALY"]).ok, false);
+  assert.equal(h.operations.reserveCandidate("site", 1, anomaly()).acquired, false);
 });
 
 test("launch waits for target selection, then travels; member failure is degraded", () => {
@@ -362,6 +358,8 @@ test("reload reconciliation trusts botHost association but not a stale current t
 test("adjacent and unsupported target candidates are modeled but never invented or reserved", () => {
   const def = definition("area", [member(1, "MINER")], "SELF_UNLOAD", ["BELT", "ICE", "GAS"]);
   const h = harness([def]);
+  assert.equal(h.operations.begin("area", ["BELT"]).code, "NO_EXECUTABLE_TARGET_CLASS");
+  def.area.targetClasses = ["BELT"];
   startAll(h, "area", ["BELT"]);
   assert.equal(h.operations.reserveCandidate("area", 1, { ...belt(), systemID: 30000144 }).reason, "OUTSIDE_EXECUTABLE_AREA");
   assert.equal(h.operations.reserveCandidate("area", 1, { ...belt(), targetType: "ICE" }).reason, "TARGET_CLASS_NOT_EXECUTABLE");

@@ -86,9 +86,13 @@ const CUSTOM_DOC: BotScript = {
  * whichever the caller asked for and the exclusion test starts the bot that
  * matches. `docked` therefore parameterises the world, not the assertion.
  */
-function harness(docked: boolean, options: { readonly minersOffline?: boolean } = {}) {
+function harness(docked: boolean, options: { readonly minersOffline?: boolean; readonly parking?: boolean; readonly stuckMiner?: boolean } = {}) {
+  const requests: string[] = [];
+  let flightOut = options.parking === true;
+  let activeModules = options.parking ? [...STRIP_MINER_ITEM_IDS] : [];
   const fakeFetch = (async (input: unknown, init?: { method?: string; body?: unknown }) => {
     const path = String(input);
+    requests.push(path);
     const body = init && typeof init.body === "string" ? JSON.parse(init.body) : {};
     const outcome = respond(path, body as Record<string, unknown>);
     return {
@@ -103,20 +107,43 @@ function harness(docked: boolean, options: { readonly minersOffline?: boolean } 
   function respond(path: string, body: Record<string, unknown>): unknown {
     if (path === "/api/bridge/flight/status") return flightBody(docked);
     if (path === "/api/bridge/space/snapshot") return spaceBody();
-    if (path === "/api/bridge/script/observation") return { ...(spaceBody() as object), bay: [], inSpace: [], shipInfo: null };
+    if (path === "/api/bridge/script/observation") return { ...(spaceBody({ activeModuleIDs: activeModules }) as object), bay: [], inSpace: [], shipInfo: null };
     if (path === "/api/bridge/fitting") {
       return fittingBody(options.minersOffline ? { offline: STRIP_MINER_ITEM_IDS } : {});
     }
     if (path === "/api/bridge/ship/ore-hold") return holdsBody(0, []);
     if (path === "/api/names") return namesBody(body);
     if (path === "/api/bridge/targets") return { ok: true, targetIDs: [], notifications: [] };
-    if (path === "/api/bridge/drones") return { ok: true, bay: [], inSpace: [], shipInfo: null };
+    if (path === "/api/bridge/drones") return { ok: true, bay: [], inSpace: flightOut ? [{ itemID: 9009, typeID: 10246, controlled: true, state: "idle" }] : [], shipInfo: null };
+    if (path === "/api/bridge/drones/recall") flightOut = false;
+    if (path === "/api/bridge/modules/deactivate" && !options.stuckMiner) activeModules = activeModules.filter(id => id !== body.itemID);
     return { ok: true };
   }
 
   const store = createClientStore();
-  return { store, flow: createAppFlow(store, { fetch: fakeFetch }) };
+  return { store, requests, flow: createAppFlow(store, { fetch: fakeFetch }) };
 }
+
+test("parking preparation pauses the existing runner, recalls drones, and confirms mining modules stopped before travel", async t => {
+  const { flow, store, requests } = harness(false, { parking: true });
+  t.after(() => flow.stopCustomBot());
+  await flow.startCustomBot(CUSTOM_DOC);
+  await flow.prepareCustomBotParking();
+  assert.equal(store.customBot.get().status, "paused");
+  const recall = requests.indexOf("/api/bridge/drones/recall");
+  const deactivate = requests.indexOf("/api/bridge/modules/deactivate");
+  assert.ok(recall >= 0 && deactivate > recall);
+  assert.equal(requests.filter(path => path === "/api/bridge/modules/deactivate").length, STRIP_MINER_ITEM_IDS.length);
+  assert.ok(!requests.some(path => /logout|warp|undock/.test(path)));
+});
+
+test("parking preparation fails closed if cycling miners have not confirmed stopped", async t => {
+  const { flow, store } = harness(false, { parking: true, stuckMiner: true });
+  t.after(() => flow.stopCustomBot());
+  await flow.startCustomBot(CUSTOM_DOC);
+  await assert.rejects(flow.prepareCustomBotParking(), /not confirmed stopped/);
+  assert.equal(store.customBot.get().status, "paused");
+});
 
 test("manual custom-bot Stop confirms an empty flight before releasing the runner", async () => {
   const { store, flow } = harness(false);

@@ -1,0 +1,102 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { parkingScript, runFleetParking, type FleetParkingPolicy } from "./fleetParking.ts";
+import type { ScriptObservation } from "./scriptConditions.ts";
+import type { MiningHold, FlightStatus } from "../store/types.ts";
+import type { ScriptRunnerDeps } from "./scriptRunner.ts";
+import { SCRIPT_MACROS } from "./scriptMacros.ts";
+import { decideScriptAction, initialMemory, type ScriptAction } from "./scriptDecide.ts";
+import { decodeScriptValue } from "../bots/scriptCodec.ts";
+
+const policy: FleetParkingPolicy = { mode: "RETURN_HOME_UNLOAD_DOCK",
+  destination: { stationID: 60003760, stationName: "Home", systemName: "Jita" }, corporationDivision: 1 };
+function observation(docked: boolean, holds: readonly MiningHold[] | null): ScriptObservation {
+  return { inSpace: !docked, docked, inWarp: false, health: 1, shieldRatio: 1, armorRatio: 1, hullRatio: 1,
+    hostileOnGrid: false, dronesOut: false, oreHoldFraction: 0, holdEmpty: false, snapshot: null,
+    holds, lockedTargetIDs: [], miningModuleIDs: [], droneBayItemIDs: [], startingStationID: 12345,
+    flightStatus: { docked, inSpace: !docked, stationID: docked ? 60003760 : null, shipID: 9, shipIsCapsule: false } as FlightStatus,
+    miningDrones: { bay: [], out: [], roles: {}, maxActive: 5 },
+    // Normal operation is STOPPING and may have no target. Only the fixed,
+    // trusted parking program is allowed to travel in this situation.
+    miningOperationRequired: true, miningOperation: { operationID: "A", operationName: "Fleet", role: "MINER", state: "STOPPING", stopRequested: true,
+      unloadPolicy: "HAULER_SERVICE", area: { anchorSystemID: 30000142, anchorSystemName: "Jita", reach: "CURRENT_SYSTEM", targetClasses: ["BELT"] },
+      currentTarget: null, logisticsTarget: null, rendezvous: null },
+  };
+}
+function hold(key: "ore" | "cargo", id: number, categoryID: number): MiningHold {
+  return { key, label: key, present: true, error: null, capacity: null, items: [{ itemID: id, typeID: 1, quantity: 2, groupID: 1, categoryID }] };
+}
+function harness(options: { badHold?: boolean; refuseTravel?: boolean; refuseUnload?: boolean; initiallyDocked?: boolean } = {}) {
+  let docked = !!options.initiallyDocked;
+  let holds = [hold("ore", 10, 25), hold("cargo", 20, 7)];
+  let reads = 0;
+  const actions: ScriptAction[] = [];
+  const deps: ScriptRunnerDeps = {
+    observe: async () => {
+      if (++reads > 160) throw new Error("test exceeded bounded runner attempts");
+      const obs = observation(docked, options.badHold ? null : holds);
+      return options.refuseTravel ? { ...obs, travel: { status: "paused", destinationStationID: 60003760, failureReason: "Dock refused", remainingJumps: 0 } } : obs;
+    },
+    issue: async action => {
+      actions.push(action);
+      if (action.kind === "startRoute") { assert.equal(action.stationID, 60003760); docked = true; }
+      if (action.kind === "unloadOre") {
+        if (options.refuseUnload) throw new Error("No permission to unload");
+        assert.equal(docked, true);
+        holds = holds.map(row => ({ ...row, items: row.items!.filter(item => !action.itemIDs.includes(item.itemID)) }));
+      }
+    },
+    sleep: async () => {}, onProgress: () => {}, isSessionLost: () => false,
+    refusalReason: error => String(error), registry: SCRIPT_MACROS,
+    travelHome: () => { throw new Error("no alternate home must be used"); },
+  };
+  return { deps, actions, currentHolds: () => holds, reads: () => reads, docked: () => docked };
+}
+
+test("parking is a finite existing macro with explicit home, no starting station or mining selector", () => {
+  assert.equal(decodeScriptValue(parkingScript(policy)).ok, true);
+  assert.deepEqual(parkingScript(policy).program.map(row => row.kind === "macro" ? row.macro : null), ["deliver-ore"]);
+  assert.throws(() => parkingScript({ ...policy, destination: null! }), /explicit station/);
+});
+
+test("return, dock, unload only existing freight, confirm empty freight, remain docked", async () => {
+  const h = harness();
+  await runFleetParking(h.deps, policy, Date.now() + 60_000, () => {});
+  assert.deepEqual(h.actions, [{ kind: "startRoute", stationID: 60003760 }, { kind: "unloadOre", itemIDs: [10], division: 1 }]);
+  assert.equal(h.docked(), true);
+  assert.deepEqual(h.currentHolds()[1]!.items?.map(row => row.itemID), [20], "cargo ammunition stays aboard a hull with ore hold");
+  assert.deepEqual(h.currentHolds()[0]!.items, []);
+});
+
+test("dock-only does not unload and already parked does not undock", async () => {
+  for (const initiallyDocked of [false, true]) {
+    const h = harness({ initiallyDocked });
+    await runFleetParking(h.deps, { ...policy, mode: "RETURN_HOME_DOCK" }, Date.now() + 60_000, () => {});
+    assert.deepEqual(h.actions.map(row => row.kind), initiallyDocked ? [] : ["startRoute"]);
+    assert.equal(h.currentHolds()[0]!.items?.length, 1);
+  }
+});
+
+test("unreadable holds, travel refusal, and unload refusal never report successful parking", async () => {
+  for (const options of [{ initiallyDocked: true, badHold: true }, { refuseTravel: true }, { refuseUnload: true }]) {
+    const h = harness(options);
+    await assert.rejects(runFleetParking(h.deps, policy, Date.now() + 60_000, () => {}));
+    assert.ok(h.reads() <= 160);
+    assert.ok(h.actions.every(row => row.kind === "startRoute" || row.kind === "unloadOre"));
+  }
+});
+
+test("expired grant prevents parking movement; no new indefinite retry or polling loop", async () => {
+  const h = harness();
+  await assert.rejects(runFleetParking(h.deps, policy, 100, () => {}, () => 101), /approved run deadline/);
+  assert.equal(h.reads(), 0);
+  assert.deepEqual(h.actions, []);
+});
+
+test("ordinary operation runner stops before any macro decision or independent target fallback", () => {
+  const doc = parkingScript(policy);
+  const obs = observation(false, []);
+  const result = decideScriptAction(doc, obs, initialMemory(doc), { "deliver-ore": () => { throw new Error("must not be called"); } }, () => { throw new Error("no fallback"); });
+  assert.equal(result.action.kind, "wait");
+  assert.equal(result.phase, "Stopping operation");
+});
