@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { createControlPlanePoll } from "../app/controlPlanePoll.ts";
   import { hostedDurationLabel } from "../bots/hostedRunPolicy.ts";
+  import MiningOperationRun from "./MiningOperationRun.svelte";
   import {
     deleteMiningOperation,
     extendMiningOperation,
@@ -33,7 +34,7 @@
   let resourceMode = $state<"ANY_ELIGIBLE" | "PREFER_LIST">("ANY_ELIGIBLE");
   let resourceIDs = $state<number[]>([]);
   let resourceQuery = $state("");
-  let extensionResult = $state<string | null>(null);
+  let extensionResults = $state<Record<string, string>>({});
   let payload = $state<MiningOperationsPayload | null>(null);
   const runPolicy = $derived(payload?.capabilities.hostedRunPolicy ?? null);
   let scripts = $state<OperationRoutineSummary[]>([]);
@@ -368,6 +369,7 @@
 
   async function start(definition: MiningOperationDefinition & { operationID: string }): Promise<void> {
     if (disconnected || !runPolicy) return;
+    delete extensionResults[definition.operationID];
     busy = definition.operationID;
     error = null;
     try {
@@ -405,17 +407,12 @@
 
   async function extend(operationID: string, minutes: number): Promise<void> {
     if (disconnected || !runPolicy || !window.confirm(`Add ${hostedDurationLabel(minutes)} to current member expiries? Total approved runtime is capped at ${hostedDurationLabel(runPolicy.maxRuntimeMinutes)}; stopped members are not resumed.`)) return;
-    busy = operationID; extensionResult = null;
+    busy = operationID; extensionResults[operationID] = "Extending active member grants…";
     try {
       const result = await extendMiningOperation(operationID, minutes, opts()); payload = result.payload;
-      extensionResult = result.extension.message ?? result.extension.results?.map(row => `Pilot ${row.characterID}: ${row.ok ? "extended" : `${row.error}: ${row.message}`}`).join(" · ") ?? "Extension unavailable.";
-    } catch (cause) { extensionResult = words(cause); } finally { busy = null; }
-  }
-  function remaining(row: MiningOperationsPayload["operations"][number]): string {
-    const expiries = row.runtime.members.filter(member => member.runtimeState === "running" && member.expiresAt).map(member => Date.parse(member.expiresAt!));
-    if (!expiries.length) return "No running member grant";
-    const minutes = Math.max(0, Math.floor((Math.min(...expiries) - Date.now()) / 60_000));
-    return `${Math.floor(minutes / 60)}h ${minutes % 60}m (earliest running member)`;
+      const members = result.payload.operations.find(row => row.definition.operationID === operationID)?.definition.members ?? [];
+      extensionResults[operationID] = (result.extension.ok ? "Extension results: " : "Extension incomplete: ") + (result.extension.message ?? result.extension.results?.map(row => `${members.find(member => member.characterID === row.characterID)?.characterName ?? `Pilot ${row.characterID}`}: ${row.ok ? "extended" : `${row.error}: ${row.message}`}`).join(" · ") ?? "Extension unavailable.");
+    } catch (cause) { extensionResults[operationID] = words(cause); } finally { busy = null; }
   }
 
   async function remove(operationID: string): Promise<void> {
@@ -450,7 +447,6 @@
 
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   {#if pollError}<p class="error" role="alert">{pollError}</p>{/if}
-  {#if extensionResult}<p class="notice" role="status">{extensionResult}</p>{/if}
   {#if loading}<p class="muted">Loading Mining Command Center…</p>{/if}
 
   {#if editing}
@@ -593,17 +589,15 @@
       <div class="title-row"><div><h3>{row.definition.name}</h3><span class="state">{row.runtime.state}</span></div><div class="actions">
         {#if ["DRAFT", "STOPPED"].includes(row.runtime.state)}
           <button type="button" onclick={() => editOperation(row.definition)}>Edit</button>
-          <button type="button" disabled={busy !== null} onclick={() => void start(row.definition)}>Start operation</button>
+          <button type="button" disabled={busy !== null || disconnected || !runPolicy} onclick={() => void start(row.definition)}>Start operation</button>
           <button type="button" class="danger" disabled={busy !== null} onclick={() => void remove(row.definition.operationID)}>Delete</button>
         {:else}
-          <button type="button" class="danger" disabled={busy !== null} onclick={() => void stop(row.definition.operationID)}>{row.runtime.state === "PARKING_FAILED" ? "Retry parking" : "Stop operation"}</button>
+          <button type="button" class="danger" disabled={busy !== null || disconnected} onclick={() => void stop(row.definition.operationID)}>{row.runtime.state === "PARKING_FAILED" ? "Retry parking" : row.runtime.recoveryRequired ? "Stop recovered operation" : "Stop operation"}</button>
         {/if}
       </div></div>
       {#if row.runtime.statusReason}<p class="notice"><strong>Status:</strong> {row.runtime.statusReason}</p>{/if}
-      {#if !["DRAFT", "STOPPED", "STOPPING", "PARKING", "PARKING_FAILED", "ASSEMBLING"].includes(row.runtime.state)}
-        <p><strong>Run grant:</strong> {remaining(row)} · total approval cap {runPolicy ? hostedDurationLabel(runPolicy.maxRuntimeMinutes) : "unavailable"}</p>
-        <div>{#each runPolicy?.durationChoices ?? [] as minutes}<button type="button" title="Adds to current expiry within the configured total approval cap" disabled={busy !== null || disconnected || row.runtime.members.every(member => member.runtimeState !== "running" || (member.maxRuntimeMinutes ?? Infinity) + minutes > runPolicy!.maxRuntimeMinutes)} onclick={() => void extend(row.definition.operationID, minutes)}>+{hostedDurationLabel(minutes)}</button>{/each}</div>
-      {/if}
+      <MiningOperationRun runtime={row.runtime} policy={runPolicy} parking={(row.definition.policies?.parking.mode ?? "STAY_IN_PLACE") !== "STAY_IN_PLACE"} stale={disconnected || pollError !== null} busy={busy !== null} onExtend={minutes => void extend(row.definition.operationID, minutes)} />
+      {#if extensionResults[row.definition.operationID]}<p class="notice" role="status">{extensionResults[row.definition.operationID]}</p>{/if}
       <p><strong>Area:</strong> {row.definition.area.anchorSystemName ?? "Unknown system"} · {row.definition.area.reach === "CURRENT_SYSTEM" ? "current system" : "adjacent mode (anchor-only execution in v0.1)"}</p>
       <p><strong>Target class / unload:</strong> {row.definition.area.targetClasses.join(", ")} · {row.definition.unloadPolicy === "HAULER_SERVICE" ? "Hauler service" : "Self unload"}</p>
       <p><strong>Standard resources:</strong> {row.definition.policies?.resourcePolicy?.mode === "PREFER_LIST" ? row.definition.policies.resourcePolicy.typeIDs.map(id => catalog.find(resource => resource.typeID === id)?.name ?? `Type ${id}`).join(" → ") + " → any eligible" : "Any eligible"}</p>

@@ -40,7 +40,8 @@ test("unsupported target and defender execution are explicit, not false capabili
 test("MCC duration and extension controls consume server policy, not a local 24h cap", () => {
   const source = readFileSync(new URL("./MiningOperations.svelte", import.meta.url), "utf8");
   assert.match(source, /payload\?\.capabilities.hostedRunPolicy/);
-  assert.equal((source.match(/runPolicy\?\.durationChoices/g) ?? []).length, 2);
+  assert.equal((source.match(/runPolicy\?\.durationChoices/g) ?? []).length, 1);
+  assert.match(source, /<MiningOperationRun runtime=\{row.runtime\} policy=\{runPolicy\}/);
   assert.doesNotMatch(source, /cap 24h|capped at 24|> 1440|\[60, 240, 720, 1440\]/);
   assert.doesNotMatch(source, /readSpaceSnapshot/);
 });

@@ -470,6 +470,36 @@ test("reload reconciliation trusts botHost association but not a stale current t
   assert.equal(runtime.history[0].kind, "RECOVERED_UNKNOWN");
 });
 
+test("runtime timing is a fresh server projection of matching hosted grants, never a browser clock", () => {
+  const h = harness([definition("timing", [member(1, "MINER"), member(2, "HAULER")], "HAULER_SERVICE")]);
+  startAll(h, "timing");
+  const start = new Date(h.clock.now()).toISOString();
+  const bots = [1, 2].map(characterID => ({ operationID: "timing", characterID, botID: `bot-${characterID}`, status: "running",
+    startedAt: start, expiresAt: new Date(h.clock.now() + characterID * 3_600_000).toISOString(), maxRuntimeMinutes: characterID * 60, endedAt: null }));
+  const first = h.operations.list(bots)[0].runtime;
+  h.clock.advance(60_000);
+  const reload = h.operations.list(bots)[0].runtime;
+  assert.equal(reload.startedAt, first.startedAt);
+  assert.equal(Date.parse(reload.observedAt) - Date.parse(first.observedAt), 60_000);
+  assert.equal(reload.members[0].expiresAt, bots[0].expiresAt); assert.equal(reload.members[0].hostStartedAt, start);
+  assert.equal(reload.members[0].hosted, true);
+  bots[0].endedAt = reload.observedAt;
+  const ended = h.operations.list(bots)[0].runtime.members[0];
+  assert.equal(ended.hosted, false); assert.equal(ended.expiresAt, null, "old expiry must not masquerade as an active grant");
+});
+
+test("recovered miner stays DRAFT; hosted hauler and exact failed recovery reason are visible without trusting target", () => {
+  const h = harness([definition("recover", [member(1, "MINER"), member(2, "HAULER")], "HAULER_SERVICE")]);
+  const rows = [{ operationID: "recover", characterID: 1, botID: "failed", endedAt: "2026-09-27T00:00:00Z", why: "Restart policy requires manual approval" },
+    { operationID: "recover", characterID: 2, botID: "hauler", status: "running", endedAt: null, startedAt: "2026-09-27T00:00:00Z", resumedAt: "2026-09-27T00:00:00Z" }];
+  const runtime = h.operations.list(rows)[0].runtime;
+  assert.equal(runtime.recoveryRequired, true); assert.equal(runtime.state, "DEGRADED"); assert.equal(runtime.currentTarget, null);
+  assert.equal(runtime.members[0].runtimeState, "DRAFT"); assert.equal(runtime.members[0].hosted, false);
+  assert.equal(runtime.members[0].lastHostReason, rows[0].why);
+  assert.equal(runtime.members[1].hosted, true); assert.equal(runtime.members[1].hostResumedAt, rows[1].resumedAt);
+  assert.equal(h.board.list().length, 0);
+});
+
 test("adjacent and unsupported target candidates are modeled but never invented or reserved", () => {
   const def = definition("area", [member(1, "MINER")], "SELF_UNLOAD", ["BELT", "ICE", "GAS"]);
   const h = harness([def]);

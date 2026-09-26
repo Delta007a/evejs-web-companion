@@ -1960,6 +1960,8 @@ export interface MiningOperationRuntime {
   readonly operationID: string;
   readonly state: string;
   readonly statusReason?: string | null;
+  readonly observedAt?: string;
+  readonly recoveryRequired?: boolean;
   readonly currentTarget: MiningOperationTarget | null;
   readonly members: readonly (MiningOperationMemberDefinition & {
     readonly runtimeState: string;
@@ -1970,6 +1972,10 @@ export interface MiningOperationRuntime {
     readonly botID: string | null;
     readonly expiresAt?: string | null;
     readonly maxRuntimeMinutes?: number | null;
+    readonly hosted?: boolean;
+    readonly hostStartedAt?: string | null;
+    readonly hostResumedAt?: string | null;
+    readonly lastHostReason?: string | null;
   })[];
   readonly logisticsTail: readonly {
     readonly target: MiningOperationTarget;

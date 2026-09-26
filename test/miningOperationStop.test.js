@@ -51,6 +51,35 @@ test("Stay preserves scoped graceful Stop and repeated Stop is idempotent", asyn
   assert.ok(h.rows.slice(3).every(row => row.endedAt === null));
 });
 
+test("manual recovered Stop then fresh Start clears ambiguity without altering another operation", async () => {
+  const h = harness("STAY_IN_PLACE");
+  // New control-plane process: only A's hauler and B's fleet recovered hosted.
+  const rows = h.rows.filter(row => row.operationID === "B" || row.role === "HAULER");
+  const board = createMiningTargetBoard();
+  const operations = createMiningOperations({ store: { get: id => h.defs.find(def => def.operationID === id), list: () => h.defs },
+    targetBoard: board, beltMemory: createBeltMemory() });
+  operations.list(rows);
+  const other = structuredClone(operations.runtimeFor("B"));
+  assert.equal(operations.runtimeFor("A").recoveryAmbiguous, true);
+  assert.equal(operations.runtimeFor("A").currentTarget, null);
+  const stopped = [];
+  const stopper = createMiningOperationStopper({ operations, botHost: { listAll: () => rows,
+    async stop(id) { stopped.push(id); rows.find(row => row.botID === id).endedAt = "now"; return { ok: true }; } } });
+  await stopper.stop(h.defs[0]);
+  assert.deepEqual(stopped, ["bot-3"]);
+  assert.equal(operations.runtimeFor("A").state, "STOPPED");
+  assert.deepEqual(operations.runtimeFor("B"), other);
+  assert.equal(operations.begin("A").ok, true);
+  for (const member of h.defs[0].members) operations.memberStarted("A", member.characterID, `fresh-${member.characterID}`);
+  operations.finishLaunch("A");
+  assert.equal(operations.runtimeFor("A").recoveryAmbiguous, false);
+  assert.equal(operations.runtimeFor("A").currentTarget, null, "fresh launch does not restore old target");
+  const reserved = operations.reserveCandidate("A", 1, { targetType: "BELT", targetName: "Fresh target", systemID: 30000142, systemName: "Jita" });
+  assert.equal(reserved.acquired, true);
+  assert.equal(operations.runtimeFor("A").currentTarget.targetName, "Fresh target");
+  assert.deepEqual(operations.runtimeFor("B"), other);
+});
+
 test("return Stop gates target work immediately, releases only after settlement, and waits for docking completion", async () => {
   const h = harness();
   const target = h.operations.runtimeFor("A").currentTarget;

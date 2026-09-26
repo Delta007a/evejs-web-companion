@@ -703,8 +703,18 @@ function createMiningOperations(options) {
     return runtime.currentTarget?.state === "RESERVED" ? "TRAVELING" : "SELECTING";
   }
 
-  function publicRuntime(def, runtime) {
-    const members = def.members.map((member) => ({ ...member, ...(runtime.members.get(member.characterID) || {}) }));
+  function publicRuntime(def, runtime, bots) {
+    const members = def.members.map((member) => {
+      const row = runtime.members.get(member.characterID) || {};
+      const hosted = bots.find(bot => bot.operationID === def.operationID && bot.characterID === member.characterID && bot.botID === row.botID && !bot.endedAt);
+      const last = !hosted && ["DRAFT", "FAILED"].includes(row.runtimeState) ? bots
+        .filter(bot => bot.operationID === def.operationID && bot.characterID === member.characterID && bot.endedAt)
+        .sort((a, b) => String(b.endedAt).localeCompare(String(a.endedAt)))[0] : null;
+      return { ...member, ...row, hosted: !!hosted,
+        hostStartedAt: hosted?.startedAt ?? null, hostResumedAt: hosted?.resumedAt ?? null,
+        expiresAt: hosted?.expiresAt ?? null, maxRuntimeMinutes: hosted?.maxRuntimeMinutes ?? null,
+        lastHostReason: last?.why ?? null };
+    });
     const unhealthy = members.find((member) => member.runtimeState === "FAILED" ||
       !["RUNNING", "running", "starting", "READY_FOR_RENDEZVOUS"].includes(member.runtimeState));
     const statusReason = runtime.state !== "DEGRADED" ? null : runtime.authorityLoss
@@ -717,6 +727,8 @@ function createMiningOperations(options) {
       operationID: def.operationID,
       state: runtime.state,
       statusReason,
+      observedAt: stamp(now),
+      recoveryRequired: runtime.recoveryAmbiguous && !["DRAFT", "STOPPED"].includes(runtime.state),
       currentTarget: runtime.currentTarget,
       members,
       logisticsTail: runtime.drainingTargets.map((row) => ({
@@ -742,7 +754,7 @@ function createMiningOperations(options) {
     return store.list().map((def) => {
       const runtime = runtimeFor(def.operationID);
       runtime.state = deriveState(def, runtime);
-      return { definition: def, runtime: publicRuntime(def, runtime) };
+      return { definition: def, runtime: publicRuntime(def, runtime, bots) };
     });
   }
 
