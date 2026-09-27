@@ -176,7 +176,7 @@ async function startTestServer(options = {}) {
   activeServers.add(server);
   await once(server, "listening");
   const { port } = server.address();
-  return { baseUrl: `http://127.0.0.1:${port}` };
+  return { baseUrl: `http://127.0.0.1:${port}`, app };
 }
 
 async function apiRequest(baseUrl, path, options = {}) {
@@ -260,7 +260,7 @@ test("gateway client releaseBridgeSession posts the handle to /session/release",
     bridgeSessionID: BRIDGE_SESSION_ID,
     session: { userid: 4 },
   });
-  assert.deepEqual(outcome, { released: true, characterID: 7 });
+  assert.deepEqual(outcome, { released: true, offline: false, characterID: 7 });
 });
 
 test("gateway client callMethod forwards a bridgeSessionID only when supplied", async () => {
@@ -369,12 +369,13 @@ test("selecting again releases the previously held bridge session first", async 
 
 test("release ends the held session and later calls go back to stateless", async () => {
   const gateway = fakeGateway();
-  const { baseUrl } = await startTestServer({ gateway });
+  const { baseUrl, app } = await startTestServer({ gateway });
 
   await apiRequest(baseUrl, "/api/bridge/select", {
     method: "POST",
     body: { characterID: 7 },
   });
+  for (const held of app.locals.bridgeSessions.values()) held.droneRecoveryReady = true;
   const { payload: releasePayload } = await apiRequest(baseUrl, "/api/bridge/release", {
     method: "POST",
     body: {},
@@ -425,11 +426,7 @@ test("SESSION_NOT_FOUND from the gateway drops the stale handle and surfaces the
   assert.deepEqual(releasePayload, { ok: true, released: false });
 });
 
-test("a release the gateway never answered still logs the user out cleanly", async () => {
-  // The handle is forgotten before the gateway is asked, so a timeout on the
-  // release call must be best-effort: the logout succeeds, the character's
-  // live session is the gateway TTL's to retire, and the user never sees
-  // "EveJS gateway timed out." for clicking sign out.
+test("an unconfirmed interactive release retains its handle and reports failure", async () => {
   const gateway = fakeGateway({
     async releaseBridgeSession() {
       throw new gatewayClient.EveGatewayError("EveJS gateway timed out.", {
@@ -437,25 +434,41 @@ test("a release the gateway never answered still logs the user out cleanly", asy
       });
     },
   });
-  const { baseUrl } = await startTestServer({ gateway });
+  const { baseUrl, app } = await startTestServer({ gateway });
 
   await apiRequest(baseUrl, "/api/bridge/select", {
     method: "POST",
     body: { characterID: 7 },
   });
+  for (const held of app.locals.bridgeSessions.values()) held.droneRecoveryReady = true;
   const { response, payload } = await apiRequest(baseUrl, "/api/bridge/release", {
     method: "POST",
     body: {},
   });
-  assert.equal(response.status, 200, JSON.stringify(payload));
-  assert.deepEqual(payload, { ok: true, released: true });
+  assert.equal(response.status, 502, JSON.stringify(payload));
+  assert.equal(payload.error, "EVE_GATEWAY_TIMEOUT");
+  assert.equal(app.locals.bridgeSessions.size, 1);
 
-  // The handle really is gone: a second release reports nothing held.
+  // A retry still targets the same held session; no false offline state.
   const again = await apiRequest(baseUrl, "/api/bridge/release", {
     method: "POST",
     body: {},
   });
-  assert.deepEqual(again.payload, { ok: true, released: false });
+  assert.equal(again.payload.error, "EVE_GATEWAY_TIMEOUT");
+  assert.equal(app.locals.bridgeSessions.size, 1);
+});
+
+test("interactive release refuses unresolved recovery and a substituted pilot", async () => {
+  const gateway = fakeGateway();
+  const { baseUrl, app } = await startTestServer({ gateway });
+  await apiRequest(baseUrl, "/api/bridge/select", { method: "POST", body: { characterID: 7 } });
+  const recovery = await apiRequest(baseUrl, "/api/bridge/release", { method: "POST", body: { characterID: 7 } });
+  assert.equal(recovery.payload.error, "RECOVERY_REQUIRED");
+  for (const held of app.locals.bridgeSessions.values()) held.droneRecoveryReady = true;
+  const wrong = await apiRequest(baseUrl, "/api/bridge/release", { method: "POST", body: { characterID: 8 } });
+  assert.equal(wrong.payload.error, "PILOT_CHANGED");
+  assert.equal(gateway.calls.release.length, 0);
+  assert.equal(app.locals.bridgeSessions.size, 1);
 });
 
 test("select refusals pass through with the handler's own message", async () => {

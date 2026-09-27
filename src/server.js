@@ -13,6 +13,14 @@ const eveStore = require("./eveStore");
 const eveGatewayClient = require("./eveGatewayClient");
 const webAuth = require("./webAuth");
 const staticDataModule = require("./staticData");
+const { readMinerPilot } = require("./pilotTrainingRead");
+const { createTrainingQueueService } = require("./pilotTrainingQueue");
+const { createFactorySessions } = require("./factorySessions");
+const { createFactorySkills } = require("./factorySkills");
+const { createTrainingOnboarding } = require("./trainingOnboarding");
+const { readTrainingSettingsContext } = require("./trainingSettingsRead");
+const { createTrainingAccounts } = require("./trainingAccounts");
+const { createCharacterCreation } = require("./characterCreation");
 const config = require("./config");
 const botScriptStoreModule = require("./botScriptStore");
 const botHostModule = require("./botHost");
@@ -73,6 +81,9 @@ const store = options.eveStore || eveStore;
 const gateway = options.eveGatewayClient || eveGatewayClient;
 const auth = options.webAuth || webAuth;
 const staticData = options.staticData || staticDataModule;
+const trainingQueues = createTrainingQueueService({ store, gateway, data: staticData });
+const trainingAccounts = createTrainingAccounts({ store });
+const characterCreation = createCharacterCreation({ call: (...args) => accountLevelCall(...args) });
 // The player Bot Builder library — web-app data in data/bot-scripts.json, keyed
 // PLATFORM-WIDE (every account sees every saved bot). Never eve.js's store; this
 // is our own JSON file.
@@ -130,6 +141,9 @@ const botHost =
   });
 app.locals.botHost = botHost;
 app.locals.bridgeSessions = bridgeSessions;
+const factorySessions = createFactorySessions({ store, gateway, operations: characterOperations, heldSessions: bridgeSessions, botHost });
+const factorySkills = createFactorySkills({ store, gateway, data: staticData, queues: trainingQueues, sessions: factorySessions });
+const trainingOnboarding = createTrainingOnboarding({ store, gateway, sessions: factorySessions });
 // startServer() seeds the starter bots once the port is open, and all it
 // holds is the app -- never createApp's locals. Published here so that call
 // reaches THIS app's store, including one injected by a test.
@@ -278,16 +292,15 @@ function readSessionToken(req, { allowQueryParam = false } = {}) {
   return cookies[config.sessionCookieName] || "";
 }
 
-// One implementation, two doors — `requireAuth` for everything, and the
-// query-tolerant variant the SSE route needs. The auth itself is identical;
-// only the accepted carrier set differs.
-function makeRequireAuth({ allowQueryParam = false } = {}) {
+// Shared identity verification: normal gameplay auth, query-tolerant SSE auth,
+// and training reads without session-cleanup side effects.
+function makeRequireAuth({ allowQueryParam = false, cleanupSession = true } = {}) {
   return async function requireAuthenticatedSession(req, res, next) {
     const payload = auth.verifySessionToken(readSessionToken(req, { allowQueryParam }));
     if (!payload) {
       // An expired but correctly signed credential may release ONLY its own
       // held session. Forged/invalid tokens convey no cleanup authority.
-      const expired = auth.verifySessionToken(readSessionToken(req, { allowQueryParam }), { allowExpired: true });
+      const expired = cleanupSession && auth.verifySessionToken(readSessionToken(req, { allowQueryParam }), { allowExpired: true });
       const held = expired && bridgeSessions.get(expired.sessionID);
       if (held && Number(held.accountID) === Number(expired.accountID)) {
         void releaseHeldBridgeSession(expired.sessionID).catch(errorLogger);
@@ -306,12 +319,12 @@ function makeRequireAuth({ allowQueryParam = false } = {}) {
         () => store.getAccount(payload.username),
       );
       if (!account || account.accountID !== Number(payload.accountID)) {
-        clearSessionCookie(res);
+        if (cleanupSession) clearSessionCookie(res);
         res.status(401).json({ ok: false, error: "ACCOUNT_NOT_FOUND" });
         return;
       }
       if (account.banned) {
-        clearSessionCookie(res);
+        if (cleanupSession) clearSessionCookie(res);
         res.status(403).json({ ok: false, error: "ACCOUNT_BANNED" });
         return;
       }
@@ -327,6 +340,9 @@ function makeRequireAuth({ allowQueryParam = false } = {}) {
 // Every route. Header or cookie only — a token in the query string is REFUSED
 // here, deliberately; see requireStreamAuth.
 const requireAuth = makeRequireAuth();
+// Control-plane inspection must not release a cockpit or clear its cookie when
+// discovery encounters an expired/deleted account credential.
+const requireTrainingAuth = makeRequireAuth({ cleanupSession: false });
 
 // The SSE push channel alone. `EventSource` cannot set request headers — the
 // API has no hook for it — so GET /api/bridge/events accepts the token as the
@@ -375,7 +391,20 @@ app.get("/api/health", async (req, res) => {
 // src/webAuth.js verifyWebPassword/upsertWebPassword, data/web-users.json, and
 // `npm run webpass` stay in place (data-preservation rule) but are deprecated
 // for login.
-app.post("/api/login", async (req, res, next) => {
+// Explicit registration, separate from existing-only Training login. Like normal
+// WC login this requires no prior cockpit/account token. JSON confirmation and
+// the gateway's devAutoCreateAccounts policy remain required; no cookie is set.
+for (const action of ["create", "recover"]) {
+  app.post(`/api/pilot-training/accounts/${action}`, async (req, res, next) => {
+    try { res.json({ ok: true, ...await trainingAccounts[action](req.body || {}) }); }
+    catch (error) { next(error); }
+  });
+}
+app.post(["/api/login", "/api/goblin-factory/login", "/api/pilot-training/login"], async (req, res, next) => {
+  // Factory authentication uses the normal web token, but must never create a
+  // game account or replace the cookie used by an existing cockpit.
+  // Match Express's default case-insensitive, optional-trailing-slash routing.
+  const factoryLogin = /^\/api\/(?:goblin-factory|pilot-training)\/login\/?$/i.test(req.path);
   const username = String(req.body && req.body.username || "").trim();
   try {
     // An empty username can never name or create an account; refuse it here
@@ -397,7 +426,7 @@ app.post("/api/login", async (req, res, next) => {
         throw error;
       }
     }
-    if (!account) {
+    if (!account && !factoryLogin) {
       try {
         const outcome = await store.createAccount(username);
         account = outcome && outcome.account || null;
@@ -438,7 +467,7 @@ app.post("/api/login", async (req, res, next) => {
     // sessionStorage so ten tabs can hold ten different accounts. Read the
     // security note above setSessionCookie before copying this anywhere.
     const token = auth.createSessionToken(account);
-    setSessionCookie(res, token);
+    if (!factoryLogin) setSessionCookie(res, token);
     res.json({
       ok: true,
       sessionToken: token,
@@ -624,7 +653,8 @@ async function releaseHeldBridgeSession(webSessionID, { confirmed = false } = {}
   }
   if (confirmed) {
     try {
-      await gateway.releaseBridgeSession(held.bridgeSessionID, { userid: Number(held.accountID) });
+      const outcome = await gateway.releaseBridgeSession(held.bridgeSessionID, { userid: Number(held.accountID) });
+      if (outcome?.released !== true) throw Object.assign(new Error("Pilot release was not confirmed."), { code: "PILOT_RELEASE_UNVERIFIED", statusCode: 409 });
     } catch (error) {
       if (!error || error.code !== "SESSION_NOT_FOUND") throw error;
     }
@@ -1013,7 +1043,28 @@ app.post("/api/bridge/release", requireAuth, async (req, res, next) => {
       res.status(409).json({ ok: false, error: "CHARACTER_IN_USE", message: "This session is changing characters. Try again shortly." });
       return;
     }
-    const released = await releaseHeldBridgeSession(req.webSessionID);
+    const held = bridgeSessions.get(req.webSessionID);
+    if (held) {
+      const internalBot = botHost.authorizesClaim(held.characterID, req.get(botHostModule.BOT_HEADER));
+      if (req.body?.characterID !== undefined && req.body.characterID !== held.characterID) {
+        res.status(409).json({ ok: false, error: "PILOT_CHANGED" }); return;
+      }
+      if (characterOperations.has(held.characterID) || (!internalBot && botHost.claimedBy(held.characterID) !== null)) {
+        res.status(409).json({ ok: false, error: "PILOT_BUSY", message: "Use the owning bot or operation's Stop action." }); return;
+      }
+      if (!internalBot && hasPendingRecovery(held, held.characterID)) {
+        res.status(409).json({ ok: false, error: "RECOVERY_REQUIRED", message: "Finish pilot recovery before releasing." }); return;
+      }
+    }
+    const reservation = Symbol("release");
+    sessionOperations.set(req.webSessionID, reservation);
+    if (held) characterOperations.set(held.characterID, reservation);
+    let released;
+    try { released = await releaseHeldBridgeSession(req.webSessionID, { confirmed: true }); }
+    finally {
+      if (sessionOperations.get(req.webSessionID) === reservation) sessionOperations.delete(req.webSessionID);
+      if (held && characterOperations.get(held.characterID) === reservation) characterOperations.delete(held.characterID);
+    }
     res.json({ ok: true, released });
   } catch (error) {
     next(error);
@@ -6318,10 +6369,12 @@ function creationBodyID(value) {
 // Race reaches the server through the bloodline, which is where it genuinely
 // lives.
 //
-// The NAME is not pre-validated here. validateCharacterName runs server-side on
-// every create and rejects with CharNameInvalid; the screen calls ValidateNameEx
-// as the player types so the refusal is not a surprise, and this route lets the
-// server have the last word.
+// The shared guard checks the account's advertised slots and ValidateNameEx
+// immediately before dispatch, then proves completion through the account
+// roster. The runtime also validates the name on the actual create.
+app.get("/api/bridge/character/creation-state", requireAuth, async (req, res, next) => {
+  try { res.json({ ok: true, ...(await characterCreation.state(req)) }); } catch (error) { next(error); }
+});
 app.post("/api/bridge/character/create-with-doll", requireAuth, async (req, res, next) => {
   if (!requireWriteConfirmation(req, res, "This creates a NEW character. This must be confirmed explicitly.")) {
     return;
@@ -6397,7 +6450,7 @@ app.post("/api/bridge/character/create-with-doll", requireAuth, async (req, res,
     }
 
     const args = [name, bloodline.bloodlineID, genderID, ancestryID, null, null, 0];
-    const outcome = await accountLevelCall(req, "charUnboundMgr", "CreateCharacterWithDoll", args);
+    const outcome = await characterCreation.create(req, name, () => accountLevelCall(req, "charUnboundMgr", "CreateCharacterWithDoll", args));
     const characterID = Number(outcome.result) || 0;
     res.json({
       ok: true,
@@ -18414,6 +18467,133 @@ app.get("/api/roster/training", requireAuth, async (req, res, next) => {
   }
 });
 
+// Account-owned, session-free qualification read. No bridge selection and no
+// queue write: an online browser or server bot keeps control of its character.
+app.get("/api/pilot-training/characters", requireTrainingAuth, async (req, res, next) => {
+  try {
+    const characters = await store.listCharactersForAccount(req.account.accountID);
+    res.json({ ok: true, account: req.account.username, characters: characters.map((character) => ({
+      characterID: character.characterID,
+      name: character.characterName,
+      corporationID: character.corporationID,
+      corporationName: character.corporationName,
+    })) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/pilot-training/qualification", requireTrainingAuth, async (req, res, next) => {
+  try {
+    const characterID = Number(req.query.characterID);
+    if (!Number.isSafeInteger(characterID) || characterID <= 0) throw Object.assign(new Error("Invalid pilot."), { code: "INVALID_CHARACTER_ID", statusCode: 400 });
+    const raw = String(req.query.configurations || "[]");
+    if (raw.length > 8192) throw Object.assign(new Error("Configuration too large."), { statusCode: 400 });
+    let configurations;
+    try { configurations = JSON.parse(raw); } catch { throw Object.assign(new Error("Invalid configuration."), { statusCode: 400 }); }
+    const { read } = await readMinerPilot({ store, gateway, data: staticData, account: req.account,
+      characterID, configurations, role: req.query.role, targetStage: req.query.targetConfigurationID || null });
+    res.json({ ok: true, ...read });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/pilot-training/miner", requireTrainingAuth, async (req, res, next) => {
+  const characterID = Number(req.query.characterID);
+  if (!Number.isSafeInteger(characterID) || characterID <= 0) {
+    res.status(400).json({ ok: false, error: "INVALID_CHARACTER_ID" });
+    return;
+  }
+  try {
+    let selections = {};
+    if (req.query.selections !== undefined) {
+      try {
+        const raw = String(req.query.selections);
+        if (raw.length > 4096) throw new Error("Too large");
+        selections = JSON.parse(raw);
+        if (!selections || typeof selections !== "object" || Array.isArray(selections)) throw new Error("Not an object");
+      } catch (error) {
+        res.status(400).json({ ok: false, error: "INVALID_TRAINING_CONFIGURATION" });
+        return;
+      }
+    }
+    const { read } = await readMinerPilot({ store, gateway, data: staticData, account: req.account, characterID, selections, targetStage: req.query.targetStage ?? null });
+    res.json({ ok: true, ...read });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// A review is read-only. Apply accepts only its account-bound, one-shot review;
+// browser-supplied queue entries or account IDs are never dispatched.
+app.post("/api/pilot-training/queue/review", requireTrainingAuth, async (req, res, next) => {
+  try { res.json({ ok: true, review: await trainingQueues.review(req.account, req.body || {}) }); }
+  catch (error) { next(error); }
+});
+app.post("/api/pilot-training/queue/apply", requireTrainingAuth, async (req, res, next) => {
+  try { res.json({ ok: true, outcome: await trainingQueues.apply(req.account, req.body || {}) }); }
+  catch (error) { next(error); }
+});
+
+// Funding is an independently authenticated account, never inferred from the
+// trainee or a browser-supplied account ID. Credentials are never persisted.
+async function factoryFunding(body) {
+  if (!body.funding) return null;
+  const payload = auth.verifySessionToken(body.funding.token);
+  if (!payload) throw Object.assign(new Error("Funding authority authentication required."), { code: "FUNDING_AUTH_REQUIRED", statusCode: 401 });
+  const account = await store.getAccount(payload.username);
+  if (!account || account.banned || account.accountID !== Number(payload.accountID))
+    throw Object.assign(new Error("Funding authority is unavailable."), { code: "FUNDING_AUTH_REQUIRED", statusCode: 403 });
+  return { account, sessionID: payload.sessionID, characterID: body.funding.characterID };
+}
+for (const action of ["review", "apply"]) {
+  app.post(`/api/pilot-training/onboarding/${action}`, requireTrainingAuth, async (req, res, next) => {
+    try {
+      const body = req.body || {};
+      const authority = await factoryFunding({ funding: body.authority });
+      res.json({ ok: true, outcome: await trainingOnboarding[action]({ account: req.account, sessionID: req.webSessionID }, body, authority) });
+    } catch (error) { next(error); }
+  });
+}
+app.get("/api/pilot-training/settings-context", requireTrainingAuth, async (req, res, next) => {
+  try { res.json({ ok: true, ...await readTrainingSettingsContext({ account: req.account, store, gateway }) }); }
+  catch (error) { next(error); }
+});
+app.get("/api/pilot-training/homes", requireTrainingAuth, (req, res, next) => {
+  try {
+    const q = String(req.query.q || "").trim().slice(0, 120);
+    const result = staticData.findMapLocations({ q, kind: "station", limit: 25 });
+    res.json({ ok: true, matches: result.matches, capped: result.capped });
+  } catch (error) { next(error); }
+});
+app.get("/api/pilot-training/home", requireTrainingAuth, async (req, res, next) => {
+  try {
+    const id = Number(req.query.locationID);
+    if (!Number.isSafeInteger(id) || id <= 0) throw Object.assign(new Error("Invalid location ID."), { code: "INVALID_LOCATION", statusCode: 400 });
+    const station = staticData.getStation(id);
+    if (!station) throw Object.assign(new Error("This location is not a known NPC station. Player-structure relocation is unsupported: docking authority has not been established."), { code: "UNSUPPORTED_HOME_LOCATION", statusCode: 400 });
+    res.json({ ok: true, home: { locationID: id, name: station.stationName, systemID: station.solarSystemID || null,
+      kind: "NPC_STATION", relocation: "MANUAL_GM_ONLY", capability: "DOCKABLE_STATION" } });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/pilot-training/ownership", requireTrainingAuth, async (req, res, next) => {
+  try { res.json({ ok: true, ownership: await factorySessions.status(req.account, Number(req.query.characterID)) }); }
+  catch (error) { next(error); }
+});
+for (const action of ["review", "acquire"]) {
+  app.post(`/api/pilot-training/skills/${action}`, requireTrainingAuth, async (req, res, next) => {
+    try {
+      const body = req.body || {};
+      const outcome = await factorySkills[action]({ account: req.account, sessionID: req.webSessionID }, body, await factoryFunding(body));
+      res.json({ ok: true, outcome });
+    } catch (error) {
+      if (error.cleanup?.some((row) => !row.released)) {
+        res.status(409).json({ ok: false, error: "FACTORY_SESSION_RELEASE_FAILED", message: `${error.message} Temporary session release is unconfirmed; refresh ownership before retrying.` });
+      } else next(error);
+    }
+  });
+}
+
 app.get("/api/bridge/skills", requireAuth, async (req, res, next) => {
   const held = requireHeldBridgeSession(req, res);
   if (!held) {
@@ -21136,6 +21316,7 @@ app.use("/assets", express.static(path.join(webAppDir, "assets"), {
   maxAge: "30d",
 }));
 
+app.get(["/goblin-factory", "/goblin-factory/"], (_req, res) => res.redirect(308, "/pilot-training"));
 app.use(express.static(webAppDir));
 app.get(/.*/, (req, res) => {
   res.sendFile(path.join(webAppDir, "index.html"));

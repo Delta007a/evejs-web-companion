@@ -9,6 +9,7 @@
 // into public/dist/, and the built index.html links it automatically.
 import "./styles.css";
 import { mount } from "svelte";
+import { isGoblinFactoryPath, isPilotTrainingPath } from "./app/pageRoute.ts";
 import { installErrorOverlay } from "./app/errorOverlay.ts";
 
 // Before anything else: a framework-free net for uncaught errors and unhandled
@@ -19,9 +20,13 @@ installErrorOverlay();
 // R107 — App owns the pilot roster now: it creates one isolated session per
 // pilot (store + per-session-token flow) and warms each one's health ping
 // itself (app/sessions.ts). There is no single app-wide store/flow any more.
+if (isGoblinFactoryPath(window.location.pathname)) window.location.replace(`/pilot-training${window.location.search}${window.location.hash}`);
 const target = document.getElementById("app");
-if (target) {
-  if (window.location.pathname === "/mining-command-center") {
+if (target && !isGoblinFactoryPath(window.location.pathname)) {
+  // Standalone control planes must not initialize cockpit restore/polling.
+  if (isPilotTrainingPath(window.location.pathname)) {
+    void import("./ui/GoblinFactory.svelte").then(({ default: Training }) => mount(Training, { target }));
+  } else if (window.location.pathname === "/mining-command-center") {
     void import("./ui/MiningCommandCenter.svelte").then(({ default: CommandCenter }) => mount(CommandCenter, { target }));
   } else {
     void import("./ui/App.svelte").then(({ default: App }) => mount(App, { target }));

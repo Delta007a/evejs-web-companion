@@ -106,12 +106,16 @@
 
   let {
     onlineIDs = new Set<number>(),
+    pilotOwners = {},
+    onRelease = null,
     onLaunch,
     onShowPilot,
     onClose = null,
   }: {
     /** Character IDs already in the client, from App's live session list. */
     onlineIDs?: Set<number>;
+    pilotOwners?: Readonly<Record<number, string>>;
+    onRelease?: ((characterID: number) => Promise<void>) | null;
     /**
      * Bring these pilots online, reporting each one as it lands. App owns the
      * session roster, so it owns this; the hangar only says who.
@@ -166,6 +170,15 @@
   let addingTo = $state<string | null>(null);
   let queue = $state<LaunchEntry[]>([]);
   let launching = $state(false);
+  let releasing = $state<number | null>(null);
+  let releaseMessage = $state("");
+  async function releasePilot(characterID: number): Promise<void> {
+    if (releasing !== null || !onRelease || pilotOwners[characterID] !== "BROWSER") return;
+    releasing = characterID; releaseMessage = "";
+    try { await onRelease(characterID); releaseMessage = "Owned browser session released."; }
+    catch (error) { releaseMessage = panelErrorWords(error); }
+    finally { releasing = null; }
+  }
 
   // The clock the "4d 6h" countdowns are measured against. Re-read once a minute
   // so a hangar left open does not sit there claiming a skill finishes in six
@@ -585,6 +598,7 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <div class="hangar" onclick={closePopovers}>
+  {#if releaseMessage}<p role="status">{releaseMessage}</p>{/if}
   <header class="hangar-head">
     <div class="hangar-brand">
       <span class="hangar-wordmark">EveJS Web</span>
@@ -607,6 +621,7 @@
 
     <div class="hangar-head-actions">
       <a class="hangar-manage" href="/mining-command-center">Mining Command Center</a>
+      <a class="hangar-manage" href="/pilot-training" target="_blank" rel="noopener">Pilot Training</a>
       <button
         type="button"
         class="hangar-manage"
@@ -829,6 +844,9 @@
             {#each account.pilots as pilot (pilot.characterID)}
               <HangarPilotRow
                 {pilot}
+                owner={pilotOwners[pilot.characterID] ?? null}
+                onRelease={onRelease && pilotOwners[pilot.characterID] === "BROWSER" ? () => void releasePilot(pilot.characterID) : null}
+                releaseBusy={releasing !== null}
                 {manage}
                 {tapSelects}
                 selected={selected.has(pilot.characterID)}

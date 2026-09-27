@@ -23,6 +23,9 @@
     /** Below 760px a tap SELECTS instead of launching — mis-tap protection. */
     tapSelects,
     bot = null,
+    owner = null,
+    onRelease = null,
+    releaseBusy = false,
     stopping = false,
     stopBusy = false,
     squads,
@@ -47,6 +50,9 @@
      * live server fact polled on its own clock.
      */
     bot?: ActiveServerBot | null;
+    owner?: string | null;
+    onRelease?: (() => void) | null;
+    releaseBusy?: boolean;
     /** A stop is in flight for THIS pilot. */
     stopping?: boolean;
     /** A stop is in flight for SOME pilot — one at a time across the screen. */
@@ -142,7 +148,9 @@
       <span class="hangar-name">{pilot.name}</span>
       {#if pilot.online}
         <!-- Words with the mark, never the mark alone (R9a). -->
-        <span class="hangar-badge is-online" title="Already in the client — click the row to go to it">ON</span>
+        <span class="hangar-badge is-online" title="Owned by this tab; click to open">{bot ? "BOT" : owner ?? "BROWSER"}</span>
+      {:else if !bot}
+        <span class="hangar-badge" title="Roster visibility does not prove online or offline state">NOT IN THIS TAB</span>
       {/if}
       {#if pilot.training === null}
         <span class="hangar-badge is-idle" title="No skill in training">IDLE</span>
@@ -280,6 +288,9 @@
   </div>
 
   <div class="hangar-rail">
+    {#if !manage && !bot && pilot.online && owner === "BROWSER" && onRelease}
+      <button type="button" disabled={releaseBusy || stopBusy} onclick={(event) => { event.stopPropagation(); onRelease?.(); }}>Release pilot</button>
+    {/if}
     <button
       type="button"
       class="hangar-star is-row"

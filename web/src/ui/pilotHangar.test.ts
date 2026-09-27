@@ -96,6 +96,8 @@ test("first run renders the empty state rather than a blank page", () => {
   const body = renderHangar();
   assert.match(body, /No pilots yet/);
   assert.match(body, /Add your first account/);
+  assert.match(body, /href="\/mining-command-center"/);
+  assert.match(body, /href="\/pilot-training"/);
 });
 
 test("a populated hangar groups by account and prints every pilot column", () => {
@@ -119,7 +121,8 @@ test("a populated hangar groups by account and prints every pilot column", () =>
   assert.match(body, /Mining Barge V/);
 
   // A pilot already in the client carries the badge, with its word.
-  assert.match(body, />ON</);
+  assert.match(body, />BROWSER</);
+  assert.match(body, /NOT IN THIS TAB/);
   // A pilot with an empty queue says so twice — the badge and the stat line.
   assert.match(body, />IDLE</);
   assert.match(body, /not training/);
