@@ -41,7 +41,18 @@ disposable.** Closing a tab closes that client — the server never keeps drivin
 The standalone [Pilot Training](docs/pilot-training.md) control plane is available at
 `/pilot-training`: corporation-fitting qualification contracts, reviewed queue append,
 direct skill acquisition and optional configured corporation onboarding. Fresh users
-have no predefined ships, authority, training wallet or home.
+have no predefined ships, authority, training wallet or home. It supports new trainees
+and existing accounts, exact authorized skill funding, and generic NPC training homes;
+equipment provisioning and citadel relocation are not implemented.
+
+The standalone **Mining Command Center** at `/mining-command-center` coordinates
+Standard Belt, Ore Anomaly and Ice operations with Hauler Service or Self-Unload,
+Fleet Parking, explicit delivery/parking destinations, resource preferences and
+Travel Assist. These operations use server-hosted grants and can continue without
+an open cockpit; the browser-only descriptions elsewhere in this historical README
+do not describe that host lifecycle. GAS, adjacent scouting and dedicated operation
+Defender execution remain unsupported. See the [integrated feature status](docs/integration-30-41.md)
+for validation, limitations and links to the feature histories.
 
 ```
   Browser (Svelte + Vite)                 ← one tab per account; all the "thinking"

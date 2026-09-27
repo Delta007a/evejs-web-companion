@@ -1,5 +1,9 @@
 # MCC playable foundation / Fleet Parking
 
+Historical foundation milestone. Later work delivered Ore/Ice, Self-Unload,
+Travel Assist and resource/grant controls; the deferred list below describes
+this milestone, not the current integrated release. See [current integration status](integration-30-41.md).
+
 Isolated development line based on `84bd192a4c112cd204068fdd613a9ce99e2ac653`.
 The `40-mining-operations` acceptance worktree and its live process/data are not
 used by this implementation or its tests. No live gameplay has been performed.
