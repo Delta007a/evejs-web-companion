@@ -11,6 +11,7 @@ import { decodeDroneBay } from "../bridge/drones.ts";
 import type { DroneInSpace } from "../store/types.ts";
 import type { BotLogDraft } from "./botLog.ts";
 import type { ScriptAction } from "./scriptDecide.ts";
+import { decideScriptAction, initialMemory } from "./scriptDecide.ts";
 import { createScriptRunner } from "./scriptRunner.ts";
 import { recallFlightBeforeManualStop } from "./miningDroneFlight.ts";
 const require = createRequire(import.meta.url);
@@ -388,7 +389,7 @@ test("hauler completes its drain only after the old grid and freight are both em
   const deliver = SCRIPT_MACROS["deliver-ore"];
   const hauler = assignment({ role: "HAULER", logisticsTarget: target({ state: "DRAINING" }) });
   const clearGrid = loot(lootStep, observation({ miningOperation: hauler,
-    snapshot: snapshot([entity(1, "Asteroid Belt 1")]) }), { emptyChecks: 30 }, {});
+    holds: oreHold([9]), snapshot: snapshot([entity(1, "Asteroid Belt 1")]) }), { emptyChecks: 30 }, {});
   assert.equal(clearGrid.outcome.kind, "done");
   assert.equal(clearGrid.boardPatch?.miningDrainGridClear, hauler.logisticsTarget?.targetKey);
   const docked = observation({
@@ -406,6 +407,137 @@ test("a full hauler unload does not close its logistics tail before grid-clear p
     miningOperation: hauler, holds: [],
   });
   assert.notEqual(deliver(deliverStep, docked, {}, {}).action.kind, "miningDrainComplete");
+});
+
+for (const family of ["BELT", "ORE_ANOMALY", "ICE"] as const) for (const fraction of [0.72, 0.01, 0]) {
+  test(`${family} real Standard hauler: clear tail at ${fraction * 100}% delivers once or completes empty, then follows latest target`, () => {
+    const profile = buildStandardProfile({ area: { targetClasses: [family] }, unloadPolicy: "HAULER_SERVICE",
+      unloadDestination: { stationID: 60000004, stationName: "Home", systemName: "Jita", corporationDivision: 1 },
+    }, { role: "HAULER", routineMode: "STANDARD" });
+    const decoded = decodeScriptValue(profile.doc);
+    assert.ok(decoded.ok);
+    const site = family === "BELT" ? {} : siteWorld(family);
+    const old = { ...(site.miningOperation?.currentTarget ?? target()), state: "DRAINING" as const };
+    const next = { ...old, targetKey: "next", targetName: "Asteroid Belt 2", state: "ACTIVE" as const };
+    let world = observation({ ...site, miningSiteBookmarks: { [old.targetKey]: 55 }, oreHoldFraction: fraction, holdEmpty: fraction === 0,
+      holds: oreHold(fraction ? [9] : []),
+      snapshot: snapshot(family === "BELT" ? [entity(1, old.targetName)] : []),
+      miningOperation: assignment({ role: "HAULER", currentTarget: next, logisticsTarget: old,
+        area: { anchorSystemID: 30000142, anchorSystemName: "Jita", reach: "CURRENT_SYSTEM", targetClasses: [family] } }),
+    });
+    let memory = initialMemory(decoded.doc);
+    let routes = 0, unloads = 0, completions = 0, reads = 0;
+    for (let i = 0; i < 150 && !completions; i++) {
+      const result = decideScriptAction(decoded.doc, world, memory, SCRIPT_MACROS, () => { throw new Error("Unexpected safety return"); });
+      memory = result.memory;
+      assert.equal(result.status, "running");
+      reads++;
+      if (result.action.kind === "startRoute") {
+        routes++;
+        assert.ok(reads > 30, "bounded grid-clear confirmation precedes partial delivery");
+        assert.equal(result.action.stationID, 60000004);
+        // Fleet moved again while this hauler was delivering. No cached next target.
+        world = { ...world, inSpace: false, docked: true,
+          flightStatus: flight({ inSpace: false, docked: true, stationID: 60000004 }),
+          miningOperation: { ...world.miningOperation!, currentTarget: { ...next, targetKey: "latest", targetName: "Asteroid Belt 3" } } };
+      } else if (result.action.kind === "unloadOre") {
+        unloads++;
+        assert.deepEqual(result.action.itemIDs, [9]);
+        assert.equal(result.action.division, 1);
+        // A successful dispatch alone cannot complete: keep freight for another observation.
+        if (unloads === 2) world = { ...world, holds: oreHold([]), holdEmpty: true, oreHoldFraction: 0 };
+      } else if (result.action.kind === "miningDrainComplete") {
+        completions++;
+        assert.equal(result.action.targetKey, old.targetKey);
+        assert.deepEqual(world.holds, oreHold([]));
+        world = { ...world, miningOperation: { ...world.miningOperation!, logisticsTarget: null } };
+      } else {
+        assert.equal(result.action.kind, "wait", "must not warp to the new target before finishing the tail");
+      }
+    }
+    assert.equal(completions, 1);
+    assert.equal(routes, fraction ? 1 : 0);
+    assert.equal(unloads, fraction ? 2 : 0);
+    assert.equal(world.miningOperation?.currentTarget?.targetKey, fraction ? "latest" : "next");
+    if (family === "BELT") {
+      // Remain physically on the old belt after completion. The real program
+      // must leave its old loot invocation and re-read the current assignment.
+      world = { ...world,
+        snapshot: snapshot([entity(1, old.targetName), entity(3, world.miningOperation!.currentTarget!.targetName, 500_000)]) };
+      let caughtUp = false;
+      for (let i = 0; i < 30 && !caughtUp; i++) {
+        const r = decideScriptAction(decoded.doc, world, memory, SCRIPT_MACROS, () => { throw new Error("Unexpected safety return"); });
+        memory = r.memory;
+        if (r.action.kind === "warp") { assert.equal(r.action.targetID, 3); caughtUp = true; }
+        else if (r.action.kind === "undock") world = { ...world, inSpace: true, docked: false, flightStatus: flight() };
+        else assert.equal(r.action.kind, "wait");
+      }
+      assert.ok(caughtUp, "empty or delivered hauler catches up without stale loot-step deadlock");
+    }
+  });
+}
+
+test("tail clear requires readable freight, no pending miner dumps, and 31 empty reads", () => {
+  const tail = target({ state: "DRAINING" });
+  const world = observation({ holds: oreHold([]), snapshot: snapshot([entity(1, tail.targetName)]),
+    miningOperation: assignment({ role: "HAULER", logisticsTarget: tail }) });
+  const loot = SCRIPT_MACROS["loot-containers"];
+  assert.equal(loot(lootStep, world, { emptyChecks: 29 }, {}).action.kind, "wait");
+  assert.equal(loot(lootStep, world, { emptyChecks: 30 }, {}).action.kind, "miningDrainComplete");
+  for (const holds of [null, [{ ...oreHold([])[0]!, items: null, error: "READ_FAILED" }]]) {
+    assert.equal(loot(lootStep, { ...world, holds }, { emptyChecks: 30 }, {}).action.kind, "wait");
+    const docked = { ...world, holds, flightStatus: flight({ docked: true, stationID: 60000004 }) };
+    assert.equal(SCRIPT_MACROS["deliver-ore"](deliverStep, docked, {}, { miningDrainGridClear: tail.targetKey }).action.kind, "wait");
+  }
+  assert.equal(loot(lootStep, { ...world, miningOperation: { ...world.miningOperation!,
+    rendezvous: { kind: "MINER_CLEARANCE", required: [1], ready: [], thisMemberReady: false } } }, { emptyChecks: 31 }, {}).action.kind, "wait");
+});
+
+test("nonclear tail keeps looting below threshold; full trip returns to OLD target; ACTIVE 90% unchanged", () => {
+  const tail = target({ state: "DRAINING" });
+  const op = assignment({ role: "HAULER", logisticsTarget: tail,
+    currentTarget: target({ targetKey: "new", targetName: "Asteroid Belt 2" }) });
+  const can = { ...entity(50, "Jetcan", 100), kind: "container" as const };
+  const world = observation({ miningOperation: op, oreHoldFraction: 0.72, holds: oreHold([9]),
+    snapshot: snapshot([entity(1, tail.targetName), can]) });
+  const loot = SCRIPT_MACROS["loot-containers"](lootStep, world, { emptyChecks: 31 }, {});
+  assert.equal(loot.action.kind, "lootContainer");
+  assert.equal(loot.boardPatch?.miningDrainGridClear, "");
+  const contested = SCRIPT_MACROS["loot-containers"](lootStep, { ...world, claimedContainerIDs: [50] }, { emptyChecks: 31 }, {});
+  assert.equal(contested.action.kind, "wait");
+  assert.equal(contested.nextMem.emptyChecks, 0);
+  assert.equal(contested.boardPatch?.miningDrainGridClear, "", "another hauler's leased can is not clear-grid evidence");
+  const profile = buildStandardProfile({ area: { targetClasses: ["BELT"] }, unloadPolicy: "HAULER_SERVICE",
+    unloadDestination: { stationID: 60000004, stationName: "Home", systemName: "Jita", corporationDivision: 1 },
+  }, { role: "HAULER", routineMode: "STANDARD" });
+  const decoded = decodeScriptValue(profile.doc); assert.ok(decoded.ok);
+  for (const draining of [false, true]) for (const fraction of [0.72, 0.9]) {
+    const current = { ...world, oreHoldFraction: fraction, miningOperation: draining ? op : { ...op, currentTarget: target(), logisticsTarget: null } };
+    const memory = { ...initialMemory(decoded.doc), board: { miningDrainGridClear: draining ? "obsolete-tail" : tail.targetKey } };
+    const r = decideScriptAction(decoded.doc, current, memory, SCRIPT_MACROS, () => { throw new Error("Unexpected safety return"); });
+    assert.equal(r.action.kind, fraction >= 0.9 ? "startRoute" : "lootContainer");
+  }
+  const delivered = SCRIPT_MACROS["deliver-ore"](deliverStep, { ...world, holds: oreHold([]),
+    flightStatus: flight({ docked: true, stationID: 60000004 }) }, {}, {});
+  assert.equal(delivered.outcome.kind, "done");
+  const back = SCRIPT_MACROS["travel-to-belt"](travelStep, { ...world,
+    snapshot: snapshot([entity(1, tail.targetName, 500_000), entity(2, "Asteroid Belt 2", 300_000)]) }, {}, {});
+  assert.deepEqual(back.action, { kind: "warp", targetID: 1 });
+});
+
+test("final delivery preserves unrelated cargo and cannot complete while transfer is refused", () => {
+  const tail = target({ state: "DRAINING" });
+  const cargo = { ...oreHold([])[0]!, key: "cargo", items: [{ itemID: 33, typeID: 1, categoryID: 8, groupID: 1, quantity: 100 }] };
+  const world = observation({ holds: [...oreHold([9]), cargo], miningOperation: assignment({ role: "HAULER", logisticsTarget: tail }),
+    flightStatus: flight({ docked: true, stationID: 60000004 }) });
+  const board = { miningDrainGridClear: tail.targetKey };
+  for (let i = 0; i < 5; i++) {
+    const r = SCRIPT_MACROS["deliver-ore"](deliverStep, world, {}, board);
+    assert.equal(r.action.kind, "unloadOre");
+    if (r.action.kind === "unloadOre") assert.deepEqual(r.action.itemIDs, [9]);
+  }
+  assert.equal(SCRIPT_MACROS["deliver-ore"](deliverStep, { ...world, holds: [...oreHold([]), cargo] }, {}, board).action.kind, "miningDrainComplete");
+  assert.notEqual(SCRIPT_MACROS["deliver-ore"](deliverStep, { ...world, holds: oreHold([]), miningOperation: { ...world.miningOperation!, logisticsTarget: null } }, {}, board).action.kind, "miningDrainComplete");
 });
 
 test("operation ore-site selection excludes ice archetype and never invents remote scanner rows", () => {

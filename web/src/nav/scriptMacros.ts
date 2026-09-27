@@ -1,4 +1,5 @@
 import { createCorporateHauler } from "./corporateHauling.ts";
+import { confirmedDrain, freightReadable, OPERATION_DRAIN_CLEAR_BOARD_KEY } from "./miningLogistics.ts";
 import { atMiningSite, miningSiteFamily, siteIdentity, siteRockMatches, type SiteFamily } from "./miningSite.ts";
 // B1 — the macro adapters. Each block is an independent "task": it decides ONE
 // action per tick and confirms by re-reading next tick, composing the SAME
@@ -633,7 +634,6 @@ function isAtBeltForTravel(belt: SpaceEntity, measurement: SpaceMeasurement | nu
 
 const OPERATION_EMPTY_CONFIRM_READS = 3;
 const OPERATION_DUMP_MAX_ATTEMPTS = 5;
-const OPERATION_DRAIN_CLEAR_BOARD_KEY = "miningDrainGridClear";
 
 function miningOperationTargetKey(
   targetType: "BELT" | "ORE_ANOMALY" | "ICE",
@@ -1625,7 +1625,10 @@ const deliverOre: MacroDecider = (step, obs, mem, board) => {
   }
   const operation = obs.miningOperation ?? null;
   const drainTarget = operation?.role === "HAULER" ? operation.logisticsTarget : null;
-  const drainGridClear = drainTarget !== null && String(board[OPERATION_DRAIN_CLEAR_BOARD_KEY] ?? "") === drainTarget.targetKey;
+  const drainGridClear = confirmedDrain(obs, board);
+  if (drainTarget !== null && !freightReadable(obs.holds)) {
+    return tick(WAIT, "Cannot confirm the logistics load: freight holds are unreadable.", "Draining — hold unavailable", ACTING, false, mem);
+  }
   if (
     drainTarget !== null &&
     drainGridClear &&
@@ -1704,7 +1707,7 @@ const deliverOre: MacroDecider = (step, obs, mem, board) => {
   if (recall !== null) {
     return recall;
   }
-  const ride = rideAutopilotTo(obs, target, "Flying to the station");
+  const ride = rideAutopilotTo(obs, target, drainGridClear ? "Final partial delivery" : "Flying to the station");
   if (ride !== null) {
     return ride;
   }
@@ -2925,7 +2928,7 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
       if (assignedTarget.targetType !== "BELT" ||
           (obs.flightStatus?.solarSystemID ?? snapshot.solarSystemID) !== assignedTarget.systemID ||
           belt === undefined || !isAtBeltForTravel(belt, measureSpace(snapshot))) {
-        return tick(WAIT, "The hauler is not at its owned current or draining target.", "Following operation target", ACTING, false, mem);
+        return tick(WAIT, "Returning to the operation's belt travel block.", "Following operation target", { kind: "done" });
       }
     }
   }
@@ -2948,15 +2951,20 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
   // list in step memory. The list was dropped every time the block was left, so
   // on a `forever` loop each stubborn can was reconsidered from scratch on every
   // lap — five fresh attempts, for ever. See `shouldSetAside`.
-  const cans = containersOnGrid(snapshot).filter(
+  const allCans = containersOnGrid(snapshot);
+  const cans = allCans.filter(
     (c) => !shouldSetAside(obs.refusals, step.id, "lootContainer", c.itemID, MAX_BLOCK_ATTEMPTS),
   );
   const available = cans.filter((c) => !obs.claimedContainerIDs?.includes(c.itemID));
+  if (logisticsTarget !== null && allCans.length > 0 && cans.length === 0) {
+    return clearDrainProof(tick(WAIT, "Old-target containers still exist but repeatedly refused collection.", "Draining blocked",
+      { kind: "blocked", reason: "Cannot confirm the old grid clear: containers still require collection." }));
+  }
   if (cans.length > 0 && available.length === 0) {
-    return tick(WAIT, "Other haulers are servicing these containers.", "Looting", ACTING, true, { ...mem, emptyChecks: 0 });
+    return clearDrainProof(tick(WAIT, "Other haulers are servicing these containers.", "Looting", ACTING, true, { ...mem, emptyChecks: 0 }));
   }
   if (cans.length === 0) {
-    if (logisticsTarget && logisticsTarget.targetType !== "BELT" && operation?.currentTarget?.targetKey === logisticsTarget.targetKey && operation.rendezvous?.kind === "MINER_CLEARANCE") {
+    if (logisticsTarget && operation?.currentTarget?.targetKey === logisticsTarget.targetKey && operation.rendezvous?.kind === "MINER_CLEARANCE") {
       return clearDrainProof(tick(WAIT, "Miners are still settling modules and dumping partial holds; the site cannot be declared clear yet.", "Draining", ACTING, true, { ...mem, emptyChecks: 0 }));
     }
     // A can that has not shown up in THIS tick's snapshot is not proof the
@@ -2970,7 +2978,16 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
     if (emptyChecks <= CONTAINER_SETTLE_TICKS) {
       return tick(WAIT, "Checking the grid for containers.", "Looting", ACTING, true, { ...mem, emptyChecks });
     }
-    const done = tick(WAIT, "Every container here is emptied.", "Looting", { kind: "done" });
+    if (logisticsTarget !== null && !freightReadable(obs.holds)) {
+      return clearDrainProof(tick(WAIT, "Old grid clear; waiting for readable freight holds.", "Draining — hold unavailable", ACTING, false, { ...mem, emptyChecks }));
+    }
+    if (logisticsTarget !== null && freightHoldItemIDs(obs.holds ?? null).length === 0) {
+      return tick({ kind: "miningDrainComplete", targetKey: logisticsTarget.targetKey },
+        "Old grid confirmed clear and freight holds empty; catching up to the current fleet target.",
+        "Logistics tail complete", ACTING, false, { ...mem, emptyChecks });
+    }
+    const done = tick(WAIT, logisticsTarget ? "Old grid confirmed clear; final partial delivery required." : "Every container here is emptied.",
+      logisticsTarget ? "Final partial delivery" : "Looting", { kind: "done" });
     return logisticsTarget === null
       ? done
       : withBoardPatch(done, { [OPERATION_DRAIN_CLEAR_BOARD_KEY]: logisticsTarget.targetKey });
@@ -2985,7 +3002,7 @@ const lootContainers: MacroDecider = (step, obs, mem) => {
     return tick(WAIT, "Nothing reachable to loot.", "Looting", ACTING, true, memClean);
   }
   const servicing = (...args: Parameters<typeof tick>): MacroTick => ({
-    ...tick(...args),
+    ...clearDrainProof(tick(...args)),
     ...(args[3].kind === "acting" ? { containerTargetID: target.itemID } : {}),
   });
   const dist = measurement?.distances.get(target.itemID) ?? Number.POSITIVE_INFINITY;

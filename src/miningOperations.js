@@ -524,7 +524,8 @@ function createMiningOperations(options) {
     const id = Number(characterID);
     const member = runtime?.members.get(id);
     if (!runtime || !member || member.role !== "HAULER") return false;
-    if (runtime.rendezvous?.target?.targetKey === targetKey && runtime.rendezvous.target.targetType !== "BELT") return false;
+    if (runtime.rendezvous?.target?.targetKey === targetKey) return false;
+    if (!runtime.drainingTargets.some(row => row.target.targetKey === targetKey && row.pendingHaulers.includes(id))) return false;
     if (!targetBoard.heartbeat(operationID, targetKey)) {
       loseDrainClaim(runtime, targetKey);
       return false;
@@ -535,10 +536,14 @@ function createMiningOperations(options) {
       const before = drain.pendingHaulers.length;
       drain.pendingHaulers = drain.pendingHaulers.filter((pilot) => pilot !== id);
       if (before !== drain.pendingHaulers.length) changed = true;
-      if (drain.pendingHaulers.length === 0) targetBoard.finishDraining(operationID, drain.target.targetKey);
+      if (drain.pendingHaulers.length === 0) {
+        targetBoard.finishDraining(operationID, drain.target.targetKey);
+        history(runtime, "LOGISTICS_TAIL_COMPLETED", drain.target);
+      }
     }
     runtime.drainingTargets = runtime.drainingTargets.filter((row) => row.pendingHaulers.length > 0);
     if (changed) {
+      history(runtime, "HAULER_DRAIN_COMPLETED", { targetKey }, { characterID: id, catchUpTargetKey: runtime.currentTarget?.targetKey ?? null });
       member.runtimeState = "RUNNING";
       member.phase = "Catching up to current target";
     }

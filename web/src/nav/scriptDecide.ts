@@ -1,4 +1,5 @@
 import { hostileRows } from "../space/overview.ts";
+import { confirmedDrain } from "./miningLogistics.ts";
 import { decideMiningDroneFlight, freshDroneMemory, type MiningDroneMemory } from "./miningDroneFlight.ts";
 // A4b — the tick orchestrator: given a script, a fresh observation, and the
 // running memory, decide the ONE action this tick, and hand back the next
@@ -2089,7 +2090,14 @@ function runProgram(
         loopBodyIndex !== null
           ? ((script.program[branchNode] as LoopBlock).body[loopBodyIndex] as BranchBlock)
           : (script.program[branchNode] as BranchBlock);
-      const verdict = evaluateCondition(branch.when, obs);
+      // A final tail load is not a normal threshold trip. Route only the
+      // established ore-threshold -> delivery idiom, retaining its explicit
+      // station/division and ordinary macro/interrupt/refusal boundaries.
+      // Never rewrite the observed hold fraction or unrelated custom branches.
+      const finalDelivery = branch.when.kind === "ore-hold-at-least" &&
+        branch.then.length === 1 && branch.then[0]?.kind === "macro" &&
+        branch.then[0].macro === "deliver-ore" && confirmedDrain(obs, board);
+      const verdict = finalDelivery ? "met" : evaluateCondition(branch.when, obs);
       if (verdict === "cannot-tell") {
         // No `isSilent` test here: a branch whose `when` cannot be read waits,
         // full stop, so every tick counted at this position is already a silent

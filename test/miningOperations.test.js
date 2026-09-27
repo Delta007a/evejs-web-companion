@@ -401,6 +401,7 @@ test("HAULER_SERVICE depletion waits for every miner dump but creates a normal l
   assert.equal(runtime.currentTarget.state, "DRAINING");
   assert.deepEqual(runtime.rendezvous.ready, [1]);
   assert.deepEqual(runtime.drainingTargets[0].pendingHaulers, [3, 4]);
+  assert.equal(h.operations.finishDrain("haul", 3, reserved.target.targetKey), false, "no hauler can finish before every miner's last dump");
   h.operations.depleteTarget("haul", 2, reserved.target.targetKey, { partialDumpConfirmed: true });
   runtime = h.operations.runtimeFor("haul");
   assert.equal(runtime.currentTarget, null, "main body may now select and relocate");
@@ -415,8 +416,13 @@ test("haulers independently finish the old target then catch up to the new curre
   h.operations.depleteTarget("tail", 1, old.target.targetKey, { partialDumpConfirmed: true });
   assert.equal(h.operations.finishDrain("tail", 2, old.target.targetKey), true);
   assert.equal(h.board.get(old.target.targetKey).state, "DRAINING");
+  assert.equal(h.operations.runtimeFor("tail").drainingTargets.length, 1);
+  assert.equal(h.operations.finishDrain("tail", 2, old.target.targetKey), false, "duplicate completion does not remove another hauler");
   assert.equal(h.operations.finishDrain("tail", 3, old.target.targetKey), true);
   assert.equal(h.board.get(old.target.targetKey).state, "DEPLETED");
+  assert.equal(h.operations.runtimeFor("tail").drainingTargets.length, 0);
+  assert.equal(h.operations.finishDrain("tail", 3, old.target.targetKey), false);
+  assert.equal(h.operations.runtimeFor("tail").history.filter(row => row.kind === "LOGISTICS_TAIL_COMPLETED").length, 1);
   const next = h.operations.reserveCandidate("tail", 1, belt("Belt II"));
   assert.equal(next.acquired, true);
   assert.equal(h.operations.assignment("tail", 2).logisticsTarget, null);
