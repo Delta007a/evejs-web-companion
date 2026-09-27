@@ -372,6 +372,11 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
     runToken += 1;
     status = "error";
     emit({ ...last, status: "error", why: reason, pauseReason: reason });
+    void settleTravelAssist();
+  }
+
+  function settleTravelAssist(): Promise<void> {
+    return (activeTick ?? Promise.resolve()).then(() => travelAssist?.requestStop());
   }
 
   async function tick(): Promise<void> {
@@ -840,6 +845,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
   function pauseWith(reason: string, result?: ReturnType<typeof decideScriptAction>): void {
     runToken += 1;
     status = "paused";
+    void settleTravelAssist();
     // ⚠ THE REASON MUST SURVIVE THE RESULT. `toSnapshot` words the snapshot from
     // the DECIDER's tick, which knows nothing about a refusal the issue then
     // hit — so passing `result` alone would pause the run and show the cheerful
@@ -899,6 +905,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         runToken += 1;
         status = "paused";
         emit({ ...last, status: "paused" });
+        void settleTravelAssist();
       }
     },
     resume(): void {
@@ -915,7 +922,7 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
         status = "paused";
         emit({ ...last, status: "paused", phase: "Recalling drones", why: "Stopping after drones return." });
       }
-      return (activeTick ?? Promise.resolve()).then(() => travelAssist?.requestStop());
+      return settleTravelAssist();
     },
     travelAssistPending: () => travelAssist?.pending() ?? false,
     confirmTravelAssistStopped: ids => travelAssist?.confirmStopped(ids),
@@ -929,9 +936,9 @@ export function createScriptRunner(deps: ScriptRunnerDeps): ScriptRunnerControll
       runToken += 1;
       status = "stopped";
       emit({ ...last, status: "stopped" });
-      // Only a claimed container tick can hold the server session open. Other
-      // bots retain their prompt finalization even if an unrelated call waits.
-      return claimedIssue ?? Promise.resolve();
+      // Await owned movement cleanup too: continuous propulsion must not be
+      // left running by a direct terminal stop. Unrelated calls still do not wait.
+      return travelAssist?.pending() ? settleTravelAssist() : claimedIssue ?? Promise.resolve();
     },
     tick,
     run,

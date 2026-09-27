@@ -28,7 +28,7 @@ test("versioned standard BELT profiles are valid runner docs, independent of sav
     assert.notEqual(profile.doc.home.starting, true);
   }
   assert.equal(standardProfileFor({ ...definition, area: { targetClasses: ["GAS"] } }, miner), null);
-  assert.equal(standardProfileFor({ ...definition, unloadPolicy: "SELF_UNLOAD" }, miner), null);
+  assert.equal(standardProfileFor({ ...definition, unloadPolicy: "SELF_UNLOAD" }, hauler), null);
   assert.equal(standardProfileFor(definition, { ...miner, routineMode: "CUSTOM", automationID: "saved-script" }), null);
 });
 
@@ -53,6 +53,23 @@ test("missing explicit unload destination never produces a standard runnable doc
   assert.equal(buildStandardProfile({ ...definition, unloadDestination: null }, hauler), null);
   assert.equal(buildStandardProfile({ ...definition, unloadDestination: { ...definition.unloadDestination, corporationDivision: 8 } }, hauler), null);
 });
+
+for (const [family, id] of [["BELT", "belt"], ["ORE_ANOMALY", "ore-anomaly"], ["ICE", "ice"]]) {
+  test(`${family} Standard Self-Unload v1 uses explicit delivery, no jettison or hauler`, () => {
+    const def = { ...definition, area: { targetClasses: [family] }, unloadPolicy: "SELF_UNLOAD" };
+    const profile = buildStandardProfile(def, miner);
+    assert.equal(profile.scriptID, `mcc.${id}.self-unload.miner`);
+    assert.equal(profile.rev, 1);
+    const decoded = decodeScriptValue(profile.doc); assert.ok(decoded.ok);
+    assert.equal(analyzeBotRunPolicy(decoded.doc).restartSafe, false, "miners must still require fresh Start after a crash");
+    assert.deepEqual(profile.doc.program[0].body.map((node: { macro: string }) => node.macro), ["undock", "mine-at-belt", "deliver-ore"]);
+    assert.equal(profile.doc.program[0].body[2].args.station.ref.id, definition.unloadDestination.stationID);
+    assert.equal(buildStandardProfile({ ...def, unloadDestination: null }, miner), null);
+    assert.equal(buildStandardProfile({ ...def, unloadDestination: { ...def.unloadDestination, stationID: 0 } }, miner), null);
+    assert.equal(standardProfileFor(def, hauler), null);
+    assert.equal(standardProfileFor({ ...def, area: { targetClasses: ["GAS"] } }, miner), null);
+  });
+}
 
 test("site families resolve distinct v1 runner documents, never a cross-family profile", () => {
   for (const [family, id, mode] of [["ORE_ANOMALY", "ore-anomaly", "site"], ["ICE", "ice", "ice-site"]]) {

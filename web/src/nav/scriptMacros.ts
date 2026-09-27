@@ -913,7 +913,7 @@ function operationMineAtTarget(
   }
 
   if (target.state === "DEPLETED" || target.state === "DRAINING") {
-    if (wantedType !== "BELT") {
+    if (wantedType !== "BELT" || operation.unloadPolicy === "SELF_UNLOAD") {
       const active = obs.snapshot?.ship?.activeModuleIDs;
       if (active == null) return settle(tick(WAIT, "Mining module settlement cannot be confirmed from an unreadable ship state.", "Clearing depleted target", ACTING, false, mem));
       const moduleID = obs.miningModuleIDs?.find(id => active.includes(id));
@@ -1626,8 +1626,8 @@ const deliverOre: MacroDecider = (step, obs, mem, board) => {
   const operation = obs.miningOperation ?? null;
   const drainTarget = operation?.role === "HAULER" ? operation.logisticsTarget : null;
   const drainGridClear = confirmedDrain(obs, board);
-  if (drainTarget !== null && !freightReadable(obs.holds)) {
-    return tick(WAIT, "Cannot confirm the logistics load: freight holds are unreadable.", "Draining — hold unavailable", ACTING, false, mem);
+  if ((drainTarget !== null || operation?.unloadPolicy === "SELF_UNLOAD") && !freightReadable(obs.holds)) {
+    return tick(WAIT, "Cannot confirm the delivery load: freight holds are unreadable.", "Delivery — hold unavailable", ACTING, false, mem);
   }
   if (
     drainTarget !== null &&

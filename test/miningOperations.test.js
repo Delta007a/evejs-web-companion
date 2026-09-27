@@ -476,6 +476,39 @@ test("reload reconciliation trusts botHost association but not a stale current t
   assert.equal(runtime.history[0].kind, "RECOVERED_UNKNOWN");
 });
 
+for (const family of ["BELT", "ORE_ANOMALY", "ICE"]) test(`${family} Self-Unload rendezvous releases only ready/healthy miners and keeps target family`, () => {
+  const h = harness([definition("self", [member(1, "MINER"), member(2, "MINER"), member(3, "MINER")], "SELF_UNLOAD", [family])]);
+  startAll(h, "self", [family]);
+  const candidate = index => family === "BELT" ? belt(`Belt ${index}`) : { targetType: family, targetName: `Site ${index}`, systemID: 30000142, systemName: "Jita",
+    siteID: 100, instanceID: index, siteIdentity: `site:100:instance:${index}`, position: { x: 1000, y: 0, z: 0 } };
+  const old = h.operations.reserveCandidate("self", 1, candidate(1)).target;
+  h.operations.depleteTarget("self", 1, old.targetKey, { emptyGridReads: 3 });
+  h.operations.markReady("self", 1);
+  assert.equal(h.operations.reserveCandidate("self", 1, candidate(2)).acquired, false);
+  h.operations.markReady("self", 2);
+  h.operations.memberFailed("self", 3, "offline");
+  assert.equal(h.operations.runtimeFor("self").rendezvous, null);
+  assert.equal(h.operations.runtimeFor("self").state, "DEGRADED");
+  assert.equal(h.operations.reserveCandidate("self", 1, { ...candidate(2), targetType: "GAS" }).acquired, false);
+  assert.equal(h.operations.reserveCandidate("self", 1, candidate(2)).target.targetType, family);
+});
+
+test("accumulated logistics tails remain ordered and complete independently", () => {
+  const h = harness([definition("tails", [member(1, "MINER"), member(2, "HAULER")], "HAULER_SERVICE")]);
+  startAll(h, "tails");
+  const old = h.operations.reserveCandidate("tails", 1, belt("Belt I")).target;
+  h.operations.depleteTarget("tails", 1, old.targetKey, { partialDumpConfirmed: true });
+  const second = h.operations.reserveCandidate("tails", 1, belt("Belt II")).target;
+  h.operations.depleteTarget("tails", 1, second.targetKey, { partialDumpConfirmed: true });
+  const latest = h.operations.reserveCandidate("tails", 1, belt("Belt III")).target;
+  assert.equal(h.operations.assignment("tails", 2).logisticsTarget.targetKey, old.targetKey);
+  h.operations.finishDrain("tails", 2, old.targetKey);
+  assert.equal(h.operations.assignment("tails", 2).logisticsTarget.targetKey, second.targetKey);
+  h.operations.finishDrain("tails", 2, second.targetKey);
+  assert.equal(h.operations.assignment("tails", 2).logisticsTarget, null);
+  assert.equal(h.operations.assignment("tails", 2).currentTarget.targetKey, latest.targetKey);
+});
+
 test("runtime timing is a fresh server projection of matching hosted grants, never a browser clock", () => {
   const h = harness([definition("timing", [member(1, "MINER"), member(2, "HAULER")], "HAULER_SERVICE")]);
   startAll(h, "timing");

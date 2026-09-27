@@ -320,6 +320,23 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
   assert.equal(host.inputs.at(-1).doc.program[0].body.at(-1).args.seconds.value, 3);
   await request(baseUrl, `/api/mining-operations/${standardID}/stop`, { method: "POST", token, body: {} });
 
+  for (const [family, profileFamily] of [["BELT", "belt"], ["ORE_ANOMALY", "ore-anomaly"], ["ICE", "ice"]]) {
+    const selfInput = { ...standardInput, name: `${family} self`, unloadPolicy: "SELF_UNLOAD",
+      area: { ...standardInput.area, targetClasses: [family] }, members: standardInput.members.slice(0, 2) };
+    const missing = await request(baseUrl, "/api/mining-operations", { method: "POST", token, body: { ...selfInput, unloadDestination: null } });
+    assert.equal(missing.response.status, 200);
+    const blocked = await request(baseUrl, `/api/mining-operations/${missing.payload.definition.operationID}/start`, { method: "POST", token, body: {} });
+    assert.equal(blocked.payload.error, "STANDARD_UNLOAD_DESTINATION_REQUIRED");
+    const invalid = await request(baseUrl, "/api/mining-operations", { method: "POST", token, body: { ...selfInput, unloadDestination: { stationID: 999999, corporationDivision: 1 } } });
+    assert.equal(invalid.response.status, 400);
+    const saved = await request(baseUrl, "/api/mining-operations", { method: "POST", token, body: selfInput });
+    assert.equal(saved.response.status, 200);
+    const plan = await request(baseUrl, `/api/mining-operations/${saved.payload.definition.operationID}/launch-plan`, { token });
+    assert.equal(plan.response.status, 200);
+    assert.ok(plan.payload.members.every(member => member.script.scriptID === `mcc.${profileFamily}.self-unload.miner`));
+    assert.equal(plan.payload.members.length, 2, "no hauler needed");
+  }
+
   const withDefender = await request(baseUrl, "/api/mining-operations", { method: "POST", token, body: {
     ...operationInput,
     name: "Modeled guard",

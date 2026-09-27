@@ -11,12 +11,16 @@ const PROFILES = Object.freeze({
 // Families own distinct implementations. Future families cannot route through
 // a belt routine merely because they share a member role.
 const PROFILE_FAMILIES = Object.freeze({
-  BELT: { family: "BELT", executable: true, profiles: PROFILES, build: buildBeltProfile },
-  ORE_ANOMALY: { family: "ORE_ANOMALY", executable: true, profiles: siteProfiles("ore-anomaly", "Ore Anomaly"), build: buildOreAnomalyProfile },
-  ICE: { family: "ICE", executable: true, profiles: siteProfiles("ice", "Ice"), build: buildIceProfile },
+  BELT: { family: "BELT", executable: true, profiles: PROFILES, selfUnload: selfUnloadProfile("belt", "Belt"), build: buildBeltProfile },
+  ORE_ANOMALY: { family: "ORE_ANOMALY", executable: true, profiles: siteProfiles("ore-anomaly", "Ore Anomaly"), selfUnload: selfUnloadProfile("ore-anomaly", "Ore Anomaly"), build: buildOreAnomalyProfile },
+  ICE: { family: "ICE", executable: true, profiles: siteProfiles("ice", "Ice"), selfUnload: selfUnloadProfile("ice", "Ice"), build: buildIceProfile },
   GAS: { family: "GAS", executable: false, profiles: {}, reason: "Gas profiles are not implemented." },
 });
 const familyCapabilities = () => Object.values(PROFILE_FAMILIES).map(({ build, ...metadata }) => metadata);
+
+function selfUnloadProfile(id, name) {
+  return Object.freeze({ scriptID: `mcc.${id}.self-unload.miner`, name: `${name} Miner / Self Unload`, rev: 1 });
+}
 
 function siteProfiles(id, name) {
   return Object.freeze({
@@ -31,7 +35,7 @@ function buildIceProfile(definition, member) { return buildSiteProfile(definitio
 // Shared freight/control structure, distinct versioned semantic profiles. The
 // site modes have operation-only travel authority and never select a belt.
 function buildSiteProfile(definition, member, mode) {
-  const result = buildHaulerServiceDocument(definition, member);
+  const result = buildMiningServiceDocument(definition, member);
   if (!result) return null;
   result.doc.notes = `MCC standard ${definition.area.targetClasses[0]} profile. Operation target authority only.`;
   const body = result.doc.program[0].body;
@@ -41,10 +45,12 @@ function buildSiteProfile(definition, member, mode) {
 }
 
 function standardProfileFor(definition, member) {
-  if ((member?.routineMode || (member?.automationID ? "CUSTOM" : "STANDARD")) !== "STANDARD" || definition?.unloadPolicy !== "HAULER_SERVICE" ||
-      definition.area?.targetClasses?.length !== 1) return null;
+  if ((member?.routineMode || (member?.automationID ? "CUSTOM" : "STANDARD")) !== "STANDARD" ||
+      definition?.area?.targetClasses?.length !== 1) return null;
   const family = PROFILE_FAMILIES[definition.area.targetClasses[0]];
-  return family?.executable ? family.profiles[member.role] || null : null;
+  if (!family?.executable) return null;
+  if (definition.unloadPolicy === "SELF_UNLOAD") return member.role === "MINER" ? family.selfUnload : null;
+  return definition.unloadPolicy === "HAULER_SERVICE" ? family.profiles[member.role] || null : null;
 }
 
 function buildStandardProfile(definition, member) {
@@ -53,10 +59,10 @@ function buildStandardProfile(definition, member) {
 }
 
 function buildBeltProfile(definition, member) {
-  return buildHaulerServiceDocument(definition, member);
+  return buildMiningServiceDocument(definition, member);
 }
 
-function buildHaulerServiceDocument(definition, member) {
+function buildMiningServiceDocument(definition, member) {
   const profile = standardProfileFor(definition, member);
   if (!profile) return null;
   const destination = definition.unloadDestination;
@@ -65,6 +71,10 @@ function buildHaulerServiceDocument(definition, member) {
       !destination.stationName || !destination.systemName) return null;
   const station = { entity: "station", id: destination.stationID, name: destination.stationName, systemName: destination.systemName };
   const belt = { kind: "belt", belt: { mode: "nearest" } };
+  const delivery = { id: "deliver", kind: "macro", macro: "deliver-ore", args: {
+    station: { kind: "station", ref: station },
+    into: { kind: "corpDivision", division: destination.corporationDivision, name: null },
+  } };
   const doc = {
     format: "evejs-bot-script", version: 1, name: profile.name,
     notes: "MCC standard BELT profile. Resource target comes only from operation.currentTarget.",
@@ -75,15 +85,12 @@ function buildHaulerServiceDocument(definition, member) {
         // Drone management is opt-in in the ordinary runner, including every
         // re-entry after jettison. Omitting this toggle leaves a modules-only miner.
         { id: "mine", kind: "macro", macro: "mine-at-belt", args: { belt, drones: { kind: "toggle", enabled: true } }, until: { kind: "ore-hold-at-least", fraction: 0.9 } },
-        { id: "jettison", kind: "macro", macro: "jettison-ore", args: {} },
+        definition.unloadPolicy === "SELF_UNLOAD" ? delivery : { id: "jettison", kind: "macro", macro: "jettison-ore", args: {} },
       ],
     }] : [{
       id: "loop", kind: "loop", repeat: { kind: "forever" }, body: [
         { id: "hold-check", kind: "branch", when: { kind: "ore-hold-at-least", fraction: 0.9 },
-          then: [{ id: "deliver", kind: "macro", macro: "deliver-ore", args: {
-            station: { kind: "station", ref: station },
-            into: { kind: "corpDivision", division: destination.corporationDivision, name: null },
-          } }],
+          then: [delivery],
           else: [
             { id: "undock", kind: "macro", macro: "undock", args: {} },
             { id: "travel", kind: "macro", macro: "travel-to-belt", args: { belt } },

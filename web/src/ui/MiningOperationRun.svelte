@@ -19,11 +19,11 @@
 {/if}
 {#if runtime.startedAt || view.hosted.length || runtime.recoveryRequired || runtime.members.some(member => member.lastHostReason)}
   <section aria-label="Hosted operation timing">
-    <p><strong>Started:</strong> {operationTime(runtime.startedAt)} · <strong>Expires:</strong> {operationTime(view.expiresAt)} · <strong>Remaining:</strong> {operationRemaining(view.remainingMs)}</p>
+    <p><strong>Started:</strong> {operationTime(runtime.startedAt)} · <strong>Expires:</strong> {operationTime(view.expiresAt)} · <strong>Remaining:</strong> {operationRemaining(view.remainingMs)} · <strong>Hosted:</strong> {view.hosted.length} / {runtime.members.length}</p>
     <p class="muted">{stale ? "Last known server state — disconnected/stale" : "Server state"} as of {operationTime(runtime.observedAt)}. Earliest currently hosted required-member expiry, including haulers. Times shown in your local timezone.</p>
     {#if runtime.recoveryRequired}<p class="muted">Started reflects the recovered hosted run; the original pre-crash operation start is unavailable.</p>{/if}
     {#if !view.hosted.length}<p>No active hosted member grants.</p>{/if}
-    {#if view.groups.length > 1}<ul>{#each view.groups as group}<li>{group.names.length} member(s) expire {operationTime(group.expiresAt)} — {group.names.join(", ")}</li>{/each}</ul>{/if}
+    {#if view.grantMismatch}<p class="notice"><strong>Grant mismatch:</strong> Earliest {operationTime(view.expiresAt)} · Latest {operationTime(view.latestExpiresAt)}. Details below.</p>{/if}
     {#each view.warnings as warning}<p class="notice">{warning}</p>{/each}
     {#if view.maximumReached}<p class="notice">Maximum hosted runtime reached: {hostedDurationLabel(policy!.maxRuntimeMinutes)}.</p>
     {:else if view.canExtend && view.hosted.length && !view.choices.length}<p>No offered extension fits a currently running, unexpired member grant under the server policy.</p>{/if}

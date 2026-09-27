@@ -14,6 +14,10 @@ export function miningOperationRunView(runtime: MiningOperationRuntime, policy: 
   const hosted = runtime.members.filter(member => member.hosted);
   const dated = hosted.filter(member => millis(member.expiresAt) !== null);
   const expires = dated.length ? Math.min(...dated.map(member => millis(member.expiresAt)!)) : null;
+  const latest = dated.length ? Math.max(...dated.map(member => millis(member.expiresAt)!)) : null;
+  // Sequential acquisition can stagger otherwise identical grants slightly.
+  // Never round the warning deadline; only suppress noise below five minutes.
+  const grantMismatch = expires !== null && latest !== null && latest - expires >= 5 * 60_000;
   const remainingMs = expires !== null && now !== null ? Math.max(0, expires - now) : null;
   const groups = [...new Set(dated.map(member => member.expiresAt!))].sort().map(expiresAt => ({
     expiresAt, names: dated.filter(member => member.expiresAt === expiresAt).map(member => member.characterName),
@@ -32,12 +36,18 @@ export function miningOperationRunView(runtime: MiningOperationRuntime, policy: 
     .map(member => member.maxRuntimeMinutes ?? 0);
   const soonMs = Math.min(30, Math.max(5, Math.min(...grantMinutes) * 0.1)) * 60_000;
   const warnings: string[] = [];
+  const failed = runtime.members.filter(member => ["FAILED", "error"].includes(member.runtimeState)).length;
+  if (failed) warnings.push(`${failed} failed member(s); see member grants / recovery for details.`);
+  if (hosted.length && hosted.length !== runtime.members.length) warnings.push(`${runtime.members.length - hosted.length} member(s) not hosted. See member grants / recovery for unavailable or fresh-start members.`);
+  if (hosted.some(member => member.hostResumedAt) && !runtime.recoveryRequired) warnings.push("Recovered hosted member present; see member grants / recovery.");
+  const capped = policy ? running.filter(member => member.maxRuntimeMinutes != null && member.maxRuntimeMinutes >= policy.maxRuntimeMinutes).length : 0;
+  if (capped && capped < running.length) warnings.push(`${capped} hosted member(s) at maximum runtime; extension can only be partial.`);
   if (dated.length !== hosted.length || (hosted.length && now === null)) warnings.push("Hosted timing is incomplete; earliest expiry may be unknown.");
   if (remainingMs !== null && remainingMs <= soonMs) {
     warnings.push(remainingMs === 0 ? "Hosted grant deadline reached; cleanup/status confirmation may still be pending." : "Grant expires soon.");
     if (parking) warnings.push("Parking must complete before the hosted grant expires. Remaining time does not guarantee arrival; no travel-time estimate is available.");
   }
-  return { hosted, groups, remainingMs, expiresAt: expires === null ? null : new Date(expires).toISOString(), choices, maximumReached, canExtend, warnings };
+  return { hosted, groups, grantMismatch, latestExpiresAt: latest === null ? null : new Date(latest).toISOString(), remainingMs, expiresAt: expires === null ? null : new Date(expires).toISOString(), choices, maximumReached, canExtend, warnings };
 }
 
 export function operationMemberRecovery(member: MiningOperationRuntime["members"][number], recovery: boolean, observedAt?: string): string {

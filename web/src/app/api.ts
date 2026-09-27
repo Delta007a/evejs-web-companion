@@ -3082,7 +3082,8 @@ function readModuleAction(itemID: number, data: Record<string, JsonValue>): Modu
  * Switch a module on (dogmaIM.Activate).
  *
  * `effect` is optional BY DESIGN: omit it and the server resolves the module's
- * own default activation effect. `repeat` is retail's cycle flag — -1 keeps
+ * own default activation effect. AB/MWD must explicitly name their propulsion
+ * effect to select the physical speed/mass handler. `repeat` is retail's cycle flag — -1 keeps
  * cycling (the default), 0 runs a single cycle. `targetID` is omitted for
  * modules that act on the ship itself.
  */

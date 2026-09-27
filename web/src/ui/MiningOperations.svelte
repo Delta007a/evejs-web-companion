@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { createControlPlanePoll } from "../app/controlPlanePoll.ts";
   import { hostedDurationLabel } from "../bots/hostedRunPolicy.ts";
   import MiningOperationRun from "./MiningOperationRun.svelte";
@@ -43,6 +43,12 @@
   let pollError = $state<string | null>(null);
   let busy = $state<string | null>(null);
   let editing = $state(false);
+  let editor: HTMLFormElement | undefined = $state();
+  async function revealEditor(): Promise<void> {
+    await tick();
+    editor?.scrollIntoView({ block: "start", behavior: "smooth" });
+    editor?.querySelector<HTMLInputElement>('input[name="operationName"]')?.focus({ preventScroll: true });
+  }
   let runtimeMinutes = $state(12 * 60);
   let readiness = $state<Record<string, { key: string; message: string | null }>>({});
 
@@ -82,14 +88,15 @@
   const prefs = $derived(loadHangarPrefs());
   const selectedClasses = $derived([targetFamily]);
   const anchorValid = $derived(anchorSystemID > 0 && anchorSystemName.length > 0 && anchorError === null);
-  const standardAvailable = $derived(targetFamily !== "GAS" && unloadPolicy === "HAULER_SERVICE");
+  const standardAvailable = $derived(targetFamily !== "GAS");
   const resourceMatches = $derived(catalog.filter(row => row.family === (targetFamily === "ICE" ? "ice" : "ore") &&
     !resourceIDs.includes(row.typeID) && row.name.toLocaleLowerCase().includes(resourceQuery.toLocaleLowerCase())).slice(0, 15));
 
   function modeOf(member: DraftMember): "STANDARD" | "CUSTOM" { return member.routineMode ?? (member.automationID ? "CUSTOM" : "STANDARD"); }
-  function profileName(member: DraftMember, family: string = targetFamily): string {
+  function profileName(member: DraftMember, family: string = targetFamily, policy: string = unloadPolicy): string {
     if (modeOf(member) === "CUSTOM") return scripts.find((script) => script.scriptID === member.automationID)?.name ?? "Custom routine";
     const label = family === "BELT" ? "Belt" : family === "ORE_ANOMALY" ? "Ore Anomaly" : family === "ICE" ? "Ice" : null;
+    if (policy === "SELF_UNLOAD") return label && member.role === "MINER" ? `${label} Miner / Self Unload · v1` : "No Standard Self-Unload profile for this role";
     return label === null || member.role === "DEFENDER" ? "Not yet executable" : member.role === "MINER" ? `${label} Miner / Hauler Service · v${family === "BELT" ? 2 : 1}` : `${label} Hauler · v1`;
   }
 
@@ -278,6 +285,7 @@
     ++parkingLookupSerial;
     seedSquadID = "";
     editing = true;
+    void revealEditor();
   }
 
   function editOperation(definition: MiningOperationDefinition): void {
@@ -306,6 +314,7 @@
     parkingMatches = [];
     ++parkingLookupSerial;
     editing = true;
+    void revealEditor();
   }
 
   function addPilot(characterID: number): void {
@@ -450,9 +459,9 @@
   {#if loading}<p class="muted">Loading Mining Command Center…</p>{/if}
 
   {#if editing}
-    <form class="editor" onsubmit={(event) => { event.preventDefault(); void save(); }}>
-      <h3>{operationID ? "Edit operation" : "New operation"}</h3>
-      <label>Name <input required bind:value={name} /></label>
+    <form class="editor" bind:this={editor} onsubmit={(event) => { event.preventDefault(); void save(); }}>
+      <h3>{operationID ? `Editing ${name}` : "New operation"}</h3>
+      <label>Name <input name="operationName" required bind:value={name} /></label>
       <div class="grid2">
         <label>Anchor system <input required value={anchorSystemName} oninput={(event) => void searchSystem(event.currentTarget.value)} placeholder="Search solar systems" autocomplete="off" /></label>
         <label>Anchor system ID <input required type="number" min="1" value={anchorSystemID || ""} oninput={(event) => void resolveSystemID(event.currentTarget.value)} /></label>
@@ -479,10 +488,9 @@
         <label><input type="radio" bind:group={unloadPolicy} value="HAULER_SERVICE" /> Hauler service</label>
         <label><input type="radio" bind:group={unloadPolicy} value="SELF_UNLOAD" /> Self unload</label>
       </fieldset>
-      {#if unloadPolicy === "HAULER_SERVICE"}
         <div class="destination">
-          <h4>Hauler delivery destination</h4>
-          <p class="muted">Standard Hauler requires a known station and corporation division, even when pilots start in space.</p>
+          <h4>{unloadPolicy === "SELF_UNLOAD" ? "Miner delivery destination" : "Hauler delivery destination"}</h4>
+          <p class="muted">Standard profiles require a known station and corporation division, even when pilots start in space.</p>
           <label>Unload station <input value={unloadStationName} oninput={(event) => void searchStation(event.currentTarget.value)} placeholder="Search stations" autocomplete="off" /></label>
           {#if stationMatches.length > 0}<div class="system-matches" role="listbox" aria-label="Matching stations">
             {#each stationMatches as station (station.id)}<button type="button" role="option" aria-selected="false" onclick={() => chooseStation(station)}>{station.name} · {station.systemName}</button>{/each}
@@ -491,7 +499,6 @@
           {#if destinationError}<p class="error" role="status">{destinationError}</p>{/if}
           <label>Corporation division <select bind:value={unloadDivision}>{#each [1, 2, 3, 4, 5, 6, 7] as division}<option value={division}>Division {division}</option>{/each}</select></label>
         </div>
-      {/if}
 
       <fieldset>
         <legend>On manual Stop / Fleet Parking</legend>
@@ -501,7 +508,7 @@
           {#if parkingMatches.length > 0}<div class="system-matches" role="listbox" aria-label="Matching parking stations">
             {#each parkingMatches as station (station.stationID)}<button type="button" role="option" aria-selected="false" onclick={() => chooseParking(station)}>{station.stationName} · {station.systemName}</button>{/each}
           </div>{/if}
-          {#if unloadPolicy === "HAULER_SERVICE" && unloadStationID > 0 && !destinationError}<button type="button" onclick={() => chooseParking({ stationID: unloadStationID, stationName: unloadStationName, systemName: unloadStationSystemName })}>Use hauler delivery station as parking station</button>{/if}
+          {#if unloadStationID > 0 && !destinationError}<button type="button" onclick={() => chooseParking({ stationID: unloadStationID, stationName: unloadStationName, systemName: unloadStationSystemName })}>Use delivery station as parking station</button>{/if}
           {#if parkingStation}<p class="muted">Station {parkingStation.stationID} · {parkingStation.systemName}</p>{/if}
           {#if parkingError}<p class="error" role="status">{parkingError}</p>{/if}
           {#if stopMode === "RETURN_HOME_UNLOAD_DOCK"}
@@ -602,7 +609,7 @@
       <p><strong>Target class / unload:</strong> {row.definition.area.targetClasses.join(", ")} · {row.definition.unloadPolicy === "HAULER_SERVICE" ? "Hauler service" : "Self unload"}</p>
       <p><strong>Standard resources:</strong> {row.definition.policies?.resourcePolicy?.mode === "PREFER_LIST" ? row.definition.policies.resourcePolicy.typeIDs.map(id => catalog.find(resource => resource.typeID === id)?.name ?? `Type ${id}`).join(" → ") + " → any eligible" : "Any eligible"}</p>
       <p><strong>On Stop:</strong> {stopLabels[row.definition.policies?.parking.mode ?? "STAY_IN_PLACE"]}{row.definition.policies?.parking.destination ? ` · ${row.definition.policies.parking.destination.stationName}` : ""}</p>
-      {#if row.definition.unloadPolicy === "HAULER_SERVICE"}<p><strong>Delivery:</strong> {row.definition.unloadDestination ? `${row.definition.unloadDestination.stationName} · Corporation Division ${row.definition.unloadDestination.corporationDivision}` : row.definition.members.some((member) => modeOf(member) === "STANDARD") ? "Not configured — Standard Start blocked" : "Configured in custom routine"}</p>{/if}
+      <p><strong>Delivery:</strong> {row.definition.unloadDestination ? `${row.definition.unloadDestination.stationName} · Corporation Division ${row.definition.unloadDestination.corporationDivision}` : row.definition.members.some((member) => modeOf(member) === "STANDARD") ? "Not configured — Standard Start blocked" : "Configured in custom routine"}</p>
       {#if ["DRAFT", "STOPPED"].includes(row.runtime.state)}<p class={readiness[row.definition.operationID]?.message ? "notice" : "muted"}><strong>Start readiness:</strong> {readiness[row.definition.operationID]?.message ?? "Routine preflight ready; pilot ownership and run grant are checked at Start."}</p>{/if}
       <p><strong>Current target:</strong> {row.runtime.currentTarget?.targetName ?? (["STOPPING", "PARKING", "PARKING_FAILED", "STOPPED"].includes(row.runtime.state) ? "Released / no current target" : "Waiting for selection")} {row.runtime.currentTarget ? `· ${row.runtime.currentTarget.state}` : ""}</p>
       <p><strong>Current system:</strong> {row.runtime.currentTarget?.systemName ?? (row.runtime.currentTarget ? String(row.runtime.currentTarget.systemID) : "No current mining target")}</p>
@@ -614,7 +621,7 @@
       {/each}
       <table>
         <thead><tr><th>Pilot</th><th>Role</th><th>Assignment</th><th>Bot state</th><th>Phase</th></tr></thead>
-        <tbody>{#each row.runtime.members as member (member.characterID)}<tr><td>{member.characterName}</td><td>{member.role}</td><td>{modeOf(member) === "STANDARD" && (row.definition.unloadPolicy !== "HAULER_SERVICE" || row.definition.area.targetClasses.length !== 1) ? "Standard unavailable" : profileName(member, row.definition.area.targetClasses[0])}</td><td>{member.runtimeState}</td><td>{member.runtimeState === "FAILED" ? `${member.failureCode ? `${member.failureCode}: ` : ""}${member.reason ?? member.phase ?? "Unavailable"}` : member.phase ?? member.reason ?? "—"}</td></tr>{/each}</tbody>
+        <tbody>{#each row.runtime.members as member (member.characterID)}<tr><td>{member.characterName}</td><td>{member.role}</td><td>{modeOf(member) === "STANDARD" && row.definition.area.targetClasses.length !== 1 ? "Standard unavailable" : profileName(member, row.definition.area.targetClasses[0], row.definition.unloadPolicy)}</td><td>{member.runtimeState}</td><td>{member.runtimeState === "FAILED" ? `${member.failureCode ? `${member.failureCode}: ` : ""}${member.reason ?? member.phase ?? "Unavailable"}` : member.phase ?? member.reason ?? "—"}</td></tr>{/each}</tbody>
       </table>
       {#if row.runtime.stopFailures.length > 0}<div class="error"><p>Stop / Parking remains incomplete; this operation is not reported stopped.</p>{#each row.runtime.stopFailures as failure}<p>Pilot {failure.characterID}: {failure.message}</p>{/each}</div>{/if}
       {#if row.runtime.history.length > 0}<details><summary>Target history</summary><ul>{#each row.runtime.history as item}<li>{item.at} · {item.kind} · {item.target?.targetName ?? (item.evidence ? JSON.stringify(item.evidence) : "—")}{#if item.kind === "TARGET_SELECTION" && item.evidence}<details><summary>Locality decision</summary><pre>{JSON.stringify(item.evidence, null, 2)}</pre></details>{/if}</li>{/each}</ul></details>{/if}

@@ -241,7 +241,7 @@ import {
 import type { DryBelt, ScriptObservation } from "../nav/scriptConditions.ts";
 import { iceHoldFraction, iceMiningType, siteMiningFitRefusal } from "../nav/miningSite.ts";
 import { ensureSiteLogisticsBookmark } from "../nav/siteLogisticsBookmark.ts";
-import { fittedTravelPropulsion } from "../nav/travelAssist.ts";
+import { fittedTravelPropulsion, travelPropulsionActivation } from "../nav/travelAssist.ts";
 import {
   THREAT_ATTRIBUTE_IDS,
   threatFromAttributes,
@@ -9498,7 +9498,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         release: (owner) => api.releaseContainerClaims(owner, callOptions),
       },
       travelAssist: { change: async (module, on) => {
-        const result = on ? await api.activateModule(module.itemID, { repeat: 0 }, callOptions)
+        const result = on ? await api.activateModule(module.itemID, travelPropulsionActivation(module), callOptions)
           : await api.deactivateModule(module.itemID, { typeID: module.typeID }, callOptions);
         return on ? result.active === true : result.stopped === true;
       } },

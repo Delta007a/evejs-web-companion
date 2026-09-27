@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createTravelAssist, fittedTravelPropulsion, type TravelAssistInput } from "./travelAssist.ts";
+import { createTravelAssist, fittedTravelPropulsion, travelPropulsionActivation, type TravelAssistInput } from "./travelAssist.ts";
+import { readFileSync } from "node:fs";
 import type { SpaceSnapshot } from "../store/types.ts";
 import type { PropulsionModule } from "./propulsion.ts";
 import { recallFlightBeforeManualStop, MANUAL_STOP_RECALL_OBSERVATIONS } from "./miningDroneFlight.ts";
@@ -63,6 +64,15 @@ for (const change of [{ action: { kind: "lootContainer" } }, { action: { kind: "
 test("external active module is neither activated nor stopped by assist", async () => {
   const h = harness(); await h.assist.beforeAction(world({}, 50_000, [2])); await h.assist.requestStop(); assert.deepEqual(h.changes, []);
 });
+
+test("already-active refusal during activation race never acquires another controller's propulsion", async () => {
+  const writes: boolean[] = [];
+  const assist = createTravelAssist({ change: async (_module, on) => { writes.push(on); throw new Error("MODULE_ALREADY_ACTIVE"); }, log: () => {} });
+  await assist.beforeAction(world());
+  await assist.requestStop();
+  assert.equal(assist.pending(), false);
+  assert.deepEqual(writes, [true]);
+});
 test("activation refusal is soft and not retried blindly", async () => {
   const h = harness(true); await h.assist.beforeAction(world());
   for (let i = 0; i < 10; i++) assert.equal(await h.assist.beforeAction(world()), false);
@@ -75,11 +85,35 @@ test("graceful Stop/Parking stops only assist-owned module and verifies its exis
   await blocked.assist.requestStop();
   assert.equal(blocked.assist.pending(), true, "a false off result cannot authorize handing control away");
 });
-test("confirmed completed single cycle can renew while the same observed approach remains useful", async () => {
+test("continuous approach does not flap or restart an externally stopped/expired propulsion cycle", async () => {
   const h = harness(); await h.assist.beforeAction(world());
-  await h.assist.beforeAction(world({ action: { kind: "wait" } }, 40_000, [2]));
+  for (let i = 0; i < 40; i++) await h.assist.beforeAction(world({ action: { kind: "wait" } }, 40_000, [2]));
   await h.assist.beforeAction(world({ action: { kind: "wait" } }, 30_000));
-  assert.deepEqual(h.changes.map(row => row.on), [true, true]);
+  assert.deepEqual(h.changes.map(row => row.on), [true]);
+});
+
+test("AB/MWD explicitly select the physical dogma path and repeat until owned shutdown", () => {
+  assert.deepEqual(travelPropulsionActivation(ab), { effect: "moduleBonusAfterburner", repeat: -1 });
+  assert.deepEqual(travelPropulsionActivation(mwd), { effect: "moduleBonusMicrowarpdrive", repeat: -1 });
+  const flow = readFileSync(new URL("../app/flow.ts", import.meta.url), "utf8");
+  assert.match(flow, /activateModule\(module.itemID, travelPropulsionActivation\(module\), callOptions\)/);
+});
+
+test("cycling acceptance is distinct from physical max-speed and acceleration observations", async () => {
+  const h = harness();
+  const scene = (maxVelocity: number, speed: number, active: number[]) => {
+    const input = world({}, 50_000, active);
+    return { ...input, snapshot: { ...input.snapshot!, ship: { ...input.snapshot!.ship!, maxVelocity, velocity: { x: speed, y: 0, z: 0 } } } };
+  };
+  await h.assist.beforeAction(scene(187, 187, []));
+  assert.match(h.logs[0]!, /awaiting physical effect observation/);
+  for (let i = 0; i < 4; i++) await h.assist.beforeAction(scene(187, 187, [2]));
+  assert.equal(h.logs.filter(row => row.includes("not confirmed")).length, 1);
+  await h.assist.beforeAction(scene(340, 210, [2]));
+  for (let i = 0; i < 8; i++) await h.assist.beforeAction(scene(340, 250, [2]));
+  assert.equal(h.logs.filter(row => row.includes("effect observed")).length, 1);
+  assert.equal(h.logs.filter(row => row.includes("acceleration observed")).length, 1);
+  assert.equal(h.changes.length, 1);
 });
 
 test("deferred propulsion shutdown settles on existing bounded drone-cleanup observations", async () => {

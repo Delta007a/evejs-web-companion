@@ -43,6 +43,23 @@ test("earliest hosted required member includes hauler; mixed expiries and unavai
   assert.equal(miningOperationRunView({ ...value, observedAt: undefined }, policy, false).remainingMs, null);
 });
 
+test("healthy sequential grants stay compact; meaningful mismatch and partial grants stay visible", () => {
+  const value = runtime();
+  const staggered = { ...value, members: value.members.map((member, i) => ({ ...member,
+    expiresAt: new Date(Date.parse(member.expiresAt!) + i * 60_000).toISOString() })) };
+  assert.equal(miningOperationRunView(staggered, policy, false).expiresAt, value.members[0]!.expiresAt);
+  const html = markup(staggered);
+  assert.match(html, /Hosted:/); assert.match(html, /3 \/ 3/);
+  assert.doesNotMatch(html, /Grant mismatch|member\(s\) expire|<details open/);
+  assert.match(html, /Member grants \/ recovery/);
+  const mismatch = { ...value, members: value.members.map((member, i) => i ? member : { ...member, expiresAt: "2026-09-29T00:00:00.000Z" }) };
+  assert.match(markup(mismatch), /Grant mismatch:.*Earliest.*Latest/);
+  const partial = { ...value, state: "DEGRADED", members: value.members.map((member, i) => i ? member : { ...member, hosted: false, runtimeState: "FAILED" }) };
+  assert.match(markup(partial), /1 member\(s\) not hosted/);
+  const capped = { ...value, members: value.members.map((member, i) => i ? member : { ...member, maxRuntimeMinutes: policy.maxRuntimeMinutes }) };
+  assert.match(markup(capped), /extension can only be partial/);
+});
+
 test("extension choices use configured cap, only eligible members count, and maximum is explicit", () => {
   const value = runtime();
   assert.ok(miningOperationRunView(value, policy, false).choices.some(choice => choice.minutes === 1440));

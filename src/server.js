@@ -16783,6 +16783,9 @@ app.post("/api/bridge/targets/unlock", requireAuth, async (req, res, next) => {
 // module's own default activation effect from its typeID. A caller that DOES
 // know (slice B sends "miningLaser") may name one, and combat will name its
 // own — but that is the caller's argument, not this route's business.
+// Exception: AB/MWD must name the SDE propulsion effect explicitly. EveJS
+// dispatches to its physical propulsion handler before generic default-effect
+// resolution; an unnamed effect may cycle without a speed/mass refresh.
 //
 // `repeat` is the retail cycle flag: -1 keeps cycling until something stops it,
 // 0 runs a single cycle. Default -1, the retail default for a held module.
@@ -20178,7 +20181,7 @@ function prepareMiningOperationLaunch(definition) {
           staticData.getSolarSystemName(Number(station.solarSystemID)) !== destination.systemName ||
           !Number.isSafeInteger(destination.corporationDivision) || destination.corporationDivision < 1 || destination.corporationDivision > 7) {
         return { ok: false, code: "STANDARD_UNLOAD_DESTINATION_REQUIRED",
-          message: "Standard Hauler Service needs an explicit known unload station and corporation division 1–7. Edit the operation destination before Start." };
+          message: "Standard mining operations need an explicit known unload station and corporation division 1–7. Edit the operation destination before Start." };
       }
       script = buildStandardProfile(definition, member);
     } else {

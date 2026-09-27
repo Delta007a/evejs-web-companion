@@ -98,8 +98,8 @@ function oreHold(itemIDs: readonly number[]): MiningHold[] {
 // ladder, with only world IO replaced. A successful command is NOT a return:
 // recall stays visible for two further observations before the singleton bay
 // rows reappear in the same format as returned drones in the live logs.
-function standardMinerHarness(dronesEnabled = true, family: "BELT" | "ORE_ANOMALY" | "ICE" = "BELT") {
-  const profile = buildStandardProfile({ area: { targetClasses: [family] }, unloadPolicy: "HAULER_SERVICE",
+function standardMinerHarness(dronesEnabled = true, family: "BELT" | "ORE_ANOMALY" | "ICE" = "BELT", selfUnload = false) {
+  const profile = buildStandardProfile({ area: { targetClasses: [family] }, unloadPolicy: selfUnload ? "SELF_UNLOAD" : "HAULER_SERVICE",
     unloadDestination: { stationID: 60000004, stationName: "Home", systemName: "Jita", corporationDivision: 1 },
   }, { role: "MINER", routineMode: "STANDARD" });
   if (!dronesEnabled) delete profile.doc.program[0].body[1].args.drones;
@@ -119,6 +119,7 @@ function standardMinerHarness(dronesEnabled = true, family: "BELT" | "ORE_ANOMAL
     world = { ...world, ...siteWorld(family), miningModuleIDs: [71], iceMiningModuleIDs: family === "ICE" ? [71] : [],
       snapshot: snapshot([{ ...rock, miningResourceFamily: family === "ICE" ? "ice" : "ore" }]) };
   }
+  if (selfUnload) world = { ...world, miningOperation: { ...world.miningOperation!, unloadPolicy: "SELF_UNLOAD" } };
   const actions: ScriptAction[] = [];
   const logs: BotLogDraft[] = [];
   const runner = createScriptRunner({
@@ -148,6 +149,13 @@ function standardMinerHarness(dronesEnabled = true, family: "BELT" | "ORE_ANOMAL
           activeModuleIDs: a.kind === "activate" ? [a.moduleID] : [] } } }; break;
         case "lock": world = { ...world, lockedTargetIDs: [a.targetID] }; break;
         case "unlock": world = { ...world, lockedTargetIDs: [] }; break;
+        case "startRoute":
+          assert.equal(out.length, 0, "Self-Unload travels only after drone settlement");
+          assert.equal(world.snapshot!.ship!.activeModuleIDs?.length, 0, "mining modules settled before travel");
+          world = { ...world, inSpace: false, docked: true, flightStatus: flight({ inSpace: false, docked: true, stationID: a.stationID }) }; break;
+        case "unloadOre": world = { ...world, holds: oreHold([]), oreHoldFraction: 0, holdEmpty: true }; break;
+        case "undock": world = { ...world, inSpace: true, docked: false, flightStatus: flight() }; break;
+        case "miningMemberReady": world = { ...world, miningOperation: { ...world.miningOperation!, rendezvous: { ...world.miningOperation!.rendezvous!, thisMemberReady: true } } }; break;
         case "jettison":
           assert.equal(out.length, 0, "ore cannot be refilled by a flight while confirming the empty hold");
           world = { ...world, holds: oreHold([]), oreHoldFraction: 0, holdEmpty: true }; break;
@@ -493,6 +501,32 @@ test("tail clear requires readable freight, no pending miner dumps, and 31 empty
     rendezvous: { kind: "MINER_CLEARANCE", required: [1], ready: [], thisMemberReady: false } } }, { emptyChecks: 31 }, {}).action.kind, "wait");
 });
 
+for (const family of ["BELT", "ORE_ANOMALY", "ICE"] as const) test(`${family} Standard Self-Unload settles, delivers and resumes; depletion waits docked for rendezvous`, async () => {
+  const h = standardMinerHarness(true, family, true);
+  const key = h.world.miningOperation!.currentTarget!.targetKey;
+  await h.until(h.working);
+  h.setWorld({ holds: oreHold([901]), holdEmpty: false, oreHoldFraction: 0.91 });
+  await h.until(() => h.count("unloadOre") === 1);
+  await h.until(h.working);
+  assert.equal(h.world.miningOperation!.currentTarget!.targetKey, key);
+  assert.equal(h.count("jettison"), 0);
+  const target = h.world.miningOperation!.currentTarget!;
+  h.setWorld({ holds: oreHold([902]), holdEmpty: false, oreHoldFraction: 0.17,
+    miningOperation: { ...h.world.miningOperation!, currentTarget: { ...target, state: "DEPLETED" },
+      rendezvous: { kind: "SELF_UNLOAD", required: [1, 2], ready: [], thisMemberReady: false } } });
+  await h.until(() => h.count("miningMemberReady") === 1);
+  const trips = h.count("startRoute"), undocks = h.count("undock");
+  for (let i = 0; i < 10; i++) await h.runner.tick();
+  assert.equal(h.count("undock"), undocks, "ready miner waits for peers at delivery station");
+  assert.equal(h.count("startRoute"), trips);
+  assert.equal(h.count("jettison"), 0);
+  assert.equal(h.count("unloadOre"), 2);
+  if (family === "ICE") assert.equal(h.count("launchDrones"), 0);
+  h.setWorld({ miningOperation: { ...h.world.miningOperation!, currentTarget: { ...target, targetKey: `${key}:next` }, rendezvous: null } });
+  await h.until(h.working);
+  assert.equal(h.world.miningOperation!.currentTarget!.targetType, family);
+});
+
 test("nonclear tail keeps looting below threshold; full trip returns to OLD target; ACTIVE 90% unchanged", () => {
   const tail = target({ state: "DRAINING" });
   const op = assignment({ role: "HAULER", logisticsTarget: tail,
@@ -570,7 +604,7 @@ function siteStep(family: "ORE_ANOMALY" | "ICE", travel = false): MacroStep {
     args: { belt: { kind: "belt", belt: { mode: family === "ICE" ? "ice-site" : "site" } } } };
 }
 
-for (const family of ["BELT", "ORE_ANOMALY", "ICE"] as const) for (const role of ["MINER", "HAULER"] as const) for (const ending of ["interaction", "claim-loss", "stop"]) {
+for (const family of ["BELT", "ORE_ANOMALY", "ICE"] as const) for (const role of ["MINER", "HAULER"] as const) for (const ending of ["interaction", "claim-loss", "stop", "pause"]) {
   test(`${family} ${role}: shared runner assists movement, then settles on ${ending}`, async () => {
     const step = role === "HAULER" ? lootStep : family === "BELT" ? beltStep : siteStep(family);
     const profile = buildStandardProfile({ area: { targetClasses: [family] }, unloadPolicy: "HAULER_SERVICE",
@@ -604,6 +638,7 @@ for (const family of ["BELT", "ORE_ANOMALY", "ICE"] as const) for (const role of
     assert.ok(actions.some(a => a.kind === (role === "MINER" ? "orbit" : "approach")));
     const beforeEnd = actions.length;
     if (ending === "stop") await runner.beginGracefulStop();
+    else if (ending === "pause") { runner.pause(); await Promise.resolve(); await Promise.resolve(); }
     else {
       if (ending === "interaction") x = 1_000;
       else claimLost = true;

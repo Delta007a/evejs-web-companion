@@ -50,7 +50,7 @@ test("Fleet Parking uses an explicit station and defaults old definitions to Sta
   const source = readFileSync(new URL("./MiningOperations.svelte", import.meta.url), "utf8");
   assert.match(source, /On manual Stop \/ Fleet Parking/);
   assert.match(source, /definition\.policies\?\.parking.mode \?\? "STAY_IN_PLACE"/);
-  assert.match(source, /Use hauler delivery station as parking station/);
+  assert.match(source, /Use delivery station as parking station/);
   assert.match(source, /resolved\.stationID === Number\(value\)/);
   assert.match(source, /stopMode !== "STAY_IN_PLACE" && \(!parkingStation \|\| parkingError\)/);
   assert.match(source, /Retry parking/);
@@ -92,6 +92,20 @@ test("the dashboard explains a split main body and logistics tail", () => {
   assert.match(source, /Logistics tail/);
   assert.match(source, /main body may relocate/);
   assert.match(source, /DRAINING/);
+});
+
+test("Edit reveals and focuses the populated editor; Self-Unload has explicit delivery and profile display", () => {
+  const source = readFileSync(new URL("./MiningOperations.svelte", import.meta.url), "utf8");
+  const edit = source.slice(source.indexOf("function editOperation"), source.indexOf("function addPilot"));
+  assert.match(edit, /name = definition.name/);
+  assert.match(edit, /editing = true;\s+void revealEditor\(\)/);
+  assert.match(source, /await tick\(\);\s+editor\?\.scrollIntoView/);
+  assert.match(source, /focus\(\{ preventScroll: true \}\)/);
+  assert.match(source, /bind:this=\{editor\}/);
+  assert.match(source, /Editing \$\{name\}/);
+  assert.match(source, /Miner \/ Self Unload · v1/);
+  assert.match(source, /Miner delivery destination/);
+  assert.match(source, /row.definition.area.targetClasses\[0\], row.definition.unloadPolicy/);
 });
 
 test("normal BELT setup defaults to Standard profiles and keeps Custom as Advanced", () => {
