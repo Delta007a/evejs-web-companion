@@ -4,6 +4,25 @@ Open `/pilot-training` on the WC origin. `/goblin-factory` redirects here (308).
 This standalone control plane does not restore a cockpit, claim botHost, or poll space.
 The older `factory*` modules and login alias remain compatibility implementation details.
 
+## Typical workflow
+
+1. Choose **+ New trainee** or **Use existing account**. Creation uses EveJS authority;
+   an ambiguous result offers recovery instead of blindly creating again.
+2. Assign a role and add up to three ship/fitting contracts from the corporation's
+   saved fittings. Fresh roles have no predefined ships. Choose the target contract.
+3. Review FAST requirements derived from the actual hull and fitting. A changed
+   fitting must be accepted again; qualification does not prove equipment ownership.
+4. Optionally configure onboarding, its dedicated non-CEO authority, **Full access
+   (except CEO)**, and a training wallet. Corporation funding covers only the exact
+   personal-wallet shortfall, subject to authoritative permissions.
+5. Review and directly purchase missing skills, then separately review/apply the
+   append-only training queue. Existing queue entries are preserved.
+6. Set an NPC training/provisioning home if useful. This records the intended home;
+   it does not move the pilot, buy equipment or provision a ship.
+
+Install the [supported runtime patches](pilot-training-runtime-setup.md) before using
+live acquisition/onboarding. New accounts retain EveJS development password semantics.
+
 ## Qualification contracts
 
 An explicitly assigned role starts with zero configurations. Add ship lists hulls from
@@ -93,11 +112,10 @@ financial decisions continue reading live wallet authority.
 
 ## Runtime patch and validation
 
-Apply `runtime-patches/pilot-training-generic.patch` only after the prior live Factory
-patch, verifying `previousFeatureSHA256` and `newSHA256` in `runtime-hashes.json`.
-Only the gateway runtime and Factory acquisition helper changed in this increment.
-The tracked helper is identical to its runtime copy. Preserve all other runtime
-changes and mods. Gameplay runtime startup uses the normal configured launcher only.
+Follow the [runtime setup guide](pilot-training-runtime-setup.md) for a fresh install
+or an update from the earlier live-session patch. It explains patch order, the complete
+helper file, expected hashes and line-ending differences. Preserve local mods and use
+the normal launcher/mod-loader startup path. Do not patch a clean upstream reference.
 
 Focused tests cover generic contracts/migration, recursive fitting requirements,
 explicit target binding across review/apply, authority/ownership, onboarding partial

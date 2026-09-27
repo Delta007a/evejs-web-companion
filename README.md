@@ -1,6 +1,24 @@
 # EveJS Web Client
 
-A **no-graphics, browser-based client for [EveJS](../eve.js)** — play EVE Online through
+This experimental integration builds on [Farmer's original Web Companion](https://github.com/rrfarmer/evejs-web-companion)
+and [Tokeiito's subsequent extensions](https://github.com/Tokeiito/evejs-web-companion).
+They created the foundation; Delta's additions below continue that work.
+
+- **[Pilot Training](docs/pilot-training.md)** at `/pilot-training`: new or existing
+  trainees, up to three corporation-fitting qualification contracts per role, direct
+  skill purchase, optional corporation onboarding/funding and reviewed queue application.
+- **[Mining Command Center](docs/mining-command-center.md)** at `/mining-command-center`:
+  coordinated Belt/Ore Anomaly/Ice operations, Hauler Service or Self-Unload, Fleet
+  Parking, locality/resource preferences, Travel Assist and hosted timing/recovery.
+
+GAS, adjacent scouting, dedicated operation Defender execution, equipment provisioning,
+citadel relocation, a general role taxonomy and production password registration are
+not implemented. See [integration history and verification](docs/DELTA-INTEGRATION.md),
+[publication notes](docs/releases/pilot-training-mining-command-center.md), and
+[Pilot Training runtime setup](docs/pilot-training-runtime-setup.md) before upgrading.
+`/goblin-factory` remains a compatibility redirect to `/pilot-training`.
+
+A **no-graphics, browser-based client for EveJS** — play EVE Online through
 a web page instead of the retail 3D client, by driving the **same service calls the
 retail client makes** against the same EveJS handlers.
 
@@ -26,39 +44,20 @@ things the retail client can't do easily:
    automation is a first-class feature: build a bot from ready-made **blocks** (like
    Lego), validate it, and export it as a small JSON file you can share. See
    [The Bot Builder](#the-bot-builder).
-3. **Scale to as many "players" as you want.** Because commands originate in the
-   *browser*, not the server, the server just answers calls — it holds no per-client bot
-   loop and does no client-side thinking. So you can spin up as many browser-driven
-   characters (real or fake/NPC filler) as you have clients to run them, and the world
-   fills with activity that the server still authoritatively validates. The load lives in
-   the clients; the authority stays on the server.
+3. **Run several pilots.** Bots can run in the browser or under an approved WC
+   server-hosted grant. WC sequences their actions; EveJS validates and executes
+   them. Closing a browser does not stop a delegated server-hosted run.
 
-The through-line: **the server is dumb and authoritative, the client is smart and
-disposable.** Closing a tab closes that client — the server never keeps driving it.
+EveJS remains the game authority. Browser and hosted WC controllers share that
+authority boundary and must respect session ownership and graceful cleanup.
 
 ## Architecture — the thin bridge
 
-The standalone [Pilot Training](docs/pilot-training.md) control plane is available at
-`/pilot-training`: corporation-fitting qualification contracts, reviewed queue append,
-direct skill acquisition and optional configured corporation onboarding. Fresh users
-have no predefined ships, authority, training wallet or home. It supports new trainees
-and existing accounts, exact authorized skill funding, and generic NPC training homes;
-equipment provisioning and citadel relocation are not implemented.
-
-The standalone **Mining Command Center** at `/mining-command-center` coordinates
-Standard Belt, Ore Anomaly and Ice operations with Hauler Service or Self-Unload,
-Fleet Parking, explicit delivery/parking destinations, resource preferences and
-Travel Assist. These operations use server-hosted grants and can continue without
-an open cockpit; the browser-only descriptions elsewhere in this historical README
-do not describe that host lifecycle. GAS, adjacent scouting and dedicated operation
-Defender execution remain unsupported. See the [integrated feature status](docs/integration-30-41.md)
-for validation, limitations and links to the feature histories.
-
 ```
-  Browser (Svelte + Vite)                 ← one tab per account; all the "thinking"
+  Browser (Svelte + Vite)                 ← pilot workspaces and control planes
         │  fetch POST /api/bridge/*
         ▼
-  Web BFF  (src/server.js, :26500)        ← relay + session holder; deny-by-default
+  Web BFF  (src/server.js, :26500)        ← bridge, sessions and approved hosted bots
         │  the retail {service, method} call tuple
         ▼
   EveJS gateway (eve.js, :26002)          ← the retail Handle_* handlers, unchanged
@@ -67,8 +66,9 @@ for validation, limitations and links to the feature histories.
   EveJS  = the game, the sole authority   ← owns all state + validation + persistence
 ```
 
-- **Bridge-only.** Every read and every mutation goes through `POST /api/bridge/*` (the
-  retail call tuple, bound objects, the persistent session, flight, chat) or the
+- **Bridge-only.** Gameplay reads and mutations use purpose-built WC endpoints and
+  the EveJS gateway (retail call tuples, bound objects, persistent sessions, flight,
+  chat). Reference data also uses
   login-gated read-only static routes (`/api/map/*`, `/api/names`, `/api/agents/find`)
   that serve EveJS's static reference export the way retail resolves names from its local
   static DB. The web process **never** touches gameplay SQLite.
@@ -109,18 +109,21 @@ routines.
   JSON codec are pure, unit-tested modules under `web/src/bots/`, so the builder shows you
   exactly the logic the runner will execute.
 
-**Where it stands:** the builder (`web/src/ui/BotBuilder.svelte`) can shape, validate, and
-import/export a bot today. The generic block *runner* that drives an arbitrary bot on the
-live session is the next step. The purpose-built loops it generalizes already run
-in-browser and server-authoritative — the autopilot (`web/src/nav/autopilotLoop.ts`),
-mining bot, and mission bot — each a ~2s loop that only *sequences* atomic retail calls
-and reads flight status between them, exactly as retail's `autopilot.py` does. Closing the
-tab stops the bot; the server never advances it on its own.
+**Where it stands:** the builder (`web/src/ui/BotBuilder.svelte`) shapes, validates and
+imports/exports scripts. The script runner executes them in browser or hosted WC
+sessions, sequencing authoritative calls and observations. MCC Standard profiles use
+that runner. Hosted execution requires an approved duration and keeps its own lifecycle
+after the browser closes.
 
 ## Run
 
 Requires Node ≥ 22.18 (the TypeScript unit tests run natively under `node --test` via type
 stripping). EveJS must be running so its gateway is listening on `:26002`.
+
+Pilot Training's live session/acquisition features additionally require the supported
+EveJS 0.12.9 [runtime patches](docs/pilot-training-runtime-setup.md). Set `EVEJS_ROOT`
+in your ignored `.env` to your mutable gameplay copy. Updating WC does not install
+those runtime patches automatically.
 
 ```bash
 npm install
@@ -130,7 +133,9 @@ npm start           # the BFF on http://127.0.0.1:26500
 
 Open `http://127.0.0.1:26500` and sign in with an existing EveJS **account name** and
 **any password** (emulator-style "who cares" login — passwords are not checked; unknown
-names are rejected). The login screen pings the server's health check once on load and
+account creation depends on EveJS development policy). Pilot Training separates
+existing-only login from its explicit **+ New trainee** flow; this is not production
+password registration. The login screen pings the server's health check once on load and
 won't let you attempt a login while EveJS is offline.
 
 For UI iteration, use the hot-reloading dev server instead:
