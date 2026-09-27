@@ -4,7 +4,10 @@ This branch builds on [Farmer's original EveJS Web Companion](https://github.com
 
 The selected gameplay integration was rebuilt from audited Tokeiito base `2dd519ce5a496a2067c4c731a4a3f86858b94f68`. The previous publication included gameplay through `cd258b02e8a8f53b4825e9921efaf12e7c2fdd96` (preceded by public gameplay point `b41344dda95dfd278453050f92d6c5ca9136687f`). The current integrated gameplay/documentation point is `77f5365b1a19367437276b2f708b139ca588c043`, including the accepted Pilot Training and Mining Command Center histories. Normal merges preserve both those histories and the earlier public documentation lineage; this publication does not update to a newer Tokeiito base.
 
-Start with the [publication notes](releases/pilot-training-mining-command-center.md), [Pilot Training guide](pilot-training.md), [Mining Command Center guide](mining-command-center.md) and [runtime patch instructions](pilot-training-runtime-setup.md).
+This document owns integration history, change summaries and verification status.
+Usage belongs in the [Pilot Training guide](pilot-training.md) and
+[Mining Command Center guide](mining-command-center.md); installation belongs in
+the [runtime patch instructions](pilot-training-runtime-setup.md).
 
 ## Integrated behavior
 
@@ -37,60 +40,27 @@ In a later matched steady-load V8 comparison with approximately eight WC miners,
 
 ## Pilot Training
 
-Open `/pilot-training`; `/goblin-factory` is a compatibility redirect. The standalone
-page can read qualifications without taking over a cockpit or hosted bot.
+The accepted Training line adds `/pilot-training` with a `/goblin-factory` redirect,
+new/existing trainee flows, zero-to-three corporation-fitting contracts per role and
+actual recursive FAST prerequisites. It includes optional onboarding through a
+configured non-CEO authority, Full access (except CEO), direct Buy Skill, exact-shortfall
+SELF/configured-wallet funding and separately reviewed append-only queues.
 
-- **New or existing trainees.** Explicit account/character creation reuses EveJS
-  authority and ambiguous-result recovery. Existing-account login stays separate.
-- **Generic qualifications.** Each role starts with zero contracts and supports
-  up to three corporation-saved hull/fitting contracts. Stable configuration IDs,
-  explicit target selection and accepted fitting fingerprints survive migration.
-  FAST closes the actual fitting's recursive prerequisites, without inventing drone
-  requirements for a fitting that has no drones. A changed fitting requires review.
-- **Optional onboarding.** Configure a corporation and a dedicated non-CEO authority.
-  **Full access (except CEO)** grants the supported ordinary/grantable rights without
-  promoting the trainee to Director or transferring CEO ownership. There is no
-  automatic CEO fallback; ambiguous partial work is reported, not blindly replayed.
-- **Direct Buy Skill and exact funding.** No physical skillbooks or market logistics.
-  SELF funding, when authorized, uses the trainee's own authority; an explicitly
-  configured non-CEO fallback can fund the exact personal-wallet shortfall from the
-  selected corporation wallet. Prices, permission and wallet journals are verified.
-- **Separate queue application.** Purchase does not silently apply a queue. Reviewed
-  append-only application preserves existing entries and checks state versions and
-  fitting/plan identity before authoritative post-write verification.
-- **Ownership and home.** Pilot Hangar Release respects existing controller ownership.
-  A configurable NPC training/provisioning home records intent only; it does not
-  relocate or equip the pilot. Equipment readiness remains UNKNOWN.
-
-Existing MINER support policies are retained. Other roles have fitting-based FAST;
-unsupported BALANCED/MASTERY modes stay disabled. This is not a general role taxonomy.
-Live acquisition/onboarding requires the [EveJS 0.12.9 runtime patches](pilot-training-runtime-setup.md).
+Migration retains stable contract targets and accepted fitting identity. Safe Hangar
+Release and temporary-session ownership coexist with hosted bots. NPC home settings
+record training/provisioning intent without implementing relocation or equipment
+provisioning. MINER support policies survive; unsupported support modes stay disabled.
+See the [Training guide](pilot-training.md) for workflow, permissions and failure behavior.
 
 ## Mining Command Center
 
-Open `/mining-command-center` to coordinate operations within the current supported
-anchor-system scope. The control plane uses existing hosted bots and shared target
-authority; it does not add a separate space-polling loop.
-
-- **Belt, Ore Anomaly and Ice** have distinct Standard profiles and authoritative
-  target identity. Ore uses scanner-site identity; Ice requires suitable Ice
-  Harvesters and does not use ordinary Mining Drones. Defensive combat-drone handling
-  is separate from the unsupported dedicated operation Defender role.
-- **Hauler Service** coordinates miner dumping and hauler delivery. Depletion retains
-  final partial delivery, DRAINING, ordered logistics tails, grid/freight confirmation
-  and catch-up without prematurely declaring an unfinished tail complete.
-- **Self-Unload** settles modules/drones, delivers at the configured threshold,
-  confirms empty mining freight, then returns to the current authoritative target.
-- **Fleet Parking** is an explicit Stop policy with a destination separate from the
-  delivery station. Failed cleanup or travel cannot be reported as successful parking.
-- **Locality and resource preferences** guide eligible target selection while shared
-  reservations remain authoritative.
-- **Travel Assist** explicitly activates physical AB/MWD effects, maintains an owned
-  module through the same approach, and shuts it down near the target or on target
-  change/loss. It does not switch off externally activated propulsion.
-- **Hosted timing/recovery** exposes approved duration, remaining time, extensions,
-  partial grants and restart recovery. Existing restart-safety restrictions remain;
-  interrupted miners are not blindly restarted.
+The accepted MCC line adds `/mining-command-center`: Belt/Ore Anomaly/Ice families,
+Hauler Service and Self-Unload, separate Fleet Parking destinations, locality/resource
+preferences, physical AB/MWD Travel Assist and hosted timing/recovery. Logistics retains
+DRAINING, final partial deliveries, ordered tails and catch-up. Ice uses Ice Harvesters,
+not ordinary Mining Drones. Existing target/session authority and restart-safety rules
+survive without a separate space-polling loop. See the [MCC guide](mining-command-center.md)
+for operation setup, logistics, Stop and propulsion behavior.
 
 **GAS is unsupported.** Adjacent-system scouting, dedicated operation Defender
 execution and operation-owned container scopes are not implemented; existing BFF

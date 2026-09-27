@@ -13,8 +13,7 @@ They created the foundation; Delta's additions below continue that work.
 
 GAS, adjacent scouting, dedicated operation Defender execution, equipment provisioning,
 citadel relocation, a general role taxonomy and production password registration are
-not implemented. See [integration history and verification](docs/DELTA-INTEGRATION.md),
-[publication notes](docs/releases/pilot-training-mining-command-center.md), and
+not implemented. See [integration history and verification](docs/DELTA-INTEGRATION.md) and
 [Pilot Training runtime setup](docs/pilot-training-runtime-setup.md) before upgrading.
 `/goblin-factory` remains a compatibility redirect to `/pilot-training`.
 
