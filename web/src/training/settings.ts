@@ -1,4 +1,11 @@
 import type { FactoryStorage } from "./factory.ts";
+export interface TrainingCorporation { corporationID: number; name: string; divisions: { accountKey: number; name: string }[] }
+export interface TrainingAuthority { key: string; name: string; account: string; corporationID: number; eligible: boolean }
+export interface TrainingSettingsContext {
+  corporations: TrainingCorporation[];
+  authorities: { characterID: number; name: string; corporationID: number; eligible: boolean }[];
+}
+export interface TrainingHomeMatch { id: number; name: string; kind: "station"; solarSystemID: number | null; solarSystemName: string | null }
 export interface TrainingSettings {
   onboarding: { enabled: boolean; corporationID: number | null; rights: "NONE" | "FULL_ACCESS_EXCEPT_CEO"; authorityKey: string };
   trainingWallet: { corporationID: number; accountKey: number } | null;

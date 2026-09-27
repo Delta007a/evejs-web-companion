@@ -51,7 +51,9 @@ test("stage details render review identity, skill distinctions and only the sele
 test("Factory mounts without a store, cockpit, selected pilot or premature empty roster", () => {
   const html = render(GoblinFactory).body;
   assert.match(html, /Pilot Training/);
-  assert.match(html, /Existing account/);
+  assert.match(html, /Use existing account/);
+  assert.match(html, /\+ New trainee/);
+  assert.doesNotMatch(html, /aria-label="Existing account"/); // form opens only after explicit choice
   assert.match(html, /Loading known accounts/);
   assert.doesNotMatch(html, /No available pilots yet/);
   for (const file of ["GoblinFactory.svelte", "MinerQualification.svelte"]) {

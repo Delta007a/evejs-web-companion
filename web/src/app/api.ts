@@ -4459,13 +4459,17 @@ export async function salvageDrones(
 // --- Pilot Training: account-owned read-only qualification -------------------
 
 /** Existing accounts only; no cookie/global-token change and no pilot selection. */
-export async function loginFactoryAccount(username: string, options: ApiOptions = {}): Promise<{ account: string; token: string }> {
-  const data = await postJson("/api/pilot-training/login", { username }, { ...options, token: null });
+export async function loginFactoryAccount(username: string, options: ApiOptions = {}, password?: string): Promise<{ account: string; token: string }> {
+  const data = await postJson("/api/pilot-training/login", { username, ...(password === undefined ? {} : { password }) }, { ...options, token: null });
   const account = data.account as { username?: unknown } | null;
   if (typeof data.sessionToken !== "string" || !data.sessionToken || typeof account?.username !== "string") {
     throw new BridgeCallError("BRIDGE_BAD_RESPONSE", "Account authentication is incomplete.", 502);
   }
   return { account: account.username, token: data.sessionToken };
+}
+export interface TrainingAccountOutcome { status: "ACCOUNT_CREATED" | "ACCOUNT_RECOVERED" | "ACCOUNT_CONFIRMED" | "RECOVERY_REQUIRED"; account: { username: string; accountID: number } | null; message?: string }
+export async function trainingAccount(action: "create" | "recover", username: string, options: ApiOptions = {}): Promise<TrainingAccountOutcome> {
+  return await postJson(`/api/pilot-training/accounts/${action}`, { username, ...(action === "create" ? { confirm: true } : {}) }, { ...options, token: null }) as unknown as TrainingAccountOutcome;
 }
 
 export async function reviewSkillAcquisition(body: unknown, options: ApiOptions = {}): Promise<import("../training/types.ts").AcquisitionReview> {
@@ -4479,6 +4483,12 @@ export async function trainingOnboarding(action: "review" | "apply", body: unkno
 }
 export async function resolveTrainingHome(locationID: number, options: ApiOptions): Promise<import("../training/settings.ts").TrainingSettings["home"]> {
   return (await getJson(`/api/pilot-training/home?locationID=${locationID}`, options)).home as unknown as import("../training/settings.ts").TrainingSettings["home"];
+}
+export async function loadTrainingSettingsContext(options: ApiOptions): Promise<import("../training/settings.ts").TrainingSettingsContext> {
+  return await getJson("/api/pilot-training/settings-context", options) as unknown as import("../training/settings.ts").TrainingSettingsContext;
+}
+export async function searchTrainingHomes(query: string, options: ApiOptions): Promise<{ matches: import("../training/settings.ts").TrainingHomeMatch[]; capped: boolean }> {
+  return await getJson(`/api/pilot-training/homes?q=${encodeURIComponent(query)}`, options) as unknown as { matches: import("../training/settings.ts").TrainingHomeMatch[]; capped: boolean };
 }
 
 export async function factoryOwnership(characterID: number, options: ApiOptions = {}): Promise<{ owner: string; online: boolean }> {

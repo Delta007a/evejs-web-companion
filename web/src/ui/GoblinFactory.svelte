@@ -2,6 +2,10 @@
   import { onMount, onDestroy } from "svelte";
   import { loadKnownCharacters } from "../app/knownCharacters.ts";
   import CharacterCreate from "./CharacterCreate.svelte";
+  import NewTrainee from "./NewTrainee.svelte";
+  import { loadTrainingSettingsContext, searchTrainingHomes } from "../app/api.ts";
+  import type { TrainingSettingsContext, TrainingAuthority } from "../training/settings.ts";
+  import { rememberCreatedAccount, type continueNewTrainee } from "../training/newTrainee.ts";
   import { trainingOnboarding, resolveTrainingHome, loadQualification, createCharacter, type CreateCharacterRequest } from "../app/api.ts";
   import { loadTrainingCharacters, reviewTrainingQueue, applyTrainingQueue, reviewSkillAcquisition, acquireFactorySkills, factoryOwnership, type ApiOptions } from "../app/api.ts";
   import { BridgeCallError } from "../bridge/callMethod.ts";
@@ -22,6 +26,23 @@
   import TrainingSettingsPanel from "./TrainingSettings.svelte";
   import { defaultTrainingSettings, readTrainingSettings, saveTrainingSettings, type TrainingSettings } from "../training/settings.ts";
   let settings = $state<TrainingSettings>(defaultTrainingSettings());
+  let settingsContexts = $state<Record<string, TrainingSettingsContext>>({});
+  let settingsErrors = $state<Record<string, string>>({});
+  const corporations = $derived([...new Map(Object.values(settingsContexts).flatMap((value) => value.corporations).map((c) => [c.corporationID, c])).values()]);
+  const settingsAuthorities = $derived<TrainingAuthority[]>(Object.entries(settingsContexts).flatMap(([account, context]) =>
+    context.authorities.map((a) => ({ ...a, account, key: keyOf(account, a.characterID) }))));
+  async function readSettingsContext(account: string, options: ApiOptions, ticket: number) {
+    settingsContexts = Object.fromEntries(Object.entries(settingsContexts).filter(([name]) => name !== account));
+    try { const value = await loadTrainingSettingsContext(options); if (ticket === generation) {
+      settingsContexts = { ...settingsContexts, [account]: value }; settingsErrors = { ...settingsErrors, [account]: "" };
+    } } catch { if (ticket === generation) settingsErrors = { ...settingsErrors, [account]: `Corporation settings unavailable for ${account}.` }; }
+  }
+  function settingsOptions() {
+    const options = credentials.values().next().value;
+    if (!options) throw new Error("Authenticate an account first.");
+    return options;
+  }
+  async function searchHomes(query: string) { return searchTrainingHomes(query, settingsOptions()); }
   let onboardingReview = $state<{ rowKey: string; value: Record<string, any>; settingsHash: string } | null>(null);
   let onboardingMessage = $state("");
   function saveSettings(value: TrainingSettings) {
@@ -76,6 +97,9 @@
   let accounts = $state<string[]>([]);
   let accountErrors = $state<Record<string, string>>({});
   let accountInput = $state("");
+  let accountPassword = $state("");
+  let accountPanel = $state<"NEW" | "EXISTING" | null>(null);
+  let creatorInitialName = $state("");
   let busy = $state(false);
   let ready = $state(false);
   let error = $state("");
@@ -139,11 +163,13 @@
   }
   async function readAccount(account: string, ticket: number): Promise<void> {
     // Account and pilot reads are serialized; a refresh never competes with an edit.
+    settingsContexts = Object.fromEntries(Object.entries(settingsContexts).filter(([name]) => name !== account));
     rows = rows.map((row) => row.account === account ? { ...row, result: null, readAt: null, review: null, queue: null } : row);
     try {
       const roster = await readFactoryAccount(account);
       if (ticket !== generation) return;
       credentials.set(roster.account, roster.requestOptions);
+      await readSettingsContext(roster.account, roster.requestOptions, ticket);
       const fresh = roster.characters.map((pilot) => makeRow(roster.account, pilot));
       rows = [...rows.filter((row) => row.account !== account && row.account !== roster.account), ...fresh];
       accounts = [...new Set(accounts.map((name) => name === account ? roster.account : name))];
@@ -153,6 +179,7 @@
     } catch (cause) {
       if (ticket !== generation) return;
       const reason = panelErrorWords(cause);
+      settingsErrors = { ...settingsErrors, [account]: `Authenticate ${account} to load its corporation settings.` };
       accountErrors = { ...accountErrors, [account]: reason };
       rows = rows.map((row) => row.account === account ? { ...row, result: null, readAt: null, error: reason } : row);
     }
@@ -171,17 +198,28 @@
     busy = true; error = "";
     const ticket = ++generation;
     try {
-      const roster = await readFactoryAccount(name);
+      const roster = await readFactoryAccount(name, {}, accountPassword);
       if (ticket !== generation) return;
       rememberFactoryAccount(localStorage, roster.account);
       accounts = [...new Set([...accounts, roster.account])];
       credentials.set(roster.account, roster.requestOptions);
       rows = [...rows.filter((row) => row.account !== roster.account), ...roster.characters.map((pilot) => makeRow(roster.account, pilot))];
       accountInput = "";
+      await readSettingsContext(roster.account, roster.requestOptions, ticket);
       accountErrors = { ...accountErrors, [roster.account]: roster.characters.length ? "" : "No characters on this account." };
       for (const row of rows.filter((candidate) => candidate.account === roster.account)) await readPilot(row, ticket);
     } catch (cause) { if (ticket === generation) error = panelErrorWords(cause); }
-    finally { if (ticket === generation) busy = false; }
+    finally { accountPassword = ""; if (ticket === generation) busy = false; }
+  }
+  function newAccountReady(result: Awaited<ReturnType<typeof continueNewTrainee>>) {
+    accounts = [...new Set([...accounts, result.account])];
+    credentials.set(result.account, result.requestOptions);
+    rows = [...rows.filter((r) => r.account !== result.account), ...result.characters.map((pilot) => makeRow(result.account, pilot))];
+    accountPanel = null; creatorInitialName = result.characterName;
+    creatingAccount = result.characters.length === 0 ? result.account : null;
+    error = rememberCreatedAccount(localStorage, result.account);
+    if (result.characters.length) error += " Recovered account already has characters. Inspect its roster before creating another.";
+    void readSettingsContext(result.account, result.requestOptions, generation);
   }
   async function changePreferences(row: PilotRow, prefs: TrainingPreferences): Promise<void> {
     if (busy) return;
@@ -333,28 +371,36 @@
     <div><p class="eyebrow">EveJS Web · control plane</p><h1>Pilot Training</h1><p>Corporation fitting qualifications and reviewed training queue append</p></div>
     <nav><a href="/" target="_blank" rel="noopener">Pilot Hangar</a><button type="button" class="minor" disabled={busy || !ready} onclick={refresh}>{busy ? "Reading…" : "Refresh roster"}</button></nav>
   </header>
+  <div class="factory-controls">
+    <button type="button" disabled={busy || !ready || !!creatingAccount} onclick={() => accountPanel = "NEW"}>+ New trainee</button>
+    <button type="button" class="minor" disabled={busy || !ready || !!creatingAccount} onclick={() => accountPanel = accountPanel === "EXISTING" ? null : "EXISTING"}>Use existing account</button>
+  </div>
+  {#if accountPanel === "NEW"}<NewTrainee externalBusy={busy} onContinue={newAccountReady} onBusy={(value) => busy = value} onCancel={() => accountPanel = null} />{/if}
   <p class="note">Skill qualification does not establish equipment readiness. Qualification and queue reads stay offline. Skill acquisition explicitly opens temporary live sessions for free pilots and releases them afterward.</p>
-  <TrainingSettingsPanel {settings} {busy} authorities={rows.map((r) => ({ key: r.key, label: `${r.account} · ${r.pilot.name}` }))} onSave={saveSettings} onResolve={resolveHome} />
+  <TrainingSettingsPanel {settings} {busy} {corporations} authorities={settingsAuthorities} contextError={Object.values(settingsErrors).filter(Boolean).join(" ")} onSave={saveSettings} onResolve={resolveHome} onSearch={searchHomes} />
   {#if onboardingMessage}<p role="status">{onboardingMessage}</p>{/if}
   {#if onboardingReview}
     <p>Onboarding: pilot {onboardingReview.value.characterID} → corporation {onboardingReview.value.corporationID}; authority {onboardingReview.value.authorityID}; rights {onboardingReview.value.rights}. CEO {onboardingReview.value.ceoID} stays unchanged.</p>
     <button type="button" disabled={busy} onclick={() => { const r = rows.find((r) => r.key === onboardingReview?.rowKey); if (r) void onboard(r, true); }}>Confirm reviewed onboarding / rights</button>
   {/if}
+  {#if accountPanel === "EXISTING"}
   <form class="factory-controls" onsubmit={addAccount}>
     <label>Existing account <input aria-label="Existing account" bind:value={accountInput} disabled={busy || !ready} placeholder="Account name" autocomplete="username" /></label>
+    <label>Password <input type="password" bind:value={accountPassword} autocomplete="current-password" disabled={busy} /></label>
     <button class="minor" disabled={busy || !ready || !accountInput.trim()}>Sign in / add to roster</button>
     <span class="note">Normal WC authentication; unknown names are refused. No account creation.</span>
   </form>
+  {/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   {#each Object.entries(accountErrors).filter(([, message]) => message) as [account, message] (account)}
     <p class="error">{account}: {message}</p>
   {/each}
   {#if creatingAccount}
     <section><h2>Create on account: {creatingAccount}</h2>
-      <CharacterCreate flow={creatorFlow(creatingAccount)} onCancel={() => creatingAccount = null}
+      <CharacterCreate initialName={creatorInitialName} flow={creatorFlow(creatingAccount)} onCancel={() => creatingAccount = null}
         onCreated={(id) => { if (creatingAccount) void created(creatingAccount, id); }} />
     </section>
-  {:else}
+  {:else if accountPanel === "EXISTING"}
     <div class="factory-controls">
       <label>New trainee account <select bind:value={newTraineeAccount} disabled={busy}>
         <option value="">Choose an authenticated account</option>
@@ -362,7 +408,7 @@
         <option value={account}>{account}</option>
       {/each}
       </select></label>
-      <button class="minor" type="button" disabled={busy || !newTraineeAccount} onclick={() => creatingAccount = newTraineeAccount}>Open character creator</button>
+      <button class="minor" type="button" disabled={busy || !newTraineeAccount} onclick={() => { creatorInitialName = ""; creatingAccount = newTraineeAccount; }}>Open character creator</button>
       <span class="note">Uses the existing character creator; authoritative free slots are checked before creation.</span>
     </div>
   {/if}
@@ -372,7 +418,7 @@
     <span>{visible.length} / {rows.length} pilots</span>
   </div>
   {#if !ready}<p>Loading known accounts…</p>{/if}
-  {#if ready && !busy && rows.length === 0}<p>No available pilots yet. Sign in with an existing account above.</p>{/if}
+  {#if ready && !busy && rows.length === 0}<p>No pilots yet. Create a new trainee or use an existing account above.</p>{/if}
   <div class="factory-roster">
     {#each visible as row (row.key)}
       {@const report = row.result?.report}

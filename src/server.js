@@ -18,6 +18,8 @@ const { createTrainingQueueService } = require("./pilotTrainingQueue");
 const { createFactorySessions } = require("./factorySessions");
 const { createFactorySkills } = require("./factorySkills");
 const { createTrainingOnboarding } = require("./trainingOnboarding");
+const { readTrainingSettingsContext } = require("./trainingSettingsRead");
+const { createTrainingAccounts } = require("./trainingAccounts");
 const { createCharacterCreation } = require("./characterCreation");
 const config = require("./config");
 const botScriptStoreModule = require("./botScriptStore");
@@ -66,6 +68,7 @@ const gateway = options.eveGatewayClient || eveGatewayClient;
 const auth = options.webAuth || webAuth;
 const staticData = options.staticData || staticDataModule;
 const trainingQueues = createTrainingQueueService({ store, gateway, data: staticData });
+const trainingAccounts = createTrainingAccounts({ store });
 const characterCreation = createCharacterCreation({ call: (...args) => accountLevelCall(...args) });
 // The player Bot Builder library — web-app data in data/bot-scripts.json, keyed
 // PLATFORM-WIDE (every account sees every saved bot). Never eve.js's store; this
@@ -359,6 +362,15 @@ app.get("/api/health", async (req, res) => {
 // src/webAuth.js verifyWebPassword/upsertWebPassword, data/web-users.json, and
 // `npm run webpass` stay in place (data-preservation rule) but are deprecated
 // for login.
+// Explicit registration, separate from existing-only Training login. Like normal
+// WC login this requires no prior cockpit/account token. JSON confirmation and
+// the gateway's devAutoCreateAccounts policy remain required; no cookie is set.
+for (const action of ["create", "recover"]) {
+  app.post(`/api/pilot-training/accounts/${action}`, async (req, res, next) => {
+    try { res.json({ ok: true, ...await trainingAccounts[action](req.body || {}) }); }
+    catch (error) { next(error); }
+  });
+}
 app.post(["/api/login", "/api/goblin-factory/login", "/api/pilot-training/login"], async (req, res, next) => {
   // Factory authentication uses the normal web token, but must never create a
   // game account or replace the cookie used by an existing cockpit.
@@ -18496,6 +18508,17 @@ for (const action of ["review", "apply"]) {
     } catch (error) { next(error); }
   });
 }
+app.get("/api/pilot-training/settings-context", requireTrainingAuth, async (req, res, next) => {
+  try { res.json({ ok: true, ...await readTrainingSettingsContext({ account: req.account, store, gateway }) }); }
+  catch (error) { next(error); }
+});
+app.get("/api/pilot-training/homes", requireTrainingAuth, (req, res, next) => {
+  try {
+    const q = String(req.query.q || "").trim().slice(0, 120);
+    const result = staticData.findMapLocations({ q, kind: "station", limit: 25 });
+    res.json({ ok: true, matches: result.matches, capped: result.capped });
+  } catch (error) { next(error); }
+});
 app.get("/api/pilot-training/home", requireTrainingAuth, async (req, res, next) => {
   try {
     const id = Number(req.query.locationID);

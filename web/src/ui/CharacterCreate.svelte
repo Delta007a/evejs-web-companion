@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   // Create a character. Reached from the select screen, and the only way off it
   // on an account with no characters at all.
   //
@@ -39,12 +40,14 @@
   import type { AppFlow } from "../app/flow.ts";
   import { panelErrorWords } from "../bridge/refusals.ts";
 
-  let { flow, onCancel, onCreated }: {
+  let { flow, onCancel, onCreated, initialName = "" }: {
     flow: Pick<AppFlow, "requestOptions" | "createCharacter">;
     /** Back to the character list without creating anything. */
     onCancel: () => void;
     /** The new pilot exists and the roster has been re-read. */
     onCreated: (characterID: number | null) => void;
+    /** Convenience prefill only; normal name validation is unchanged. */
+    initialName?: string;
   } = $props();
 
   let tables = $state<CharCreationTables | null>(null);
@@ -53,7 +56,7 @@
   let raceID = $state(0);
   let ancestryID = $state(0);
   let genderID = $state(1);
-  let name = $state("");
+  let name = $state(untrack(() => initialName));
 
   let nameCode = $state<number | null>(null);
   let nameChecking = $state(false);

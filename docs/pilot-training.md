@@ -180,3 +180,97 @@ manifest are committed in WC30. Other previous runtime patch files retained thei
 - Independent read-only reviews: GPT-6 Sol / High (authority/lifecycle/funding) and
   GPT-6 Luna / High (generic model/migration/UI). Reported issues were corrected and
   rereviewed; neither review left an actionable finding in its reviewed scope.
+
+## UX polish and new trainee integration — 2026-09-27
+
+Starting commit: `df9d1869054cd2a23afef4943422e6b33d239ef5` on
+`feature/pilot-training-readonly`. This increment changes WC30 only. Runtime source,
+mods, `.env`, role registry, qualification logic and gameplay mutation policies are
+unchanged. Custom/future role taxonomy remains deferred.
+
+### Settings
+
+`GET /api/pilot-training/settings-context` authenticates the account, reads its owned
+characters and uses `corpRegistry.GetCorporation` / `GetMember` without selecting a
+pilot. It resolves corporation and wallet division names, checks corporation identity,
+excludes CEOs and non-Directors from the authority choices, and rereads membership.
+These are picker choices; existing mutation-time permission checks remain authoritative.
+Unreadable choices are shown unavailable without erasing stored IDs.
+
+The normal UI shows corporation name, authority character name, Full access (except
+CEO), and named wallet divisions. The wallet normally inherits the selected corporation.
+Previously saved different-corporation wallets remain preserved and visible under
+Advanced details. Internal IDs and rights enum are read-only technical details.
+
+`GET /api/pilot-training/homes?q=...` uses the existing static map search, restricted
+to NPC stations and at most 25 results. Selecting a result calls the existing `/home`
+resolver before saving. No relocation occurs; player-structure relocation remains
+unsupported. The `pilot-training:settings:v1` schema/key is reused without migration
+or new defaults. Fresh onboarding remains disabled/unconfigured.
+
+### New trainee and account authority
+
+`+ New trainee` opens an explicit account form. `Use existing account` stays a
+separate existing-only login/character-creator path. Account/character names may
+differ; same-name convenience only prefills the existing `CharacterCreate` component.
+Its appearance, name validation, slot validation and ambiguous-create recovery remain.
+
+Authority chain: `POST /api/pilot-training/accounts/create` -> `trainingAccounts`
+-> `eveStore.createAccount` -> existing gateway `POST /_evejs-web/v1/account/create`
+-> runtime `createAccount` -> account owner module and flush. WC does not write DB rows
+or pass browser account IDs/roles. Registration, like normal WC login, has no prior
+cockpit token; runtime `devAutoCreateAccounts` policy still controls availability.
+Registration never sets the cockpit cookie. After authoritative confirmation the
+flow uses normal isolated Training login and roster reread, then the existing creator.
+
+The user explicitly withdrew the requirement to be independent of disabled password
+validation. The current gateway stores an empty password hash and creates the same
+GM/admin defaults as its existing development registration path. This increment does
+not add production password registration. The form explains the limitation; password
+confirmation is client-side, the value is used only for normal WC authentication,
+cleared on every attempt/cancel, and never stored in Pilot Training preferences,
+recovery markers, URLs or diagnostics. No password subsystem was changed.
+
+Creation checks availability, dispatches once and rereads authoritative identity.
+Ambiguous responses permit read recovery only through `/accounts/recover`. In-memory
+pending guards use exact case-sensitive names and retain only unresolved attempts.
+`pilot-training:pending-account:v1` in sessionStorage contains account/character names
+only, allowing F5 recovery without resending creation. An existing account is refused
+by new-create preflight. Recovered accounts with characters do not automatically open
+another creator. A browser account-list persistence failure is a warning after the
+authenticated in-memory creator handoff, not a lost successful creation.
+
+### Validation and acceptance
+
+- 179 distinct focused tests passed. The consolidated run passed 178 and skipped
+  its optional runtime-data case; that case then passed separately with the current
+  `.env`. Coverage includes account recovery, authenticated settings reads, bounded
+  station search/resolution, unchanged settings schema, character creation safety,
+  generic contracts, onboarding, funding, fittings, queue writes and UI rendering.
+- TypeScript and `npm run build:web` passed; existing unrelated accessibility and
+  bundle-size warnings remain. All changed JS files passed `node --check`.
+- Independent GPT-6 Sol / High review corrected case-sensitive account guards,
+  completed-attempt retention, competing page/form busy state and fallible browser
+  persistence after authentication. Regressions passed; final review had no blockers.
+- Yandex-only nonmutating QA: page loaded, new trainee form opened/cancelled without
+  submission, existing BMiner10 authenticated without cockpit selection, station
+  search by `4C-B7X` returned and resolved the correct Chemal Tech Factory, Advanced
+  details retained the expected IDs, and F5 preserved settings. No new account or
+  character was created, and no onboarding, purchase, transfer or queue apply ran.
+- Existing saved values survived: Marked By Luck / 98000002, BHauler1 / 140000022,
+  FULL_ACCESS_EXCEPT_CEO, Wallet Division 1 / 1000, home 60010825 / system 30004504.
+  BMiner10 remained MINER, Pioneer / Simulated Pioneer Fitting, FAST, highest proven
+  Pioneer, IDLE queue, Already trained ETA, equipment UNKNOWN. Accepted fit configuration
+  remained unchanged. Password non-persistence was verified by source/in-memory tests;
+  no password was submitted or saved during live browser QA.
+
+### Process cleanup for this increment
+
+- Start: no WC30 listener. Normal modded runtime PID 19268 was already running under
+  launcher PID 24564 (`G:\EVESP\EveJS-Launcher-V1\EveJS-Launcher-V1.exe`).
+- QA: WC30 PID 51180, short-lived helper shell PID 44916, port 127.0.0.1:26500.
+  Started with `startServer({resumeServerBots:false})`; no persisted bots resumed.
+- End: verified identity, stopped WC30 PID 51180, confirmed helper 44916 already
+  exited and no listener remained on 26500. Runtime 19268 and launcher 24564 remain
+  running with the original five mod loaders. No direct runtime process was started.
+- No runtime files/hashes changed in this increment; no merge, push or promotion.
