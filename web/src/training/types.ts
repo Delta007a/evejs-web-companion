@@ -128,3 +128,23 @@ export interface QueueApplyOutcome {
   readonly fresh: MinerTrainingRead | null;
   readonly queue: TrainingQueue | null;
 }
+
+export type FundingPolicy = "CHARACTER_WALLET_ONLY" | "CHARACTER_PLUS_CORPORATION_SHORTFALL";
+export interface FactoryFunding { readonly characterID: number; readonly token: string }
+export interface AcquisitionReview {
+  readonly reviewID: string | null; readonly expiresAt: number; readonly canAcquire: boolean;
+  readonly mode: string; readonly stage: string; readonly characterID: number;
+  readonly skills: readonly { typeID: number; name: string; price: string }[];
+  readonly total: string; readonly personalBalance: string; readonly shortfall: string;
+  readonly policy: FundingPolicy; readonly blockers: readonly string[];
+  readonly funding: { readonly characterID: number; readonly corporationID: number; readonly division: number; readonly balance: string } | null;
+  readonly cleanup: readonly { characterID: number; released: boolean; code: string | null }[];
+}
+export interface AcquisitionOutcome {
+  readonly status: string; readonly verified: boolean; readonly message: string; readonly errorCode?: string | null;
+  readonly mode: string; readonly stage: string; readonly at: number;
+  readonly purchased?: readonly number[]; readonly missing?: readonly number[];
+  readonly funded?: string | null; readonly wallet?: string | null; readonly total?: string;
+  readonly readyForQueueReview?: boolean;
+  readonly cleanup: AcquisitionReview["cleanup"]; readonly fresh: MinerTrainingRead | null;
+}

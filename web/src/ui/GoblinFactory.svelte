@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { loadKnownCharacters } from "../app/knownCharacters.ts";
-  import { loadTrainingCharacters, reviewTrainingQueue, applyTrainingQueue, type ApiOptions } from "../app/api.ts";
+  import { loadTrainingCharacters, reviewTrainingQueue, applyTrainingQueue, reviewSkillAcquisition, acquireFactorySkills, factoryOwnership, type ApiOptions } from "../app/api.ts";
   import { BridgeCallError } from "../bridge/callMethod.ts";
   import { readFactoryAccount, readFactoryPilot } from "../training/factoryClient.ts";
   import { panelErrorWords } from "../bridge/refusals.ts";
@@ -14,12 +14,15 @@
   import type { TrainingCharacter, MinerTrainingRead, StageFittingSelection, CorporationSavedFitting, QueueReview, QueueApplyOutcome, TrainingQueue } from "../training/types.ts";
   import MinerQualification from "./MinerQualification.svelte";
   import TrainingQueueReview from "./TrainingQueueReview.svelte";
+  import SkillAcquisition from "./SkillAcquisition.svelte";
+  import type { AcquisitionReview, AcquisitionOutcome, FactoryFunding, FundingPolicy } from "../training/types.ts";
 
   interface PilotRow {
     key: string; account: string; pilot: TrainingCharacter; prefs: PilotPreferences;
     selections: Record<string, StageFittingSelection>; result: MinerTrainingRead | null;
     error: string; readAt: number | null;
     review: QueueReview | null; queue: TrainingQueue | null; queueMessage: string; lastApply: LastQueueApply | null;
+    acquisition: AcquisitionReview | null; acquisitionFunding: FactoryFunding | null; acquisitionOutcome: AcquisitionOutcome | null; acquisitionMessage: string; owner: string;
   }
   let rows = $state<PilotRow[]>([]);
   let accounts = $state<string[]>([]);
@@ -47,18 +50,21 @@
     try { prefs = readPilotPreferences(localStorage, account, pilot.characterID); selections = readSelections(localStorage, account, pilot.characterID); }
     catch { configError = "Browser configuration is unreadable; stored fitting selections have not been overwritten."; }
     return { key: keyOf(account, pilot.characterID), account, pilot, prefs, selections, result: null, error: configError, readAt: null,
-      review: null, queue: null, queueMessage: "", lastApply: readLastQueueApply(localStorage, account, pilot.characterID) };
+      review: null, queue: null, queueMessage: "", lastApply: readLastQueueApply(localStorage, account, pilot.characterID),
+      acquisition: null, acquisitionFunding: null, acquisitionOutcome: null, acquisitionMessage: "", owner: "UNKNOWN" };
   }
   async function readPilot(row: PilotRow, ticket: number): Promise<void> {
     if (ticket !== generation) return;
-    update(row.key, { result: null, readAt: null, review: null, queue: null });
+    update(row.key, { result: null, readAt: null, review: null, queue: null, acquisition: null });
     if (!row.prefs.role || row.error) return;
     try {
       const options = credentials.get(row.account);
       if (!options) throw new Error("Account authentication is unavailable; refresh the roster.");
       const selections = readSelections(localStorage, row.account, row.pilot.characterID);
       const result = await readFactoryPilot(row.pilot.characterID, selections, options);
-      if (ticket === generation) update(row.key, { result, selections, queue: result.queue ?? null, error: "", readAt: Date.now() });
+      let owner = "UNKNOWN";
+      try { owner = (await factoryOwnership(row.pilot.characterID, options)).owner; } catch { /* unreadable ownership stays unknown */ }
+      if (ticket === generation) update(row.key, { result, selections, queue: result.queue ?? null, error: "", readAt: Date.now(), owner });
     } catch (cause) {
       if (ticket === generation) update(row.key, { result: null, error: panelErrorWords(cause), readAt: null });
     }
@@ -113,7 +119,7 @@
     if (busy) return;
     try {
       savePilotPreferences(localStorage, row.account, row.pilot.characterID, prefs);
-      update(row.key, { prefs, review: null, queueMessage: "" });
+      update(row.key, { prefs, review: null, queueMessage: "", acquisition: null });
       if (prefs.role !== row.prefs.role) {
         busy = true;
         const ticket = ++generation;
@@ -135,7 +141,7 @@
         else delete selections[stageID];
       }
       saveSelections(localStorage, row.account, row.pilot.characterID, selections);
-      update(row.key, { selections, error: "", review: null, queueMessage: "" });
+      update(row.key, { selections, error: "", review: null, queueMessage: "", acquisition: null });
       busy = true;
       const ticket = ++generation;
       await readPilot({ ...row, selections, error: "" }, ticket);
@@ -143,6 +149,40 @@
     } catch (cause) { error = `Fitting configuration could not be saved: ${String(cause)}`; busy = false; }
   }
   const queueError = (cause: unknown) => cause instanceof BridgeCallError ? `${cause.code}: ${cause.message}` : String(cause);
+  async function reviewAcquisition(row: PilotRow, policy: FundingPolicy, officerKey: string, division: number): Promise<void> {
+    const options = credentials.get(row.account);
+    if (busy || !row.result || !options || row.prefs.role !== "MINER") return;
+    busy = true;
+    update(row.key, { acquisition: null, acquisitionMessage: "Reading live purchase authority; temporary sessions will be released…" });
+    try {
+      const preview = row.result.report.previews[row.prefs.mode];
+      const selections = readSelections(localStorage, row.account, row.pilot.characterID);
+      if (JSON.stringify(selections) !== JSON.stringify(row.selections)) throw new Error("PLAN_CHANGED: refresh the fitting configuration.");
+      const officer = rows.find((entry) => entry.key === officerKey);
+      const token = officer && credentials.get(officer.account)?.token;
+      const funding = policy === "CHARACTER_PLUS_CORPORATION_SHORTFALL" && officer && token ? { characterID: officer.pilot.characterID, token } : null;
+      const acquisition = await reviewSkillAcquisition({ characterID: row.pilot.characterID, role: "MINER", mode: row.prefs.mode,
+        stage: preview.stage, displayedTargets: preview.targets.map(({ typeID, level }) => ({ typeID, level })), selections,
+        policy, funding, division }, options);
+      update(row.key, { acquisition, acquisitionFunding: funding, acquisitionMessage: "No money has moved. Confirm the exact review below." });
+    } catch (cause) { update(row.key, { acquisitionMessage: queueError(cause) }); }
+    finally { busy = false; }
+  }
+  async function acquireSkills(row: PilotRow): Promise<void> {
+    const review = row.acquisition;
+    const options = credentials.get(row.account);
+    if (busy || !review?.canAcquire || !review.reviewID || !options) return;
+    busy = true;
+    update(row.key, { acquisition: null, acquisitionMessage: "Acquiring exactly the reviewed skills…", review: null });
+    try {
+      if (review.mode !== row.prefs.mode || JSON.stringify(readSelections(localStorage, row.account, row.pilot.characterID)) !== JSON.stringify(row.selections)) throw new Error("PLAN_CHANGED: review again.");
+      const outcome = await acquireFactorySkills(review.reviewID, row.acquisitionFunding, options);
+      update(row.key, { acquisitionOutcome: outcome, acquisitionMessage: outcome.status, result: outcome.fresh,
+        queue: outcome.fresh?.queue ?? null, acquisitionFunding: null });
+      try { update(row.key, { owner: (await factoryOwnership(row.pilot.characterID, options)).owner }); } catch { update(row.key, { owner: "UNKNOWN" }); }
+    } catch (cause) { update(row.key, { acquisitionMessage: `${queueError(cause)} Do not retry blindly; refresh skills and wallet first.` }); }
+    finally { busy = false; }
+  }
   async function reviewQueue(row: PilotRow): Promise<void> {
     if (busy || !row.result || row.prefs.role !== "MINER") return;
     const options = credentials.get(row.account);
@@ -225,7 +265,7 @@
     <div><p class="eyebrow">EveJS Web · control plane</p><h1>Goblin Factory</h1><p>Miner qualification and reviewed training queue append</p></div>
     <nav><a href="/" target="_blank" rel="noopener">Pilot Hangar</a><button type="button" class="minor" disabled={busy || !ready} onclick={refresh}>{busy ? "Reading…" : "Refresh roster"}</button></nav>
   </header>
-  <p class="note">Skill qualification does not establish equipment readiness. No pilot is selected or brought online by this page.</p>
+  <p class="note">Skill qualification does not establish equipment readiness. Qualification and queue reads stay offline. Skill acquisition explicitly opens temporary live sessions for free pilots and releases them afterward.</p>
   <form class="factory-controls" onsubmit={addAccount}>
     <label>Existing account <input aria-label="Existing account" bind:value={accountInput} disabled={busy || !ready} placeholder="Account name" autocomplete="username" /></label>
     <button class="minor" disabled={busy || !ready || !accountInput.trim()}>Sign in / add to roster</button>
@@ -276,9 +316,17 @@
             {#if row.result}<MinerQualification result={row.result} selections={row.selections} mode={row.prefs.mode} {busy}
               onSelect={(stage, id) => void configureFit(row, stage, id)}
               onAccept={(stage, fit) => void configureFit(row, stage, fit.fittingID, fit)} />{/if}
+            <p>Session ownership: {row.owner} · Ownership is rechecked before temporary login.</p>
             {#if row.prefs.role === "MINER"}<TrainingQueueReview result={row.result} queue={row.queue} review={row.review}
               mode={row.prefs.mode} {busy} message={row.queueMessage} lastApply={row.lastApply}
               onReview={() => void reviewQueue(row)} onApply={() => void applyQueue(row)} />{/if}
+            {#if row.prefs.role === "MINER" && (row.review?.blockers.some((blocker) => blocker.code === "SKILLBOOK_REQUIRED") || row.acquisition || row.acquisitionOutcome || row.acquisitionMessage)}
+              <SkillAcquisition review={row.acquisition} outcome={row.acquisitionOutcome} {busy} mode={row.prefs.mode}
+                stage={row.result?.report.previews[row.prefs.mode].stage ?? null} message={row.acquisitionMessage}
+                officers={rows.filter((entry) => entry.key !== row.key).map((entry) => ({ key: entry.key, label: `${entry.account} · ${entry.pilot.name}` }))}
+                onReview={(policy, officer, division) => void reviewAcquisition(row, policy, officer, division)}
+                onAcquire={() => void acquireSkills(row)} onChange={() => update(row.key, { acquisition: null })} />
+            {/if}
           {/if}
         {/if}
       </article>

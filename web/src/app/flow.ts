@@ -11977,6 +11977,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     },
 
     async releaseSession() {
+      if (store.bots.get().runningBotID !== null) throw new Error("Stop the bot before releasing this pilot.");
+      if (["running", "paused"].includes(store.travel.get().status)) throw new Error("Stop travel before releasing this pilot.");
+      requireAutomationReady();
+      // Confirm first. A failed release must retain the local pilot and its
+      // recovery/push state so the user can see and resolve the real owner.
+      await api.releaseSession(callOptions, store.station.get().online?.characterID);
       recoveryGeneration++;
       recoveryTask = null;
       recoveryIDs.clear();
@@ -11986,14 +11992,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       // R10: stop consuming the push channel first — the session it belongs to
       // is about to end.
       stopLiveStream();
-      try {
-        await api.releaseSession(callOptions);
-      } finally {
-        syncedStationID = null;
-        stopLiveStream();
-        store.apply({ type: "character/offline" });
-        store.apply({ type: "character/selected", characterID: null });
-      }
+      syncedStationID = null;
+      store.apply({ type: "character/offline" });
+      store.apply({ type: "character/selected", characterID: null });
     },
 
     async logout() {

@@ -436,8 +436,9 @@ export async function loadStationStatic(
 /** Release the persistent session (character goes offline via the retail disconnect path). */
 export async function releaseSession(
   options: ApiOptions = {},
+  characterID?: number,
 ): Promise<{ released: boolean }> {
-  const data = await postJson("/api/bridge/release", {}, options);
+  const data = await postJson("/api/bridge/release", { characterID }, options);
   return { released: data.released === true };
 }
 
@@ -4454,6 +4455,16 @@ export async function loginFactoryAccount(username: string, options: ApiOptions 
     throw new BridgeCallError("BRIDGE_BAD_RESPONSE", "Account authentication is incomplete.", 502);
   }
   return { account: account.username, token: data.sessionToken };
+}
+
+export async function reviewSkillAcquisition(body: unknown, options: ApiOptions = {}): Promise<import("../training/types.ts").AcquisitionReview> {
+  return (await postJson("/api/pilot-training/skills/review", body, options)).outcome as unknown as import("../training/types.ts").AcquisitionReview;
+}
+export async function acquireFactorySkills(reviewID: string, funding: import("../training/types.ts").FactoryFunding | null, options: ApiOptions = {}): Promise<import("../training/types.ts").AcquisitionOutcome> {
+  return (await postJson("/api/pilot-training/skills/acquire", { reviewID, funding, confirm: true }, options)).outcome as unknown as import("../training/types.ts").AcquisitionOutcome;
+}
+export async function factoryOwnership(characterID: number, options: ApiOptions = {}): Promise<{ owner: string; online: boolean }> {
+  return (await getJson(`/api/pilot-training/ownership?characterID=${characterID}`, options)).ownership as unknown as { owner: string; online: boolean };
 }
 
 /** Account-owned identities for a read-only training preview; no selection. */

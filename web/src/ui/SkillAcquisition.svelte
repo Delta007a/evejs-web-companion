@@ -1,0 +1,64 @@
+<script lang="ts">
+  import type { AcquisitionReview, AcquisitionOutcome, FundingPolicy } from "../training/types.ts";
+  import { formatIsk } from "./isk.ts";
+  let { review, outcome, busy, mode, stage, officers, message, onReview, onAcquire, onChange }:
+    { review: AcquisitionReview | null; outcome: AcquisitionOutcome | null; busy: boolean; mode: string; stage: string | null;
+      officers: readonly { key: string; label: string }[]; message: string;
+      onReview: (policy: FundingPolicy, officer: string, division: number) => void;
+      onAcquire: () => void; onChange: () => void } = $props();
+  let policy = $state<FundingPolicy>("CHARACTER_WALLET_ONLY");
+  let officer = $state("");
+  let division = $state(1000);
+</script>
+<section class="acquisition" aria-label="Skill acquisition">
+  <h3>Direct skill acquisition · {mode} → {stage ?? "Unknown"}</h3>
+  <p>Review temporarily logs free pilots in, reads prices and wallets, then releases them. Money moves only after Acquire. The queue is a separate action.</p>
+  <label>Funding policy <select bind:value={policy} disabled={busy} onchange={onChange}>
+    <option value="CHARACTER_WALLET_ONLY">Character wallet only</option>
+    <option value="CHARACTER_PLUS_CORPORATION_SHORTFALL">Character wallet + corporation shortfall</option>
+  </select></label>
+  {#if policy === "CHARACTER_PLUS_CORPORATION_SHORTFALL"}
+    <label>Funding authority <select bind:value={officer} disabled={busy} onchange={onChange}>
+      <option value="">Select a separate officer</option>
+      {#each officers as row}<option value={row.key}>{row.label}</option>{/each}
+    </select></label>
+    <label>Corporation wallet division <select bind:value={division} disabled={busy} onchange={onChange}>
+      {#each [1000,1001,1002,1003,1004,1005,1006] as key}<option value={key}>Division {key - 999} ({key})</option>{/each}
+    </select></label>
+    <p>Review verifies this officer’s Account Take permission and matching corporation. Add the officer’s account to the roster first.</p>
+  {/if}
+  <button type="button" disabled={busy || !stage || (policy !== "CHARACTER_WALLET_ONLY" && !officer)} onclick={() => onReview(policy, officer, Number(division))}>Review missing skill acquisition</button>
+  {#if message}<p role="status">{message}</p>{/if}
+  {#if review}
+    <h4>Reviewed {review.mode} → {review.stage}</h4>
+    <ul>{#each review.skills as skill}<li>{skill.name} · {formatIsk(skill.price)}</li>{/each}</ul>
+    <dl>
+      <dt>Total purchase</dt><dd>{formatIsk(review.total)}</dd>
+      <dt>Character wallet</dt><dd>{formatIsk(review.personalBalance)}</dd>
+      <dt>Shortfall</dt><dd>{formatIsk(review.shortfall)}</dd>
+      {#if review.funding}
+        <dt>Funding source</dt><dd>Officer {review.funding.characterID} · Corporation {review.funding.corporationID} · Division {review.funding.division - 999}</dd>
+        <dt>Division balance</dt><dd>{formatIsk(review.funding.balance)}</dd>
+      {/if}
+    </dl>
+    <p>Actions: {#if review.funding}transfer exactly {formatIsk(review.shortfall)}, then {/if}buy the listed skills, verify skills, release temporary sessions.</p>
+    <p>Purchase and funding are separate server operations. If purchase fails after funding, remaining ISK stays with the trainee. No automatic retry or rollback.</p>
+    {#each review.blockers as blocker}<p class="error">{blocker}</p>{/each}
+    {#each review.cleanup.filter((row) => !row.released) as row}<p class="error">{row.code}: pilot {row.characterID}</p>{/each}
+    <button type="button" disabled={busy || !review.canAcquire || !review.reviewID} onclick={onAcquire}>Acquire missing skills · {review.mode} → {review.stage}</button>
+  {/if}
+  {#if outcome}
+    <h4>Last acquisition · {outcome.mode} → {outcome.stage}</h4>
+    <p>{outcome.status} · Verified: {outcome.verified ? "yes" : "no"} · {new Date(outcome.at).toLocaleString()}</p>
+    <p>{outcome.message} {outcome.errorCode ?? ""}</p>
+    <p>Skills confirmed: {outcome.purchased?.length ?? "unknown"} · Corporation funded: {formatIsk(outcome.funded ?? null)} · Remaining wallet: {formatIsk(outcome.wallet ?? null)}</p>
+    {#each outcome.cleanup as row}<p>Pilot {row.characterID}: {row.released ? "Factory session released" : "FACTORY_SESSION_RELEASE_FAILED — refresh ownership before retrying"}</p>{/each}
+    {#if outcome.readyForQueueReview}<p>READY FOR QUEUE REVIEW. Review and apply the training plan separately.</p>{/if}
+  {/if}
+</section>
+<style>
+  .acquisition { margin-top: 1.2rem; padding: 1rem; border: 1px solid #455569; border-radius: 6px; }
+  p { max-width: 85ch; } label { display: flex; gap: .6rem; margin: .7rem 0; flex-wrap: wrap; }
+  select { background: #16202e; color: #e4edf7; padding: .4rem; } dt { opacity: .7; } dd { margin: .2rem 0 .6rem; }
+  .error { color: #ffa3a3; }
+</style>

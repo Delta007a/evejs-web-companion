@@ -313,6 +313,19 @@ test("releaseSession puts the flow back to character select", async () => {
   assert.equal(store.session.get().phase, "logged-in", "release keeps the login");
 });
 
+test("releaseSession failure preserves the selected pilot", async () => {
+  const { fetch } = makeFakeFetch((path, body) => path === "/api/bridge/release"
+    ? { status: 502, body: { ok: false, error: "PILOT_RELEASE_UNVERIFIED", message: "Release not confirmed" } }
+    : bridgeCallResponder(path, body));
+  const store = createClientStore();
+  const flow = createAppFlow(store, { fetch });
+  await flow.login("test2", "");
+  await flow.selectCharacter(140000003);
+  const selected = store.station.get().online;
+  await assert.rejects(flow.releaseSession(), /Release not confirmed/);
+  assert.deepEqual(store.station.get().online, selected);
+});
+
 test("a lost live session surfaces SESSION_NOT_FOUND and flips the store offline", async () => {
   const { fetch } = makeFakeFetch((path, body) => {
     if (path === "/api/bridge/call" && body.method !== "GetCharacterSelectionData") {

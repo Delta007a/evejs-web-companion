@@ -15,6 +15,8 @@ const webAuth = require("./webAuth");
 const staticDataModule = require("./staticData");
 const { readMinerPilot } = require("./pilotTrainingRead");
 const { createTrainingQueueService } = require("./pilotTrainingQueue");
+const { createFactorySessions } = require("./factorySessions");
+const { createFactorySkills } = require("./factorySkills");
 const config = require("./config");
 const botScriptStoreModule = require("./botScriptStore");
 const botHostModule = require("./botHost");
@@ -113,6 +115,8 @@ const botHost =
   });
 app.locals.botHost = botHost;
 app.locals.bridgeSessions = bridgeSessions;
+const factorySessions = createFactorySessions({ store, gateway, operations: characterOperations, heldSessions: bridgeSessions, botHost });
+const factorySkills = createFactorySkills({ store, gateway, data: staticData, queues: trainingQueues, sessions: factorySessions });
 // startServer() seeds the starter bots once the port is open, and all it
 // holds is the app -- never createApp's locals. Published here so that call
 // reaches THIS app's store, including one injected by a test.
@@ -604,7 +608,8 @@ async function releaseHeldBridgeSession(webSessionID, { confirmed = false } = {}
   }
   if (confirmed) {
     try {
-      await gateway.releaseBridgeSession(held.bridgeSessionID, { userid: Number(held.accountID) });
+      const outcome = await gateway.releaseBridgeSession(held.bridgeSessionID, { userid: Number(held.accountID) });
+      if (outcome?.released !== true) throw Object.assign(new Error("Pilot release was not confirmed."), { code: "PILOT_RELEASE_UNVERIFIED", statusCode: 409 });
     } catch (error) {
       if (!error || error.code !== "SESSION_NOT_FOUND") throw error;
     }
@@ -992,7 +997,28 @@ app.post("/api/bridge/release", requireAuth, async (req, res, next) => {
       res.status(409).json({ ok: false, error: "CHARACTER_IN_USE", message: "This session is changing characters. Try again shortly." });
       return;
     }
-    const released = await releaseHeldBridgeSession(req.webSessionID);
+    const held = bridgeSessions.get(req.webSessionID);
+    if (held) {
+      const internalBot = botHost.authorizesClaim(held.characterID, req.get(botHostModule.BOT_HEADER));
+      if (req.body?.characterID !== undefined && req.body.characterID !== held.characterID) {
+        res.status(409).json({ ok: false, error: "PILOT_CHANGED" }); return;
+      }
+      if (characterOperations.has(held.characterID) || (!internalBot && botHost.claimedBy(held.characterID) !== null)) {
+        res.status(409).json({ ok: false, error: "PILOT_BUSY", message: "Use the owning bot or operation's Stop action." }); return;
+      }
+      if (!internalBot && hasPendingRecovery(held, held.characterID)) {
+        res.status(409).json({ ok: false, error: "RECOVERY_REQUIRED", message: "Finish pilot recovery before releasing." }); return;
+      }
+    }
+    const reservation = Symbol("release");
+    sessionOperations.set(req.webSessionID, reservation);
+    if (held) characterOperations.set(held.characterID, reservation);
+    let released;
+    try { released = await releaseHeldBridgeSession(req.webSessionID, { confirmed: true }); }
+    finally {
+      if (sessionOperations.get(req.webSessionID) === reservation) sessionOperations.delete(req.webSessionID);
+      if (held && characterOperations.get(held.characterID) === reservation) characterOperations.delete(held.characterID);
+    }
     res.json({ ok: true, released });
   } catch (error) {
     next(error);
@@ -18429,6 +18455,35 @@ app.post("/api/pilot-training/queue/apply", requireTrainingAuth, async (req, res
   try { res.json({ ok: true, outcome: await trainingQueues.apply(req.account, req.body || {}) }); }
   catch (error) { next(error); }
 });
+
+// Funding is an independently authenticated account, never inferred from the
+// trainee or a browser-supplied account ID. Credentials are never persisted.
+async function factoryFunding(body) {
+  if (!body.funding) return null;
+  const payload = auth.verifySessionToken(body.funding.token);
+  if (!payload) throw Object.assign(new Error("Funding authority authentication required."), { code: "FUNDING_AUTH_REQUIRED", statusCode: 401 });
+  const account = await store.getAccount(payload.username);
+  if (!account || account.banned || account.accountID !== Number(payload.accountID))
+    throw Object.assign(new Error("Funding authority is unavailable."), { code: "FUNDING_AUTH_REQUIRED", statusCode: 403 });
+  return { account, sessionID: payload.sessionID, characterID: body.funding.characterID };
+}
+app.get("/api/pilot-training/ownership", requireTrainingAuth, async (req, res, next) => {
+  try { res.json({ ok: true, ownership: await factorySessions.status(req.account, Number(req.query.characterID)) }); }
+  catch (error) { next(error); }
+});
+for (const action of ["review", "acquire"]) {
+  app.post(`/api/pilot-training/skills/${action}`, requireTrainingAuth, async (req, res, next) => {
+    try {
+      const body = req.body || {};
+      const outcome = await factorySkills[action]({ account: req.account, sessionID: req.webSessionID }, body, await factoryFunding(body));
+      res.json({ ok: true, outcome });
+    } catch (error) {
+      if (error.cleanup?.some((row) => !row.released)) {
+        res.status(409).json({ ok: false, error: "FACTORY_SESSION_RELEASE_FAILED", message: `${error.message} Temporary session release is unconfirmed; refresh ownership before retrying.` });
+      } else next(error);
+    }
+  });
+}
 
 app.get("/api/bridge/skills", requireAuth, async (req, res, next) => {
   const held = requireHeldBridgeSession(req, res);

@@ -272,13 +272,26 @@
   // disable a quick-add that would just be refused as "already in use". Kept in
   // sync by the same station subscriptions that drive pruning, below.
   let onlineIDs = $state<Set<number>>(new Set());
+  let pilotOwners = $state<Record<number, string>>({});
+  async function releasePilot(characterID: number): Promise<void> {
+    const session = sessions.find((entry) => entry.store.station.get().online?.characterID === characterID);
+    if (!session) throw new Error("This tab does not own that pilot.");
+    await session.flow.releaseSession();
+  }
   function recomputeOnline(): void {
     const ids = new Set<number>();
+    const owners: Record<number, string> = {};
     for (const s of sessions) {
       const on = s.store.station.get().online;
-      if (on) ids.add(on.characterID);
+      if (on) {
+        ids.add(on.characterID);
+        owners[on.characterID] = s.store.bots.get().runningBotID !== null ? "BOT" :
+          s.flow.droneRecovery.get().phase !== "ready" ? "RECOVERY" :
+          ["running", "paused"].includes(s.store.travel.get().status) ? "TRAVEL" : "BROWSER";
+      }
     }
     onlineIDs = ids;
+    pilotOwners = owners;
   }
 
   // Remove a pilot the instant its store reports offline — release, logout, or a
@@ -301,11 +314,11 @@
   // the current value on subscribe, which for an online pilot is a no-op, so
   // this never prunes a pilot that is still live.
   $effect(() => {
-    const unsubs = sessions.map((s) =>
+    const unsubs = sessions.flatMap((s) => [
       s.store.station.subscribe((slice) => {
         if (slice.online === null) removeSession(s.id);
         recomputeOnline();
-      }),
+      }), s.store.bots.subscribe(recomputeOnline), s.store.travel.subscribe(recomputeOnline), s.flow.droneRecovery.subscribe(recomputeOnline)],
     );
     recomputeOnline();
     return () => {
@@ -640,6 +653,8 @@
   <ErrorBoundary name="Pilot hangar">
     <PilotHangar
       {onlineIDs}
+      {pilotOwners}
+      onRelease={releasePilot}
       onLaunch={bringOnline}
       onShowPilot={goToPilot}
       onClose={active ? () => (hangarOpen = false) : null}

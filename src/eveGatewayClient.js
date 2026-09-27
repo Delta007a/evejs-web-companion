@@ -337,6 +337,17 @@ async function saveOfflineSkillQueue(accountID, characterID, command) {
   return postJson("/skill-queue", { accountID, characterID, command }, { timeoutMs: OWNER_CALL_TIMEOUT_MS });
 }
 
+async function selectFactoryCharacter(accountID, characterID) {
+  const data = await postJson("/factory/session", { args: [characterID, null, true], session: { userid: accountID } }, { timeoutMs: OWNER_CALL_TIMEOUT_MS });
+  return data.outcome;
+}
+async function quoteFactorySkills(request) {
+  return (await postJson("/factory/quote", request, { timeoutMs: OWNER_CALL_TIMEOUT_MS })).outcome;
+}
+async function acquireFactorySkills(request) {
+  return (await postJson("/factory/acquire", request, { timeoutMs: OWNER_CALL_TIMEOUT_MS })).outcome;
+}
+
 // Bridge reads can be heavy on a cold gateway: map.GetStationInfo marshals the
 // whole station table and lazily loads a multi-MB world store on first touch,
 // and GetCharacterSelectionData computes per-character skill totals. They ride
@@ -428,6 +439,7 @@ async function releaseBridgeSession(bridgeSessionID, sessionFields = undefined) 
   const data = await postJson("/session/release", body, { timeoutMs: OWNER_CALL_TIMEOUT_MS });
   return {
     released: data.released === true,
+    offline: data.offline === true,
     characterID: data.characterID === undefined ? null : data.characterID,
   };
 }
@@ -805,4 +817,7 @@ module.exports = {
   getSkills,
   getCharacterStatus,
   saveOfflineSkillQueue,
+  selectFactoryCharacter,
+  quoteFactorySkills,
+  acquireFactorySkills,
 };
