@@ -37,7 +37,7 @@ test("shared creator consumes authoritative recovery on reopen and on explicit c
   assert.match(source, /creationState.freeSlots > 0/);
   assert.match(source, /nameCode === 1/);
   const factory = readFileSync(new URL("./GoblinFactory.svelte", import.meta.url), "utf8");
-  assert.match(factory, /<CharacterCreate flow=/);
-  assert.match(factory, /Target stage for/);
+  assert.match(factory, /<CharacterCreate\b[^>]*\bflow=\{creatorFlow\(creatingAccount\)\}/);
+  assert.match(factory, /Target qualification for/);
   assert.doesNotMatch(factory, /CreateCharacterWithDoll/);
 });
