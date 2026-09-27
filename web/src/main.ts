@@ -9,7 +9,7 @@
 // into public/dist/, and the built index.html links it automatically.
 import "./styles.css";
 import { mount } from "svelte";
-import { isGoblinFactoryPath } from "./app/pageRoute.ts";
+import { isGoblinFactoryPath, isPilotTrainingPath } from "./app/pageRoute.ts";
 import { installErrorOverlay } from "./app/errorOverlay.ts";
 
 // Before anything else: a framework-free net for uncaught errors and unhandled
@@ -20,10 +20,11 @@ installErrorOverlay();
 // R107 — App owns the pilot roster now: it creates one isolated session per
 // pilot (store + per-session-token flow) and warms each one's health ping
 // itself (app/sessions.ts). There is no single app-wide store/flow any more.
+if (isGoblinFactoryPath(window.location.pathname)) window.location.replace(`/pilot-training${window.location.search}${window.location.hash}`);
 const target = document.getElementById("app");
-if (target) {
+if (target && !isGoblinFactoryPath(window.location.pathname)) {
   // Never initialize cockpit restore/polling on the control-plane URL.
-  const { default: Page } = isGoblinFactoryPath(window.location.pathname)
+  const { default: Page } = isPilotTrainingPath(window.location.pathname)
     ? await import("./ui/GoblinFactory.svelte")
     : await import("./ui/App.svelte");
   mount(Page, { target });

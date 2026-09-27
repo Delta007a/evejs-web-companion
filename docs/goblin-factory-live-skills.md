@@ -1,4 +1,8 @@
-# Goblin Factory: live skill acquisition and pilot release
+# Pilot Training: historical live skill acquisition and pilot release
+
+See [current Pilot Training](pilot-training.md) for the canonical route, generic
+contracts, dedicated non-CEO authority and trainee self-funding. Historical CEO QA
+below is not the current product workflow.
 
 ## Scope and baseline
 

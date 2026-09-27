@@ -12,7 +12,7 @@ test("roster and qualification use isolated account tokens and only control-plan
     const url = new URL(String(input), "http://test");
     const authorization = new Headers(init?.headers).get("authorization");
     calls.push({ path: url.pathname, method: init?.method ?? "GET", authorization });
-    if (url.pathname === "/api/goblin-factory/login") {
+    if (url.pathname === "/api/pilot-training/login") {
       const { username } = JSON.parse(String(init?.body));
       return Response.json({ ok: true, sessionToken: `${username}-token`, account: { username } });
     }

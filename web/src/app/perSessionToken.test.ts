@@ -205,10 +205,14 @@ test("a flow exposes the complete request options owned by that session", async 
   });
 
   assert.equal(flow.requestOptions().baseUrl, "https://pilot.example");
-  assert.equal(flow.requestOptions().fetch, pilot.fetch);
+  // The auth-loss guard wraps fetch. Verify forwarding, not function identity.
+  assert.equal(typeof flow.requestOptions().fetch, "function");
   assert.equal(flow.requestOptions().token, null, "the per-flow token starts explicitly empty");
 
   await flow.login("pilot", "x");
+
+  assert.ok(pilot.requests.some((request) => request.url === "https://pilot.example/api/login"),
+    "the session-owned fetch receives the request with its configured base URL");
 
   assert.equal(
     flow.requestOptions().token,

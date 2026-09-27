@@ -38,6 +38,11 @@ disposable.** Closing a tab closes that client — the server never keeps drivin
 
 ## Architecture — the thin bridge
 
+The standalone [Pilot Training](docs/pilot-training.md) control plane is available at
+`/pilot-training`: corporation-fitting qualification contracts, reviewed queue append,
+direct skill acquisition and optional configured corporation onboarding. Fresh users
+have no predefined ships, authority, training wallet or home.
+
 ```
   Browser (Svelte + Vite)                 ← one tab per account; all the "thinking"
         │  fetch POST /api/bridge/*

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { qualificationName } from "../training/configurations.ts";
   import { romanLevel } from "../bridge/skills.ts";
   import type { QueueReview, TrainingQueue, MinerTrainingRead } from "../training/types.ts";
   import type { PlanMode, LastQueueApply } from "../training/factory.ts";
@@ -9,7 +10,7 @@
   } = $props();
   const preview = $derived(result?.report.previews[mode]);
   const fitReady = $derived(result?.report.stages.find((stage) => stage.id === preview?.stage)?.fitting.status === "READY");
-  const unknown = $derived(!preview || preview.targets.some((row) => row.state === "UNKNOWN"));
+  const unknown = $derived(!preview || preview.disabled || preview.targets.some((row) => row.state === "UNKNOWN"));
   function skillName(typeID: number): string {
     return result?.report.stages.flatMap((stage) => [...stage.hard, ...stage.support]).find((row) => row.typeID === typeID)?.name ?? `Skill #${typeID}`;
   }
@@ -24,12 +25,12 @@
   {:else}<p>UNKNOWN — queue is unreadable.</p>{/if}
   <p class="note">Append only. Existing queue order is preserved. Nonempty paused queues stay paused; an empty queue starts training. Pilot must be offline. No skillbooks are bought or injected.</p>
   <button type="button" class="minor" disabled={busy || !queue || unknown || !fitReady}
-    onclick={onReview}>Review {mode} append → {preview?.stage ?? "No target stage"}</button>
-  {#if !fitReady}<p class="note">An accepted, readable target-stage fitting is required.</p>{/if}
+    onclick={onReview}>Review {mode} append → {qualificationName(result?.report, preview?.stage)}</button>
+  {#if !fitReady}<p class="note">An accepted, readable target qualification fitting is required.</p>{/if}
   {#if unknown}<p class="note">UNKNOWN requirements block Apply.</p>{/if}
   {#if message}<p role="status">{message}</p>{/if}
   {#if review}
-    <h4>{review.mode} → {review.stage} · {review.status === "NOTHING_TO_ADD" ? "Nothing to add" : review.status}</h4>
+    <h4>{review.mode} → {qualificationName(result?.report, review.stage)} · {review.status === "NOTHING_TO_ADD" ? "Nothing to add" : review.status}</h4>
     <p>Existing: {review.existing.length} · Already trained: {review.requirements.filter((row) => row.reviewState === "ALREADY_TRAINED").length} · Already queued: {review.requirements.filter((row) => row.reviewState === "ALREADY_QUEUED").length} · Will append: {review.additions.length} · Capacity: {review.maxEntries ?? "UNKNOWN"}</p>
     <p>After Apply: {review.activate ? "training active" : "queue remains paused"}. Review expires at {new Date(review.expiresAt).toLocaleTimeString()}.</p>
     <details><summary>Requirement coverage</summary>
@@ -42,10 +43,10 @@
       <ul>{#each review.blockers as blocker}<li>{blocker.code}: {blocker.message}</li>{/each}</ul>
     {:else}<p>Preflight blockers: none. EveJS still validates clone limits, duration and training slots atomically.</p>{/if}
     <button type="button" disabled={busy || !review.canApply || !review.reviewID}
-      onclick={onApply}>Apply {review.mode} plan → {review.stage}</button>
+      onclick={onApply}>Apply {review.mode} plan → {qualificationName(result?.report, review.stage)}</button>
   {/if}
   {#if lastApply}
-    <p class="note">Last apply: {lastApply.mode} → {lastApply.stage} · {lastApply.status} · {new Date(lastApply.at).toLocaleString()} · Added: {lastApply.added ?? "unverified"} · Verified: {lastApply.verified ? "yes" : "no"}{lastApply.code ? ` · ${lastApply.code}` : ""}</p>
+    <p class="note">Last apply: {lastApply.mode} → {qualificationName(result?.report, lastApply.stage)} · {lastApply.status} · {new Date(lastApply.at).toLocaleString()} · Added: {lastApply.added ?? "unverified"} · Verified: {lastApply.verified ? "yes" : "no"}{lastApply.code ? ` · ${lastApply.code}` : ""}</p>
   {/if}
 </section>
 <style>

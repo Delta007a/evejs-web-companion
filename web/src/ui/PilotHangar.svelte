@@ -620,7 +620,7 @@
     </div>
 
     <div class="hangar-head-actions">
-      <a class="hangar-manage" href="/goblin-factory" target="_blank" rel="noopener">Goblin Factory</a>
+      <a class="hangar-manage" href="/pilot-training" target="_blank" rel="noopener">Pilot Training</a>
       <button
         type="button"
         class="hangar-manage"

@@ -14,8 +14,8 @@ const MinerQualification = (await import("./MinerQualification.svelte")).default
 
 test("old pilot panel is only a discoverable standalone shortcut", () => {
   const html = render(PilotTraining).body;
-  assert.match(html, /Goblin Factory/);
-  assert.match(html, /href="\/goblin-factory"/);
+  assert.match(html, /Pilot Training/);
+  assert.match(html, /href="\/pilot-training"/);
 });
 
 test("stage details render review identity, skill distinctions and only the selected preview", () => {
@@ -50,7 +50,7 @@ test("stage details render review identity, skill distinctions and only the sele
 
 test("Factory mounts without a store, cockpit, selected pilot or premature empty roster", () => {
   const html = render(GoblinFactory).body;
-  assert.match(html, /Goblin Factory/);
+  assert.match(html, /Pilot Training/);
   assert.match(html, /Existing account/);
   assert.match(html, /Loading known accounts/);
   assert.doesNotMatch(html, /No available pilots yet/);
@@ -58,4 +58,13 @@ test("Factory mounts without a store, cockpit, selected pilot or premature empty
     const source = readFileSync(fileURLToPath(new URL(`./${file}`, import.meta.url)), "utf8");
     assert.doesNotMatch(source, /saveSkillQueue|SaveNewQueue|createSession|AppFlow|PanelHost|botHost|loadSnapshot/);
   }
+});
+
+test("fresh qualification UI starts empty; legacy roster wallet is not presented as current",()=>{
+  const result={corporationID:98,fittings:[],report:{role:"HAULER",stages:[],previews:{FAST:{stage:null,targets:[],eta:{kind:"UNKNOWN",reason:"No configuration"}}}}};
+  const html=render(MinerQualification,{props:{result,mode:"FAST",busy:false,onAccept(){}}}).body;
+  assert.match(html,/No training configurations yet/);assert.match(html,/Add ship/);
+  assert.doesNotMatch(html,/Venture|Pioneer|Procurer/);
+  const roster=readFileSync(fileURLToPath(new URL("./CharacterSelect.svelte",import.meta.url)),"utf8");
+  assert.match(roster,/Wallet is read when opened/);assert.doesNotMatch(roster,/character\.balance|char\.balance/);
 });

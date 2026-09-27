@@ -21,7 +21,7 @@ test("HTTP acquisition authenticates both actors, owns the trainee, and never ex
     eveGatewayClient:{
       async getCharacterStatus(id,char) { if(char!==id+3) throw Object.assign(new Error("Account does not own pilot"),{code:"CHARACTER_ACCOUNT_MISMATCH",statusCode:403}); return {characterID:char,online:online.has(char),controlState:online.has(char)?"retail_client":"offline",stateVersion:"epoch.0"}; },
       async getSkills(id,char) { assert.equal(id,4); assert.equal(char,7);return {characterID:char,serverNowMs:1800000000000,skills:unlocked?[{typeID:3386,level:0,skillPoints:0}]:[],queue:{active:false,maxEntries:150,entries:[]}}; },
-      async callMethod(service,method) { assert.equal(service,"corpFittingMgr"); assert.equal(method,"GetFittings");return {result:{type:"dict",entries:[[7,fitting]]}}; },
+      async callMethod(service,method) { if(service==="corpRegistry") return {result:{type:"packedrow",fields:{corporationID:corp,ceoID:99}}}; assert.equal(service,"corpFittingMgr"); assert.equal(method,"GetFittings");return {result:{type:"dict",entries:[[7,fitting]]}}; },
       async selectFactoryCharacter(id,char) { calls.push(["select",id,char]); assert.equal(char,id+3);online.add(char);return {bridgeSessionID:`private-${char}`,session:{characterID:char}}; },
       async releaseBridgeSession(handle,fields) { calls.push(["release",handle]);online.delete(fields.userid+3);return {released:true,offline:true}; },
       async quoteFactorySkills(input) { calls.push(["quote",input]);assert.equal(input.trainee.userid,4);assert.deepEqual(input.skillTypeIDs,[3386]);return {reviewID:"runtime-private",expiresAt:Date.now()+180000,canAcquire:true,skills:[{typeID:3386,price:"100.00"}],blockers:[]}; },
@@ -36,7 +36,7 @@ test("HTTP acquisition authenticates both actors, owns the trainee, and never ex
   const first=await read();const fit=first.fittings[0];
   const selections={VENTURE:{scope:"CORPORATION",ownerID:corp,fittingID:7,acceptedSavedDate:fit.savedDate,acceptedFingerprint:fit.fingerprint}};
   const pilot=await read(selections);const preview=pilot.report.previews.FAST;
-  const request={characterID:7,role:"MINER",mode:"FAST",stage:preview.stage,displayedTargets:preview.targets,selections,policy:"CHARACTER_PLUS_CORPORATION_SHORTFALL",division:1000,funding:{token:"officer",characterID:8}};
+  const request={characterID:7,role:"MINER",mode:"FAST",stage:preview.stage,displayedTargets:preview.targets,selections,policy:"CHARACTER_PLUS_CORPORATION_SHORTFALL",division:1000,trainingWallet:{corporationID:corp,accountKey:1000},funding:{token:"officer",characterID:8}};
   assert.equal((await post("review",request,"invalid")).status,401);
   assert.equal((await post("review",request,"other")).status,403);
   assert.equal((await post("review",{...request,funding:{token:"invalid",characterID:8}})).status,401);

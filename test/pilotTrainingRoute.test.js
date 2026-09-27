@@ -46,7 +46,8 @@ function app() {
       async saveSkillQueue() { throw new Error("A qualification read must not save a queue."); },
     },
     staticData: {
-      getType: (id) => equipment.has(id) || id > 0 ? { typeID: id } : null,
+      getType: (id) => equipment.has(id) || id > 0 ? { typeID: id, categoryID: [32880,89240,17480].includes(id) ? 6 : 7 } : null,
+      getStation: (id) => id === 60010825 ? { stationName:"Test home", solarSystemID:30004504 } : null,
       getSkillType: (id) => ({ typeID: id, name: `Skill ${id}` }),
       getTypeDogma: (id) => ({ attributes: [32880, 89240, 17480].includes(id) ? { 182: 3386, 277: 3 } : {} }),
     },
@@ -94,7 +95,7 @@ test("Factory authentication is existing-only and does not replace cockpit cooki
   const base = `http://127.0.0.1:${server.address().port}`;
   const login = (path, username) => fetch(`${base}${path}`, { method: "POST",
     headers: { "content-type": "application/json" }, body: JSON.stringify({ username }) });
-  for (const path of ["/api/goblin-factory/login", "/api/goblin-factory/login/", "/API/GOBLIN-FACTORY/LOGIN"]) {
+  for (const path of ["/api/pilot-training/login", "/api/goblin-factory/login", "/api/goblin-factory/login/", "/API/GOBLIN-FACTORY/LOGIN"]) {
     for (const username of ["", "NotAnExistingAccount"]) {
       const denied = await login(path, username);
       assert.equal(denied.status, 401);
@@ -111,6 +112,31 @@ test("Factory authentication is existing-only and does not replace cockpit cooki
   const normal = await login("/api/login", ACCOUNT.username);
   assert.equal(normal.status, 200);
   assert.ok(normal.headers.get("set-cookie"), "normal WC login retains its cookie behavior");
+});
+
+test("generic qualification HTTP uses explicit contract identity, authoritative hulls and ownership",async(t)=>{
+  const server=app().listen(0,"127.0.0.1");t.after(()=>server.close());await once(server,"listening");
+  const base=`http://127.0.0.1:${server.address().port}`,headers={authorization:"Bearer test-token"};
+  const get=(configs=[],extra="")=>fetch(`${base}/api/pilot-training/qualification?characterID=${CHARACTER_ID}&role=HAULER&configurations=${encodeURIComponent(JSON.stringify(configs))}${extra}`,{headers});
+  const fresh=await (await get()).json();assert.deepEqual(fresh.report.stages,[]);
+  const f=fresh.fittings[0],c={configurationID:"custom-fit",roleID:"HAULER",order:0,corporationOwnerID:CORP,fittingID:7,hullTypeID:32880,acceptedSavedDate:f.savedDate,acceptedFingerprint:f.fingerprint};
+  const chosen=await (await get([c],"&targetConfigurationID=custom-fit")).json();
+  assert.equal(chosen.report.previews.FAST.stage,"custom-fit");assert.equal(chosen.report.stages[0].fitting.status,"READY");assert.equal(chosen.report.previews.BALANCED.disabled,true);
+  assert.equal((await get([{...c,hullTypeID:483}])).status,400);
+  assert.equal((await get([c],"&targetConfigurationID=other")).status,400);
+  assert.equal((await fetch(`${base}/api/pilot-training/qualification?characterID=123&role=HAULER`,{headers})).status,404);
+  assert.equal((await fetch(`${base}/api/pilot-training/qualification?characterID=${CHARACTER_ID}&role=HAULER`)).status,401);
+});
+
+test("canonical redirect and generic home resolution never claim structure relocation",async(t)=>{
+  const server=app().listen(0,"127.0.0.1");t.after(()=>server.close());await once(server,"listening");
+  const base=`http://127.0.0.1:${server.address().port}`,headers={authorization:"Bearer test-token"};
+  const old=await fetch(`${base}/goblin-factory`,{redirect:"manual"});assert.equal(old.status,308);assert.equal(old.headers.get("location"),"/pilot-training");
+  const home=await (await fetch(`${base}/api/pilot-training/home?locationID=60010825`,{headers})).json();
+  assert.deepEqual(home.home,{locationID:60010825,name:"Test home",systemID:30004504,kind:"NPC_STATION",relocation:"MANUAL_GM_ONLY",capability:"DOCKABLE_STATION"});
+  const unsupported=await fetch(`${base}/api/pilot-training/home?locationID=100000000001`,{headers});
+  assert.equal(unsupported.status,400);assert.equal((await unsupported.json()).error,"UNSUPPORTED_HOME_LOCATION");
+  assert.equal((await fetch(`${base}/api/pilot-training/home?locationID=60010825`)).status,401);
 });
 
 test("qualification HTTP read retains explicit Pioneer even before Venture and refuses unsupported targets", async (t) => {

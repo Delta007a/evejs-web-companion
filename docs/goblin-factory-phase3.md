@@ -1,4 +1,7 @@
-# Goblin Factory Phase 3 — implementation and live QA boundary
+# Pilot Training Phase 3 — historical implementation and live QA boundary
+
+This records an earlier stop boundary, since resolved. See [current Pilot Training
+behavior and acceptance](pilot-training.md), including generic qualification migration.
 
 Date: 2026-09-27. Base: `3b2ac7354549511b1f2db8ecda514798b0000799`.
 Worktree: `30-pilot-training`, branch `feature/pilot-training-readonly`.

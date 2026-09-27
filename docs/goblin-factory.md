@@ -1,8 +1,12 @@
-# Goblin Factory
+# Pilot Training — historical implementation notes
+
+Current public behavior and generic configuration: [Pilot Training](pilot-training.md).
+The following records the earlier MINER prototype. Its fixed stages, persistence and
+CEO funding examples are superseded by the current documentation. The old route redirects.
 
 ## Entry and authority
 
-Open `/goblin-factory` on the Web Companion origin. `main.ts` imports the Factory
+Open `/pilot-training` on the Web Companion origin. `main.ts` imports the Factory
 instead of `App.svelte` on that path, so cockpit restoration, pilot selection,
 space polling and bot hosting are not initialized. The existing Express SPA
 fallback supports direct navigation and F5 on the same server/port. Pilot Hangar

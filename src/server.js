@@ -17,6 +17,7 @@ const { readMinerPilot } = require("./pilotTrainingRead");
 const { createTrainingQueueService } = require("./pilotTrainingQueue");
 const { createFactorySessions } = require("./factorySessions");
 const { createFactorySkills } = require("./factorySkills");
+const { createTrainingOnboarding } = require("./trainingOnboarding");
 const { createCharacterCreation } = require("./characterCreation");
 const config = require("./config");
 const botScriptStoreModule = require("./botScriptStore");
@@ -119,6 +120,7 @@ app.locals.botHost = botHost;
 app.locals.bridgeSessions = bridgeSessions;
 const factorySessions = createFactorySessions({ store, gateway, operations: characterOperations, heldSessions: bridgeSessions, botHost });
 const factorySkills = createFactorySkills({ store, gateway, data: staticData, queues: trainingQueues, sessions: factorySessions });
+const trainingOnboarding = createTrainingOnboarding({ store, gateway, sessions: factorySessions });
 // startServer() seeds the starter bots once the port is open, and all it
 // holds is the app -- never createApp's locals. Published here so that call
 // reaches THIS app's store, including one injected by a test.
@@ -357,11 +359,11 @@ app.get("/api/health", async (req, res) => {
 // src/webAuth.js verifyWebPassword/upsertWebPassword, data/web-users.json, and
 // `npm run webpass` stay in place (data-preservation rule) but are deprecated
 // for login.
-app.post(["/api/login", "/api/goblin-factory/login"], async (req, res, next) => {
+app.post(["/api/login", "/api/goblin-factory/login", "/api/pilot-training/login"], async (req, res, next) => {
   // Factory authentication uses the normal web token, but must never create a
   // game account or replace the cookie used by an existing cockpit.
   // Match Express's default case-insensitive, optional-trailing-slash routing.
-  const factoryLogin = /^\/api\/goblin-factory\/login\/?$/i.test(req.path);
+  const factoryLogin = /^\/api\/(?:goblin-factory|pilot-training)\/login\/?$/i.test(req.path);
   const username = String(req.body && req.body.username || "").trim();
   try {
     // An empty username can never name or create an account; refuse it here
@@ -18423,6 +18425,20 @@ app.get("/api/pilot-training/characters", requireTrainingAuth, async (req, res, 
   }
 });
 
+app.get("/api/pilot-training/qualification", requireTrainingAuth, async (req, res, next) => {
+  try {
+    const characterID = Number(req.query.characterID);
+    if (!Number.isSafeInteger(characterID) || characterID <= 0) throw Object.assign(new Error("Invalid pilot."), { code: "INVALID_CHARACTER_ID", statusCode: 400 });
+    const raw = String(req.query.configurations || "[]");
+    if (raw.length > 8192) throw Object.assign(new Error("Configuration too large."), { statusCode: 400 });
+    let configurations;
+    try { configurations = JSON.parse(raw); } catch { throw Object.assign(new Error("Invalid configuration."), { statusCode: 400 }); }
+    const { read } = await readMinerPilot({ store, gateway, data: staticData, account: req.account,
+      characterID, configurations, role: req.query.role, targetStage: req.query.targetConfigurationID || null });
+    res.json({ ok: true, ...read });
+  } catch (error) { next(error); }
+});
+
 app.get("/api/pilot-training/miner", requireTrainingAuth, async (req, res, next) => {
   const characterID = Number(req.query.characterID);
   if (!Number.isSafeInteger(characterID) || characterID <= 0) {
@@ -18471,6 +18487,26 @@ async function factoryFunding(body) {
     throw Object.assign(new Error("Funding authority is unavailable."), { code: "FUNDING_AUTH_REQUIRED", statusCode: 403 });
   return { account, sessionID: payload.sessionID, characterID: body.funding.characterID };
 }
+for (const action of ["review", "apply"]) {
+  app.post(`/api/pilot-training/onboarding/${action}`, requireTrainingAuth, async (req, res, next) => {
+    try {
+      const body = req.body || {};
+      const authority = await factoryFunding({ funding: body.authority });
+      res.json({ ok: true, outcome: await trainingOnboarding[action]({ account: req.account, sessionID: req.webSessionID }, body, authority) });
+    } catch (error) { next(error); }
+  });
+}
+app.get("/api/pilot-training/home", requireTrainingAuth, async (req, res, next) => {
+  try {
+    const id = Number(req.query.locationID);
+    if (!Number.isSafeInteger(id) || id <= 0) throw Object.assign(new Error("Invalid location ID."), { code: "INVALID_LOCATION", statusCode: 400 });
+    const station = staticData.getStation(id);
+    if (!station) throw Object.assign(new Error("This location is not a known NPC station. Player-structure relocation is unsupported: docking authority has not been established."), { code: "UNSUPPORTED_HOME_LOCATION", statusCode: 400 });
+    res.json({ ok: true, home: { locationID: id, name: station.stationName, systemID: station.solarSystemID || null,
+      kind: "NPC_STATION", relocation: "MANUAL_GM_ONLY", capability: "DOCKABLE_STATION" } });
+  } catch (error) { next(error); }
+});
+
 app.get("/api/pilot-training/ownership", requireTrainingAuth, async (req, res, next) => {
   try { res.json({ ok: true, ownership: await factorySessions.status(req.account, Number(req.query.characterID)) }); }
   catch (error) { next(error); }
@@ -20726,6 +20762,7 @@ app.use("/assets", express.static(path.join(webAppDir, "assets"), {
   maxAge: "30d",
 }));
 
+app.get(["/goblin-factory", "/goblin-factory/"], (_req, res) => res.redirect(308, "/pilot-training"));
 app.use(express.static(webAppDir));
 app.get(/.*/, (req, res) => {
   res.sendFile(path.join(webAppDir, "index.html"));

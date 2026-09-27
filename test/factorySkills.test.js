@@ -8,11 +8,11 @@ function harness() {
   const report = () => ({ policyVersion:1, stages:[{id:"PROCURER",fitting:{status:changed?"REVIEW_REQUIRED":"READY"}}],
     previews: { FAST:{stage:"PROCURER",requirements:[{typeID:11,level:3}]} } });
   const context = { account:{accountID:1,username:"BMiner9"},sessionID:"login1" };
-  const service = createFactorySkills({ data:{getSkillType:()=>({name:"Astrogeology"})},
-    queues:{async review() { return { stage:"PROCURER", fresh:{report:report()}, blockers: [{code:blocked?"UNKNOWN":"SKILLBOOK_REQUIRED",typeID:11}] }; }},
+  const service = createFactorySkills({ store:{listCharactersForAccount:async()=>[{characterID:10,accountID:2,corporationID:98}]}, data:{getSkillType:()=>({name:"Astrogeology"})},
+    queues:{async review() { return { stage:"PROCURER", fresh:{report:report(),corporationID:98}, blockers: [{code:blocked?"UNKNOWN":"SKILLBOOK_REQUIRED",typeID:11}] }; }},
     sessions:{async withSessions(refs,fn) { calls.push(["select",refs.map(r=>r.characterID)]); const value=await fn(refs.map(r=>({userid:r.account.accountID,characterID:r.characterID,bridgeSessionID:"held"})));
       calls.push(["release"]); return {value,cleanup:[{characterID:9,released:!cleanupFailed}]}; }},
-    gateway:{ async quoteFactorySkills(request) {calls.push(["quote",request]);return {reviewID:"private-runtime-review",canAcquire:true,expiresAt:Date.now()+180000,skills:[{typeID:11,price:"450000.00"}]};},
+    gateway:{ async callMethod(){return {result:{type:"packedrow",fields:{corporationID:98,ceoID:99}}};}, async quoteFactorySkills(request) {calls.push(["quote",request]);return {reviewID:"private-runtime-review",canAcquire:true,expiresAt:Date.now()+180000,skills:[{typeID:11,price:"450000.00"}]};},
       async acquireFactorySkills(request) {bought++;calls.push(["buy",request]);return {verified:true,status:"SKILLS_ACQUIRED"};} },
     loadPilot: async()=>{if(bought)readbacks++;return {read:{report:report()}};},
   });
@@ -35,7 +35,7 @@ test("review bound to account AND exact authenticated web session",async()=>{con
 test("funding authority explicit, bound to review, and not inferred from trainee",async()=>{const h=harness();
   await assert.rejects(h.service.review(h.context,{...h.request,policy:"CHARACTER_PLUS_CORPORATION_SHORTFALL"},null),/FUNDING_AUTHORITY_REQUIRED/);
   const funding={account:{accountID:2},sessionID:"officer-session",characterID:10};
-  const q=await h.service.review(h.context,{...h.request,policy:"CHARACTER_PLUS_CORPORATION_SHORTFALL"},funding);
+  const q=await h.service.review(h.context,{...h.request,policy:"CHARACTER_PLUS_CORPORATION_SHORTFALL",trainingWallet:{corporationID:98,accountKey:1000}},funding);
   await assert.rejects(h.service.acquire(h.context,{reviewID:q.reviewID,confirm:true},{...funding,characterID:99}),/FUNDING_AUTHORITY_CHANGED/);assert.equal(h.bought,0);
 });
 test("failed release prevents actionable review or offline queue handoff",async()=>{const h=harness();h.failCleanup();const q=await h.service.review(h.context,h.request,null);assert.equal(q.reviewID,null);assert.equal(q.canAcquire,false);});
@@ -55,4 +55,10 @@ test("explicit Pioneer acquisition retains the reviewed target on every reread a
   const q = await service.review(context,{characterID:10,mode:"FAST",targetStage:"PIONEER",stage:"PIONEER"},null);
   const out = await service.acquire(context,{reviewID:q.reviewID,confirm:true},null);
   assert.equal(out.stage,"PIONEER"); assert.deepEqual(seen,["PIONEER","PIONEER"]);
+});
+
+test("trainee self funding selects only the trainee and passes configured wallet",async()=>{
+ const h=harness();const q=await h.service.review(h.context,{...h.request,policy:"CHARACTER_PLUS_CORPORATION_SHORTFALL",fundingMode:"SELF",trainingWallet:{corporationID:98,accountKey:1000}},null);
+ assert.deepEqual(h.calls.find(c=>c[0]==="select")[1],[9]);assert.equal(h.calls.find(c=>c[0]==="quote")[1].fundingMode,"SELF");
+ await h.service.acquire(h.context,{reviewID:q.reviewID,confirm:true},null);assert.equal(h.bought,1);
 });

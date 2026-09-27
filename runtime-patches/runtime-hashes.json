@@ -2,9 +2,10 @@
   {
     "file": "server/src/_secondary/express/evejsWebGatewayRuntime.js",
     "originalSHA256": "418ACEEFC0A049497FAF8B01054C8471A653F7210A64FA666B9DC35F5742FE12",
-    "newSHA256": "5C5BDC55F4ED65560245333605767FBECC7C4B24035058A265FBA738EF6739AA",
+    "newSHA256": "89235AC2A4D9BBF3E6F4D9332A13CFF6105EB93D3E30BF8DA0AF68B8375DC3C1",
     "cleanReferenceSHA256": "418ACEEFC0A049497FAF8B01054C8471A653F7210A64FA666B9DC35F5742FE12",
-    "preExistingDifferenceFromClean": false
+    "preExistingDifferenceFromClean": false,
+    "previousFeatureSHA256": "5C5BDC55F4ED65560245333605767FBECC7C4B24035058A265FBA738EF6739AA"
   },
   {
     "file": "server/src/_secondary/express/evejsWebGateway.js",
@@ -30,7 +31,8 @@
   {
     "file": "server/src/_secondary/express/factorySkillAcquisition.js",
     "originalSHA256": null,
-    "newSHA256": "792662130EABC7FAADBB0153FF5FA125EB95BB84536561663BAB04D7EE22D1E1",
-    "note": "New file; identical tracked source in runtime-patches/factorySkillAcquisition.js"
+    "newSHA256": "2CCE918E86B0BD20A2AA9FA2FA7AD374FC79CDE8D40F8196AD3488546A6F2F24",
+    "note": "New file; identical tracked source in runtime-patches/factorySkillAcquisition.js",
+    "previousFeatureSHA256": "792662130EABC7FAADBB0153FF5FA125EB95BB84536561663BAB04D7EE22D1E1"
   }
 ]

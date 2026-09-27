@@ -107,7 +107,7 @@
             <span class="detail">
               {row.shipName ?? "No ship"}
               · {row.skillPoints ?? 0} SP
-              · {row.balance ?? 0} ISK
+              · Wallet is read when opened
             </span>
             {#if busyCharacterID === row.characterID}
               <span class="detail">Entering station…</span>

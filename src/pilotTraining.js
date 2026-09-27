@@ -1,6 +1,6 @@
 "use strict";
 
-// Read-only Miner qualification. Stage hulls and support policy are local;
+// Pure qualification core. Legacy hulls below exist only for compatibility;
 // fitted item types arrive from an accepted corporation saved fitting.
 const REQUIREMENT_ATTRIBUTES = [
   [182, 277], [183, 278], [184, 279],
@@ -171,27 +171,25 @@ function etaFor(targets, sheet, rows) {
   return { kind: "SERVER_QUEUE", completionMs, remainingMs: Math.max(0, completionMs - Number(sheet.serverNowMs)) };
 }
 
-function buildMinerReport(data, sheet, identity = {}, stageFittings = {}, targetStage = null) {
-  if (targetStage !== null && !STAGES.some((stage) => stage.id === targetStage)) {
+function buildQualificationReport(data, sheet, identity = {}, stageFittings = {}, targetStage = null, definitions = [], role = "MINER") {
+  if (targetStage !== null && !definitions.some((stage) => stage.id === targetStage)) {
     throw Object.assign(new Error("Unknown explicit training target."), { code: "INVALID_TARGET_STAGE", statusCode: 400 });
   }
   const rows = readSkillState(sheet);
-  const stages = STAGES.map((stage) => {
+  const stages = definitions.map((stage) => {
     const fitting = stageFittings[stage.id] || { status: "UNCONFIGURED" };
     const hard = fitting.status === "READY" ? prerequisiteClosure(fitting.typeIDs, data) : new Map();
-    if (fitting.status === "READY" && hard.size === 0) throw new Error(`No hull or fit skill requirements found for ${stage.id}`);
-    const support = closeSkillTargets(policyTargets(stage.supportPolicyKey, "balanced"), data);
+    const support = stage.supportPolicyKey ? closeSkillTargets(policyTargets(stage.supportPolicyKey, "balanced"), data) : new Map();
     const hardRows = requirements(hard, sheet, rows, data);
     return {
-      id: stage.id, supportPolicyKey: stage.supportPolicyKey,
+      id: stage.id, configurationID: stage.id, roleID: role, supportPolicyKey: stage.supportPolicyKey,
+      hullName: data.getType(stage.expectedHullTypeID)?.name || `Hull ${stage.expectedHullTypeID}`,
       fitName: fitting.name || "No accepted corporation fitting", hullTypeID: stage.expectedHullTypeID,
       fitting, hard: hardRows,
       support: requirements(support, sheet, rows, data),
-      skillQualification: fitting.status === "READY" ? qualification(hardRows) : "UNKNOWN",
+      skillQualification: fitting.status === "READY" && rows ? qualification(hardRows) : "UNKNOWN",
       equipmentReadiness: "UNKNOWN",
-      equipmentReason: stage.id === "VENTURE"
-        ? "Venture's reported drone inventory is not explained by the inspected static bay and mod rule; live equipment capability is not inspected here."
-        : "Equipment and effective drone capability are not inspected by this read-only skill MVP.",
+      equipmentReason: "Equipment ownership, fitting execution and effective runtime capability are not inspected.",
       hardTargets: hard,
     };
   });
@@ -203,11 +201,19 @@ function buildMinerReport(data, sheet, identity = {}, stageFittings = {}, target
   const current = stages[Math.max(currentIndex, 0)];
   const previews = {};
   for (const mode of ["FAST", "BALANCED", "MASTERY"]) {
-    if (!targetStage && mode !== "MASTERY" && !next) {
-      previews[mode] = { stage: null, requirements: [], targets: [], eta: { kind: "READY", remainingMs: 0 } };
+    if (stages.length && !targetStage && mode !== "MASTERY" && !next) {
+      previews[mode] = mode === "BALANCED" && !current?.supportPolicyKey
+        ? { stage: null, requirements: [], targets: [], disabled: true,
+          eta: { kind: "UNKNOWN", reason: "No support policy configured for this role/qualification. FAST remains available." } }
+        : { stage: null, requirements: [], targets: [], eta: { kind: "READY", remainingMs: 0 } };
       continue;
     }
     const base = targetStage ? stages.find((stage) => stage.id === targetStage) : mode === "MASTERY" ? current : next;
+    if (!base || (mode !== "FAST" && !base.supportPolicyKey)) {
+      previews[mode] = { stage: base?.id || null, requirements: [], targets: [], disabled: true,
+        eta: { kind: "UNKNOWN", reason: !base ? "No training configurations yet." : "No support policy configured for this role/qualification. FAST remains available." } };
+      continue;
+    }
     if (base.fitting.status !== "READY") {
       previews[mode] = { stage: base.id, requirements: [], targets: [], eta: { kind: "UNKNOWN", reason: "Stage fitting is not accepted and readable." } };
       continue;
@@ -228,16 +234,21 @@ function buildMinerReport(data, sheet, identity = {}, stageFittings = {}, target
     };
   }
   return {
-    role: "MINER", policyVersion: SUPPORT_POLICY_VERSION, targetStage,
+    role, policyVersion: SUPPORT_POLICY_VERSION, targetStage, targetConfigurationID: targetStage,
     trainingState: !rows ? "UNKNOWN" : sheet.queue.active && sheet.queue.entries.length > 0 ? "TRAINING"
       : sheet.queue.entries.length > 0 ? "QUEUED" : "IDLE",
     pilot: { characterID: identity.characterID || null, name: sheet?.characterName || identity.name || "Unknown", account: identity.account || "" },
     currentStage: currentIndex >= 0 ? stages[currentIndex].id : null,
-    currentStageStatus: rows ? (currentIndex >= 0 ? "READY" : stages[0].skillQualification) : "UNKNOWN",
+    currentStageStatus: rows ? (currentIndex >= 0 ? "READY" : (stages[0]?.skillQualification || "UNKNOWN")) : "UNKNOWN",
     nextStage: next?.id || null,
     stages: stages.map(({ hardTargets, ...stage }) => stage),
     previews,
   };
 }
 
-module.exports = { STAGES, SUPPORT_POLICY_VERSION, mergeTargets, dogmaEdges, prerequisiteClosure, closeSkillTargets, readSkillState, targetState, qualification, etaFor, buildMinerReport };
+// Compatibility for old API clients/tests; the public UI sends explicit configurations.
+function buildMinerReport(data, sheet, identity = {}, stageFittings = {}, targetStage = null) {
+  return buildQualificationReport(data, sheet, identity, stageFittings, targetStage, STAGES, "MINER");
+}
+
+module.exports = { buildQualificationReport, STAGES, SUPPORT_POLICY_VERSION, mergeTargets, dogmaEdges, prerequisiteClosure, closeSkillTargets, readSkillState, targetState, qualification, etaFor, buildMinerReport };

@@ -13,7 +13,8 @@ export interface RequirementRow {
 
 export interface MinerStage {
   readonly id: string;
-  readonly supportPolicyKey: string;
+  readonly supportPolicyKey: string | null;
+  readonly hullName?: string;
   readonly fitName: string;
   readonly hullTypeID: number;
   readonly fitting: StageFittingState;
@@ -47,6 +48,7 @@ export interface CorporationSavedFitting {
   readonly fittingID: number;
   readonly ownerID: number;
   readonly shipTypeID: number | null;
+  readonly hullName?: string | null;
   readonly name: string;
   readonly savedDate: string | null;
   readonly fingerprint: string | null;
@@ -68,6 +70,7 @@ export type PlanEta =
   | { readonly kind: "UNKNOWN"; readonly reason: string };
 
 export interface PlanPreview {
+  readonly disabled?: boolean;
   readonly requirements?: readonly RequirementRow[];
   readonly stage: string | null;
   readonly targets: readonly RequirementRow[];
@@ -75,7 +78,7 @@ export interface PlanPreview {
 }
 
 export interface MinerReport {
-  readonly role: "MINER";
+  readonly role: string;
   readonly policyVersion: number;
   readonly targetStage?: string | null;
   readonly trainingState: "TRAINING" | "QUEUED" | "IDLE" | "UNKNOWN";

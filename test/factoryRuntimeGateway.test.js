@@ -8,7 +8,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 const root = process.env.FACTORY_RUNTIME_ROOT;
 const source = root && fs.readFileSync(path.join(root,"server/src/_secondary/express/evejsWebGatewayRuntime.js"),"utf8");
-function harness({ online=false, closing=false, accountID=4 }={}) {
+function harness({ online=false, closing=false, accountID=4, ceoID=30 }={}) {
   const calls=[], sessions=new Map(); let snapshot={online,controlState:online?"retail_client":"offline"};
   const begin=source.indexOf("    selectFactoryCharacter(request) {");
   const end=source.indexOf("    // R5a flight status",begin);
@@ -17,7 +17,7 @@ function harness({ online=false, closing=false, accountID=4 }={}) {
     WEB_SELECT_CHARACTER_CALL:{service:"charUnboundMgr",method:"SelectCharacterID"},
     normalizeWebCallRequest:r=>({...r,sessionFields:r.session}),isAllowlistedWebCall:()=>true,
     serviceManager:{lookup:()=>({callMethod(method,args,session){calls.push("select");session.characterID=args[0];snapshot={online:true,controlState:"retail_client"};return null;}})},
-    getCharacter:()=>({accountID}), characterControlRuntime:{getCharacterControlSnapshot:()=>snapshot},
+    getCharacter:()=>({accountID,value:{corporationID:98}}), require:()=>({getCorporationRecord:()=>({ceoID})}), characterControlRuntime:{getCharacterControlSnapshot:()=>snapshot},
     sessionRegistry:{findSessionByCharacterID:()=>closing?{}:null,register:()=>calls.push("register")},
     createNotificationSink:()=>({bind(){}}), materializePersistentBrowserSession:()=>({}),
     browserSessionClientIDCounter:0,BROWSER_SESSION_CLIENT_ID_BASE:100,nowMs:Date.now,
@@ -32,7 +32,7 @@ function harness({ online=false, closing=false, accountID=4 }={}) {
   return {api:vm.runInNewContext(`({${source.slice(begin,end)}})`,ctx),calls,sessions};
 }
 test("runtime free-only selection blocks online, closing, and wrong-account pilots before dispatch",{skip:!root},async()=>{
-  for(const options of [{online:true},{closing:true},{accountID:5}]) {
+  for(const options of [{online:true},{closing:true},{accountID:5},{ceoID:7},{ceoID:null}]) {
     const h=harness(options);await assert.rejects(h.api.selectFactoryCharacter({args:[7,null,true],session:{userid:4}}));assert.deepEqual(h.calls,[]);
   }
 });

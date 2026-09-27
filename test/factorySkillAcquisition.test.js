@@ -14,6 +14,7 @@ function harness() {
   const d = {
     now: () => time, donationType: 10,
     getEntry(id, userid) { const e = entries.get(id); if (!e || e.userid !== userid) throw Object.assign(new Error("SESSION_NOT_FOUND"), { code: "SESSION_NOT_FOUND" }); return e; },
+    getCorporationCEOID: () => 30,
     getCharacter(id) { return records[id]; },
     purchaseEnabled: () => true, injected: (char, id) => { assert.equal(char, 9); return injected.has(id); },
     wallet: () => ({ balance: funds.personal }), journal: () => journal, corpJournal: () => corpJournal,
@@ -25,7 +26,7 @@ function harness() {
       if (method === "GetDirectPurchasePrice") return prices[args[0]];
       assert.equal(session._factoryMutationPending, true);
       if (method === "GiveCashFromCorpAccount") {
-        const [id, amount, key, reason] = args; assert.equal(id, 9); assert.equal(session.characterID, 10);
+        const [id, amount, key, reason] = args; assert.equal(id, 9); assert.ok([9,10].includes(session.characterID));
         if (failure === "silent-transfer") return null;
         funds.corp -= amount; funds.personal += amount;
         const entry = { description: reason, ownerID1: 98, ownerID2: 9, entryTypeID: 10, accountKey: key };
@@ -42,7 +43,7 @@ function harness() {
   };
   const service = createFactorySkillAcquisition(d);
   const trainee = { bridgeSessionID: "trainee", userid: 1, characterID: 9 }, officer = { bridgeSessionID: "officer", userid: 2, characterID: 10 };
-  const input = { trainee, officer, skillTypeIDs: [13, 11, 12], policy: "CHARACTER_PLUS_CORPORATION_SHORTFALL", division: 1000 };
+  const input = { trainee, officer, skillTypeIDs: [13, 11, 12], policy: "CHARACTER_PLUS_CORPORATION_SHORTFALL", division: 1000, trainingWallet: {corporationID:98,accountKey:1000} };
   return { service, d, input, funds, prices, injected, calls, records, entries,
     apply(q, extra = {}) { return service.acquire({ trainee, officer, reviewID: q.reviewID, confirm: true, ...extra }); },
     permission(value) { permitted = value; }, division(value) { divisionExists = value; }, fail(value) { failure = value; },
@@ -116,3 +117,24 @@ test("overlapping Factory operations rejected during asynchronous financial comm
   const call = h.d.call; let finish; h.d.call = (...args) => args[1] === "GiveCashFromCorpAccount" ? new Promise(resolve => { finish = () => resolve(call(...args)); }) : call(...args);
   const first = h.apply(q1); await assert.rejects(h.apply(q2), /FACTORY_BUSY/); finish(); assert.equal((await first).verified, true);
 });
+
+
+test("self funding uses one trainee authority, exact shortfall and both journal sides", async()=>{
+ const h=harness(); const q=h.service.quote({...h.input,officer:null,fundingMode:"SELF"});
+ const out=await h.apply(q,{officer:null}); assert.equal(out.verified,true);assert.equal(out.funded,"19500000.00");
+ assert.deepEqual(h.mutations().map(c=>[c.method,c.char]),[["GiveCashFromCorpAccount",9],["PurchaseSkills",9]]);
+ assert.equal(h.mutations()[0].args[1],19500000);assert.equal(h.entries.get("trainee").session._factoryMutationPending,false);
+});
+test("self funding requires configured matching wallet and Account Take",()=>{
+ for(const wallet of [null,{corporationID:99,accountKey:1000},{corporationID:98,accountKey:1001}]) {
+  const h=harness();assert.throws(()=>h.service.quote({...h.input,officer:null,fundingMode:"SELF",trainingWallet:wallet}),/TRAINING_WALLET_UNCONFIGURED/);assert.equal(h.mutations().length,0);
+ }
+ const h=harness();h.permission(false);assert.throws(()=>h.service.quote({...h.input,officer:null,fundingMode:"SELF"}),/UNAUTHORIZED/);
+});
+test("reviewed self mode cannot be replaced by crafted funding or amounts",async()=>{
+ const h=harness();const q=h.service.quote({...h.input,officer:null,fundingMode:"SELF"});
+ const out=await h.apply(q,{fundingMode:"AUTHORITY",trainingWallet:{corporationID:99,accountKey:1006},amount:999999999});
+ assert.equal(out.verified,true);assert.equal(h.mutations()[0].char,9);assert.equal(h.mutations()[0].args[2],1000);
+});
+
+test("promoted CEO cannot use a pending financial review",async()=>{const h=harness();const q=h.service.quote(h.input);h.d.getCorporationCEOID=()=>9;await assert.rejects(h.apply(q),/CEO_AUTHORITY_NOT_ALLOWED/);assert.equal(h.mutations().length,0);});

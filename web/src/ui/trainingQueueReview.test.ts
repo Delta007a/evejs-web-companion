@@ -6,6 +6,13 @@ import type { QueueReview, MinerTrainingRead } from "../training/types.ts";
 register("./svelteSsrHook.ts", import.meta.url);
 const { render } = await import("svelte/server");
 const QueueReviewPanel = (await import("./TrainingQueueReview.svelte")).default;
+const SkillAcquisition = (await import("./SkillAcquisition.svelte")).default;
+
+test("acquisition receipt retains its reviewed target when current plan target changes",()=>{
+  const outcome={mode:"FAST",stage:"later-id",status:"SKILLS_ACQUIRED",verified:true,at:1800000000000,purchased:[],funded:"0",wallet:"0",cleanup:[],readyForQueueReview:true};
+  const html=render(SkillAcquisition,{props:{outcome,review:null,busy:false,mode:"MASTERY",stage:"Current hull",officers:[],message:"",targetName:(id:string)=>id==="later-id"?"Reviewed later hull":id,onReview(){},onAcquire(){},onChange(){}}}).body;
+  assert.match(html,/Last acquisition · FAST → Reviewed later hull/);assert.doesNotMatch(html,/Last acquisition · FAST → Current hull/);
+});
 
 test("review distinguishes coverage/blockers, explicit mode/stage, and does not apply on rendering", () => {
   let mutations = 0;

@@ -6,7 +6,7 @@ import { fittingConfigKey, readSelections, saveSelections, readPilotPreferences,
 import { factoryError } from "./factory.ts";
 import { BridgeCallError } from "../bridge/callMethod.ts";
 import type { MinerReport, RequirementRow, QueueApplyOutcome } from "./types.ts";
-import { isGoblinFactoryPath } from "../app/pageRoute.ts";
+import { isGoblinFactoryPath, isPilotTrainingPath } from "../app/pageRoute.ts";
 
 function storage() {
   const data = new Map<string, string>();
@@ -94,3 +94,5 @@ test("last-apply persistence retains only compact audit metadata, never credenti
   assert.equal(readLastQueueApply(local, "Other", 9), null);
   assert.deepEqual(readSelections(local, "BMiner9", 9), {});
 });
+
+test("canonical Pilot Training route is independent of cockpit and legacy redirect",()=>{assert.equal(isPilotTrainingPath("/pilot-training"),true);assert.equal(isPilotTrainingPath("/pilot-training/"),true);assert.equal(isPilotTrainingPath("/"),false);assert.equal(isPilotTrainingPath("/pilot-training-other"),false);});

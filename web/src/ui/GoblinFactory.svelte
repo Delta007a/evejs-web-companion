@@ -2,29 +2,75 @@
   import { onMount, onDestroy } from "svelte";
   import { loadKnownCharacters } from "../app/knownCharacters.ts";
   import CharacterCreate from "./CharacterCreate.svelte";
-  import { createCharacter, type CreateCharacterRequest } from "../app/api.ts";
+  import { trainingOnboarding, resolveTrainingHome, loadQualification, createCharacter, type CreateCharacterRequest } from "../app/api.ts";
   import { loadTrainingCharacters, reviewTrainingQueue, applyTrainingQueue, reviewSkillAcquisition, acquireFactorySkills, factoryOwnership, type ApiOptions } from "../app/api.ts";
   import { BridgeCallError } from "../bridge/callMethod.ts";
-  import { readFactoryAccount, readFactoryPilot } from "../training/factoryClient.ts";
+  import { readFactoryAccount } from "../training/factoryClient.ts";
   import { factoryError as panelErrorWords } from "../training/factory.ts";
   import { formatDuration } from "../bridge/skills.ts";
-  import { acceptStageFitting } from "../training/fittingSelection.ts";
-  import { readSelections, saveSelections, readPilotPreferences, savePilotPreferences,
-    readFactoryAccounts, rememberFactoryAccount, factoryStatus, factoryStatusLabels,
+  import { readTrainingPreferences, saveTrainingPreferences, configSelections, putConfiguration, removeConfiguration, setRole,
+    qualificationName, type TrainingPreferences, type TrainingConfiguration } from "../training/configurations.ts";
+  import { readFactoryAccounts, rememberFactoryAccount, factoryStatus, factoryStatusLabels,
     readLastQueueApply, rememberQueueApply, type LastQueueApply,
-    type PilotPreferences, type PlanMode, type FactoryStatus } from "../training/factory.ts";
+    type PlanMode, type FactoryStatus } from "../training/factory.ts";
   import type { TrainingCharacter, MinerTrainingRead, StageFittingSelection, CorporationSavedFitting, QueueReview, QueueApplyOutcome, TrainingQueue } from "../training/types.ts";
   import MinerQualification from "./MinerQualification.svelte";
   import TrainingQueueReview from "./TrainingQueueReview.svelte";
   import SkillAcquisition from "./SkillAcquisition.svelte";
   import type { AcquisitionReview, AcquisitionOutcome, FactoryFunding, FundingPolicy } from "../training/types.ts";
 
+  import TrainingSettingsPanel from "./TrainingSettings.svelte";
+  import { defaultTrainingSettings, readTrainingSettings, saveTrainingSettings, type TrainingSettings } from "../training/settings.ts";
+  let settings = $state<TrainingSettings>(defaultTrainingSettings());
+  let onboardingReview = $state<{ rowKey: string; value: Record<string, any>; settingsHash: string } | null>(null);
+  let onboardingMessage = $state("");
+  function saveSettings(value: TrainingSettings) {
+    try { saveTrainingSettings(localStorage, value); settings = value; onboardingReview = null;
+      rows = rows.map((row) => ({ ...row, acquisition: null })); error = ""; }
+    catch (cause) { error = String(cause); }
+  }
+  async function resolveHome(id: number) {
+    const options = credentials.values().next().value;
+    if (!options) throw new Error("Authenticate an existing account first.");
+    return resolveTrainingHome(id, options);
+  }
+  function authorityForSettings() {
+    const officer = rows.find((r) => r.key === settings.onboarding.authorityKey);
+    const token = officer && credentials.get(officer.account)?.token;
+    if (!officer || !token) throw new Error("Authenticate the configured dedicated non-CEO authority first.");
+    return { characterID: officer.pilot.characterID, token };
+  }
+  async function onboard(row: PilotRow, apply = false, automatic = false) {
+    if (busy || !settings.onboarding.enabled) return;
+    const options = credentials.get(row.account); if (!options) return;
+    busy = true;
+    try {
+      const authority = authorityForSettings();
+      if (apply) {
+        const review = onboardingReview; onboardingReview = null;
+        if (!review || review.rowKey !== row.key || review.settingsHash !== JSON.stringify(readTrainingSettings(localStorage))) throw new Error("ONBOARDING_CHANGED: review settings again.");
+        const outcome = await trainingOnboarding("apply", { reviewID: review.value.reviewID, authority, confirm: true }, options);
+        const cleanup = (outcome.cleanup || []).map((c: { characterID: number; released: boolean }) =>
+          `Pilot ${c.characterID}: ${c.released ? "released" : "release unconfirmed"}`).join("; ");
+        onboardingMessage = `${row.pilot.name}: ${outcome.status}. Verified: ${outcome.verified ? "yes" : "no"}. ` +
+          `Corporation ${outcome.corporationID ?? "unknown"}; CEO ${outcome.ceoID ?? "unverified"}. ` +
+          `${(outcome.steps || []).join(", ")}. ${outcome.code || ""} ${outcome.message || ""} ${cleanup}`;
+        const ticket = ++generation; await readAccount(row.account, ticket);
+      } else {
+        const value = await trainingOnboarding("review", { ...settings.onboarding, characterID: row.pilot.characterID, authority }, options);
+        onboardingReview = { rowKey: row.key, value, settingsHash: JSON.stringify(settings) };
+        onboardingMessage = "Review corporation, dedicated authority and ordinary rights below. No membership change yet.";
+      }
+    } catch (cause) { onboardingMessage = panelErrorWords(cause); }
+    finally { busy = false; }
+    if (automatic && onboardingReview?.rowKey === row.key) await onboard(row, true);
+  }
   interface PilotRow {
-    key: string; account: string; pilot: TrainingCharacter; prefs: PilotPreferences;
+    key: string; account: string; pilot: TrainingCharacter; prefs: TrainingPreferences;
     selections: Record<string, StageFittingSelection>; result: MinerTrainingRead | null;
     error: string; readAt: number | null;
     review: QueueReview | null; queue: TrainingQueue | null; queueMessage: string; lastApply: LastQueueApply | null;
-    acquisition: AcquisitionReview | null; acquisitionFunding: FactoryFunding | null; acquisitionOutcome: AcquisitionOutcome | null; acquisitionMessage: string; owner: string;
+    acquisitionSettingsHash?: string; acquisition: AcquisitionReview | null; acquisitionFunding: FactoryFunding | null; acquisitionOutcome: AcquisitionOutcome | null; acquisitionMessage: string; owner: string;
   }
   let rows = $state<PilotRow[]>([]);
   let accounts = $state<string[]>([]);
@@ -43,12 +89,14 @@
     requestOptions: () => credentials.get(account)!,
     createCharacter: (request: CreateCharacterRequest) => createCharacter(request, credentials.get(account)!),
   });
-  async function created(account: string): Promise<void> {
+  async function created(account: string, characterID: number | null): Promise<void> {
     creatingAccount = null;
     busy = true;
     const ticket = ++generation;
     await readAccount(account, ticket);
     if (ticket === generation) busy = false;
+    const row = rows.find((r) => r.account === account && r.pilot.characterID === characterID);
+    if (row && settings.onboarding.enabled) await onboard(row, false, true);
   }
   let generation = 0;
   const keyOf = (account: string, id: number) => JSON.stringify([account, id]);
@@ -59,15 +107,15 @@
     rows = rows.map((row) => row.key === key ? { ...row, ...fields } : row);
   }
   function assertLocalPlan(row: PilotRow): void {
-    const prefs = readPilotPreferences(localStorage, row.account, row.pilot.characterID);
-    if (prefs.role !== row.prefs.role || prefs.mode !== row.prefs.mode ||
+    const prefs = readTrainingPreferences(localStorage, row.account, row.pilot.characterID);
+    if (JSON.stringify(prefs) !== JSON.stringify(row.prefs) || prefs.role !== row.prefs.role || prefs.mode !== row.prefs.mode ||
         (prefs.targetStage ?? null) !== (row.result?.report.targetStage ?? null)) throw new Error("PLAN_CHANGED: local target changed; refresh and review again.");
   }
   function makeRow(account: string, pilot: TrainingCharacter): PilotRow {
-    let prefs: PilotPreferences = { role: "", mode: "BALANCED" };
+    let prefs: TrainingPreferences = { version: 2, role: "", mode: "FAST", targetStage: null, roles: {} };
     let selections = {};
     let configError = "";
-    try { prefs = readPilotPreferences(localStorage, account, pilot.characterID); selections = readSelections(localStorage, account, pilot.characterID); }
+    try { prefs = readTrainingPreferences(localStorage, account, pilot.characterID); selections = configSelections(prefs.roles[prefs.role] || []); }
     catch { configError = "Browser configuration is unreadable; stored fitting selections have not been overwritten."; }
     return { key: keyOf(account, pilot.characterID), account, pilot, prefs, selections, result: null, error: configError, readAt: null,
       review: null, queue: null, queueMessage: "", lastApply: readLastQueueApply(localStorage, account, pilot.characterID),
@@ -80,8 +128,8 @@
     try {
       const options = credentials.get(row.account);
       if (!options) throw new Error("Account authentication is unavailable; refresh the roster.");
-      const selections = readSelections(localStorage, row.account, row.pilot.characterID);
-      const result = await readFactoryPilot(row.pilot.characterID, selections, options, row.prefs.targetStage ?? null);
+      const selections = configSelections(readTrainingPreferences(localStorage, row.account, row.pilot.characterID).roles[row.prefs.role] || []);
+      const result = await loadQualification(row.pilot.characterID, row.prefs.role, row.prefs.roles[row.prefs.role] || [], options, row.prefs.targetStage);
       let owner = "UNKNOWN";
       try { owner = (await factoryOwnership(row.pilot.characterID, options)).owner; } catch { /* unreadable ownership stays unknown */ }
       if (ticket === generation) update(row.key, { result, selections, queue: result.queue ?? null, error: "", readAt: Date.now(), owner });
@@ -135,12 +183,12 @@
     } catch (cause) { if (ticket === generation) error = panelErrorWords(cause); }
     finally { if (ticket === generation) busy = false; }
   }
-  async function changePreferences(row: PilotRow, prefs: PilotPreferences): Promise<void> {
+  async function changePreferences(row: PilotRow, prefs: TrainingPreferences): Promise<void> {
     if (busy) return;
     try {
-      savePilotPreferences(localStorage, row.account, row.pilot.characterID, prefs);
+      saveTrainingPreferences(localStorage, row.account, row.pilot.characterID, prefs);
       update(row.key, { prefs, review: null, queueMessage: "", acquisition: null });
-      if (prefs.role !== row.prefs.role || prefs.targetStage !== row.prefs.targetStage) {
+      if (prefs.role !== row.prefs.role || prefs.targetStage !== row.prefs.targetStage || JSON.stringify(prefs.roles) !== JSON.stringify(row.prefs.roles)) {
         busy = true;
         const ticket = ++generation;
         const fresh = makeRow(row.account, row.pilot);
@@ -150,42 +198,35 @@
       }
     } catch (cause) { error = `Local preferences could not be saved: ${String(cause)}`; busy = false; }
   }
-  async function configureFit(row: PilotRow, stageID: string, fitID: number, accepted?: CorporationSavedFitting): Promise<void> {
-    if (busy || !row.result) return;
-    try {
-      let selections = readSelections(localStorage, row.account, row.pilot.characterID);
-      if (accepted) selections = acceptStageFitting(selections, stageID, row.result.corporationID, accepted);
-      else {
-        selections = { ...selections };
-        if (fitID > 0) selections[stageID] = { scope: "CORPORATION", ownerID: row.result.corporationID, fittingID: fitID };
-        else delete selections[stageID];
-      }
-      saveSelections(localStorage, row.account, row.pilot.characterID, selections);
-      update(row.key, { selections, error: "", review: null, queueMessage: "", acquisition: null });
-      busy = true;
-      const ticket = ++generation;
-      await readPilot({ ...row, selections, error: "" }, ticket);
-      if (ticket === generation) busy = false;
-    } catch (cause) { error = `Fitting configuration could not be saved: ${String(cause)}`; busy = false; }
+  async function saveConfiguration(row: PilotRow, config: TrainingConfiguration): Promise<void> {
+    try { await changePreferences(row, putConfiguration(row.prefs, config)); } catch (cause) { error = String(cause); }
+  }
+  async function configureFit(row: PilotRow, id: string, _fitID: number, fit?: CorporationSavedFitting): Promise<void> {
+    const c = row.prefs.roles[row.prefs.role]?.find((entry) => entry.configurationID === id);
+    if (!c || !fit || fit.invalid || fit.ownerID !== row.result?.corporationID || fit.shipTypeID !== c.hullTypeID || fit.fittingID !== c.fittingID || !fit.fingerprint || !fit.savedDate) return;
+    await saveConfiguration(row, { ...c, acceptedFingerprint: fit.fingerprint, acceptedSavedDate: fit.savedDate });
+  }
+  async function chooseRole(row: PilotRow, role: string): Promise<void> {
+    try { await changePreferences(row, setRole(row.prefs, role)); } catch (cause) { error = String(cause); }
   }
   const queueError = (cause: unknown) => cause instanceof BridgeCallError ? `${cause.code}: ${cause.message}` : String(cause);
   async function reviewAcquisition(row: PilotRow, policy: FundingPolicy, officerKey: string, division: number): Promise<void> {
     const options = credentials.get(row.account);
-    if (busy || !row.result || !options || row.prefs.role !== "MINER") return;
+    if (busy || !row.result || !options || !row.prefs.role) return;
     busy = true;
     update(row.key, { acquisition: null, acquisitionMessage: "Reading live purchase authority; temporary sessions will be released…" });
     try {
       assertLocalPlan(row);
       const preview = row.result.report.previews[row.prefs.mode];
-      const selections = readSelections(localStorage, row.account, row.pilot.characterID);
+      const selections = configSelections(readTrainingPreferences(localStorage, row.account, row.pilot.characterID).roles[row.prefs.role] || []);
       if (JSON.stringify(selections) !== JSON.stringify(row.selections)) throw new Error("PLAN_CHANGED: refresh the fitting configuration.");
       const officer = rows.find((entry) => entry.key === officerKey);
       const token = officer && credentials.get(officer.account)?.token;
-      const funding = policy === "CHARACTER_PLUS_CORPORATION_SHORTFALL" && officer && token ? { characterID: officer.pilot.characterID, token } : null;
-      const acquisition = await reviewSkillAcquisition({ characterID: row.pilot.characterID, role: "MINER", mode: row.prefs.mode,
+      const funding = policy === "CHARACTER_PLUS_CORPORATION_SHORTFALL" && officerKey !== "SELF" && officer && token ? { characterID: officer.pilot.characterID, token } : null;
+      const acquisition = await reviewSkillAcquisition({ characterID: row.pilot.characterID, role: row.prefs.role, configurations: row.prefs.roles[row.prefs.role] || [], mode: row.prefs.mode,
         stage: preview.stage, targetStage: row.prefs.targetStage ?? null, displayedTargets: preview.targets.map(({ typeID, level }) => ({ typeID, level })), selections,
-        policy, funding, division }, options);
-      update(row.key, { acquisition, acquisitionFunding: funding, acquisitionMessage: "No money has moved. Confirm the exact review below." });
+        policy, funding, fundingMode: officerKey === "SELF" ? "SELF" : "AUTHORITY", trainingWallet: settings.trainingWallet, division }, options);
+      update(row.key, { acquisition, acquisitionFunding: funding, acquisitionSettingsHash: JSON.stringify(settings), acquisitionMessage: "No money has moved. Confirm the exact review below." });
     } catch (cause) { update(row.key, { acquisitionMessage: queueError(cause) }); }
     finally { busy = false; }
   }
@@ -196,8 +237,9 @@
     busy = true;
     update(row.key, { acquisition: null, acquisitionMessage: "Acquiring exactly the reviewed skills…", review: null });
     try {
-      if (review.mode !== row.prefs.mode || (readPilotPreferences(localStorage, row.account, row.pilot.characterID).targetStage ?? null) !== (row.result?.report.targetStage ?? null) || JSON.stringify(readSelections(localStorage, row.account, row.pilot.characterID)) !== JSON.stringify(row.selections)) throw new Error("PLAN_CHANGED: review again.");
+      if (review.mode !== row.prefs.mode || (readTrainingPreferences(localStorage, row.account, row.pilot.characterID).targetStage ?? null) !== (row.result?.report.targetStage ?? null) || JSON.stringify(configSelections(readTrainingPreferences(localStorage, row.account, row.pilot.characterID).roles[row.prefs.role] || [])) !== JSON.stringify(row.selections)) throw new Error("PLAN_CHANGED: review again.");
       assertLocalPlan(row);
+      if (row.acquisitionSettingsHash !== JSON.stringify(readTrainingSettings(localStorage))) throw new Error("FUNDING_CHANGED: review settings again.");
       const outcome = await acquireFactorySkills(review.reviewID, row.acquisitionFunding, options);
       update(row.key, { acquisitionOutcome: outcome, acquisitionMessage: outcome.status, result: outcome.fresh,
         queue: outcome.fresh?.queue ?? null, acquisitionFunding: null });
@@ -206,7 +248,7 @@
     finally { busy = false; }
   }
   async function reviewQueue(row: PilotRow): Promise<void> {
-    if (busy || !row.result || row.prefs.role !== "MINER") return;
+    if (busy || !row.result || !row.prefs.role) return;
     const options = credentials.get(row.account);
     if (!options) return;
     busy = true;
@@ -215,10 +257,10 @@
     try {
       assertLocalPlan(row);
       const preview = row.result.report.previews[row.prefs.mode];
-      const selections = readSelections(localStorage, row.account, row.pilot.characterID);
+      const selections = configSelections(readTrainingPreferences(localStorage, row.account, row.pilot.characterID).roles[row.prefs.role] || []);
       // Changing a local fit in another tab invalidates this displayed preview.
       if (JSON.stringify(selections) !== JSON.stringify(row.selections)) throw new Error("PLAN_CHANGED: fitting configuration changed; refresh first.");
-      const review = await reviewTrainingQueue({ characterID: row.pilot.characterID, role: "MINER", mode: row.prefs.mode,
+      const review = await reviewTrainingQueue({ characterID: row.pilot.characterID, role: row.prefs.role, configurations: row.prefs.roles[row.prefs.role] || [], mode: row.prefs.mode,
         stage: preview.stage, targetStage: row.prefs.targetStage ?? null, displayedTargets: preview.targets.map(({ typeID, level }) => ({ typeID, level })), selections }, options);
       if (ticket === generation) update(row.key, { review, result: review.fresh, queue: review.queue, readAt: Date.now() });
     } catch (cause) {
@@ -237,14 +279,14 @@
   async function applyQueue(row: PilotRow): Promise<void> {
     const reviewed = row.review;
     const options = credentials.get(row.account);
-    if (busy || !reviewed?.canApply || !reviewed.reviewID || !options || row.prefs.role !== "MINER") return;
+    if (busy || !reviewed?.canApply || !reviewed.reviewID || !options || !row.prefs.role) return;
     busy = true;
     const ticket = ++generation;
     // Disable repeat clicks immediately, even if transport fails.
     update(row.key, { review: null, queueMessage: "Applying reviewed append…" });
     try {
-      const selections = readSelections(localStorage, row.account, row.pilot.characterID);
-      if (row.prefs.mode !== reviewed.mode || (readPilotPreferences(localStorage, row.account, row.pilot.characterID).targetStage ?? null) !== (row.result?.report.targetStage ?? null) || JSON.stringify(selections) !== JSON.stringify(row.selections))
+      const selections = configSelections(readTrainingPreferences(localStorage, row.account, row.pilot.characterID).roles[row.prefs.role] || []);
+      if (row.prefs.mode !== reviewed.mode || (readTrainingPreferences(localStorage, row.account, row.pilot.characterID).targetStage ?? null) !== (row.result?.report.targetStage ?? null) || JSON.stringify(selections) !== JSON.stringify(row.selections))
         throw new Error("PLAN_CHANGED: local configuration changed; review again.");
       assertLocalPlan(row);
       const outcome = await applyTrainingQueue(reviewed.reviewID, options);
@@ -264,12 +306,14 @@
     } finally { if (ticket === generation) busy = false; }
   }
   onMount(() => {
+    document.title = "Pilot Training · EveJS Web";
+    try { settings = readTrainingSettings(localStorage); } catch (cause) { error = String(cause); }
     const ticket = generation;
     void (async () => {
       const known = loadKnownCharacters();
       rows = known.map((pilot) => makeRow(pilot.accountName, { characterID: pilot.characterID, name: pilot.characterName }));
       try { accounts = [...new Set([...known.map((pilot) => pilot.accountName), ...readFactoryAccounts(localStorage)])]; }
-      catch { error = "Saved Factory account list is unreadable."; }
+      catch { error = "Saved Pilot Training account list is unreadable."; }
       // Discover normal WC authentication, without creating a cockpit or flow.
       try {
         const current = await loadTrainingCharacters();
@@ -286,10 +330,16 @@
 
 <main class="factory">
   <header class="factory-head">
-    <div><p class="eyebrow">EveJS Web · control plane</p><h1>Goblin Factory</h1><p>Miner qualification and reviewed training queue append</p></div>
+    <div><p class="eyebrow">EveJS Web · control plane</p><h1>Pilot Training</h1><p>Corporation fitting qualifications and reviewed training queue append</p></div>
     <nav><a href="/" target="_blank" rel="noopener">Pilot Hangar</a><button type="button" class="minor" disabled={busy || !ready} onclick={refresh}>{busy ? "Reading…" : "Refresh roster"}</button></nav>
   </header>
   <p class="note">Skill qualification does not establish equipment readiness. Qualification and queue reads stay offline. Skill acquisition explicitly opens temporary live sessions for free pilots and releases them afterward.</p>
+  <TrainingSettingsPanel {settings} {busy} authorities={rows.map((r) => ({ key: r.key, label: `${r.account} · ${r.pilot.name}` }))} onSave={saveSettings} onResolve={resolveHome} />
+  {#if onboardingMessage}<p role="status">{onboardingMessage}</p>{/if}
+  {#if onboardingReview}
+    <p>Onboarding: pilot {onboardingReview.value.characterID} → corporation {onboardingReview.value.corporationID}; authority {onboardingReview.value.authorityID}; rights {onboardingReview.value.rights}. CEO {onboardingReview.value.ceoID} stays unchanged.</p>
+    <button type="button" disabled={busy} onclick={() => { const r = rows.find((r) => r.key === onboardingReview?.rowKey); if (r) void onboard(r, true); }}>Confirm reviewed onboarding / rights</button>
+  {/if}
   <form class="factory-controls" onsubmit={addAccount}>
     <label>Existing account <input aria-label="Existing account" bind:value={accountInput} disabled={busy || !ready} placeholder="Account name" autocomplete="username" /></label>
     <button class="minor" disabled={busy || !ready || !accountInput.trim()}>Sign in / add to roster</button>
@@ -302,7 +352,7 @@
   {#if creatingAccount}
     <section><h2>Create on account: {creatingAccount}</h2>
       <CharacterCreate flow={creatorFlow(creatingAccount)} onCancel={() => creatingAccount = null}
-        onCreated={() => { if (creatingAccount) void created(creatingAccount); }} />
+        onCreated={(id) => { if (creatingAccount) void created(creatingAccount, id); }} />
     </section>
   {:else}
     <div class="factory-controls">
@@ -331,42 +381,49 @@
       <article class="factory-card">
         <header><div><p class="eyebrow">Account · {row.account}</p><h2>{row.pilot.name}</h2></div><strong>{factoryStatusLabels[status]}</strong></header>
         <p class="note">Character #{row.pilot.characterID} · Corporation: {row.pilot.corporationName ?? row.pilot.corporationID ?? "Unknown"}</p>
+        {#if settings.onboarding.enabled}<button class="minor" disabled={busy} onclick={() => void onboard(row)}>Review corporation onboarding / rights</button>{/if}
         <div class="factory-controls">
-          <label>Role <select aria-label={`Role for ${row.pilot.name}`} value={row.prefs.role} disabled={busy} onchange={(event) => void changePreferences(row, { ...row.prefs, role: event.currentTarget.value === "MINER" ? "MINER" : "" })}>
-            <option value="">Unassigned</option><option value="MINER">MINER</option>
+          <label>Role <select aria-label={`Role for ${row.pilot.name}`} value={row.prefs.role} disabled={busy} onchange={(event) => void chooseRole(row, event.currentTarget.value)}>
+            <option value="">Unassigned</option>{#each [...new Set(["MINER", "HAULER", "GUARD", ...Object.keys(row.prefs.roles)])] as role}<option value={role}>{role}</option>{/each}
           </select></label>
-          <label>Target stage <select aria-label={`Target stage for ${row.pilot.name}`} value={row.prefs.targetStage ?? ""} disabled={busy} onchange={(event) => void changePreferences(row, { ...row.prefs, targetStage: (event.currentTarget.value || null) as PilotPreferences["targetStage"] })}>
-            <option value="">Automatic (next / current mastery)</option><option value="VENTURE">Venture</option><option value="PIONEER">Pioneer</option><option value="PROCURER">Procurer</option>
+          <label>Custom role <input aria-label={`Custom role for ${row.pilot.name}`} placeholder="ROLE_ID" disabled={busy} onchange={(event) => { if (event.currentTarget.value.trim()) void chooseRole(row, event.currentTarget.value.trim().toUpperCase()); }} /></label>
+          <label>Target qualification <select aria-label={`Target qualification for ${row.pilot.name}`} value={row.prefs.targetStage ?? ""} disabled={busy} onchange={(event) => void changePreferences(row, { ...row.prefs, targetStage: event.currentTarget.value || null })}>
+            <option value="">Automatic (next / current mastery)</option>
+            {#each row.prefs.roles[row.prefs.role] || [] as config}<option value={config.configurationID}>{qualificationName(report, config.configurationID)}</option>{/each}
           </select></label>
           <label>Plan <select aria-label={`Plan for ${row.pilot.name}`} value={row.prefs.mode} disabled={busy} onchange={(event) => void changePreferences(row, { ...row.prefs, mode: event.currentTarget.value as PlanMode })}>
-            <option>FAST</option><option>BALANCED</option><option>MASTERY</option>
+            <option>FAST</option><option disabled={!report || report.previews.BALANCED.disabled}>BALANCED</option><option disabled={!report || report.previews.MASTERY.disabled}>MASTERY</option>
           </select></label>
         </div>
         <dl>
-          <div><dt>Highest proven stage</dt><dd>{report?.currentStage ?? "None proven"}</dd></div>
-          <div><dt>Next stage</dt><dd>{report ? report.nextStage ?? "All stages reached" : "Unknown"}</dd></div>
+          <div><dt>Highest proven qualification</dt><dd>{report?.currentStage ? qualificationName(report, report.currentStage) : "None proven"}</dd></div>
+          <div><dt>Next qualification</dt><dd>{report ? report.nextStage ? qualificationName(report, report.nextStage) : "None" : "Unknown"}</dd></div>
           <div><dt>Queue state</dt><dd>{report?.trainingState ?? "UNKNOWN"}</dd></div>
           <div><dt>Equipment</dt><dd>UNKNOWN</dd></div>
           <div><dt>Plan ETA</dt><dd>{!preview ? "UNKNOWN" : preview.eta.kind === "READY" ? "Already trained" : preview.eta.kind === "SERVER_QUEUE" ? `${formatDuration(preview.eta.remainingMs)} · server queue` : "UNKNOWN"}</dd></div>
         </dl>
-        {#if !row.prefs.role}<p class="note">Select a role explicitly. Only MINER progression is supported.</p>{/if}
+        {#if !row.prefs.role}<p class="note">Select a role explicitly. FAST supports any valid corporation fitting. Support policies are optional.</p>{/if}
         {#if row.error}<p class="error" role="alert">{row.error}</p>{/if}
         {#if preview?.eta.kind === "UNKNOWN"}<p class="note">{preview.eta.reason}</p>{/if}
-        {#if report?.stages.some((stage) => stage.fitting.status !== "READY")}<p class="note">Stage fitting configuration needs attention; inspect stage details.</p>{/if}
+        {#if report?.stages.some((stage) => stage.fitting.status !== "READY")}<p class="note">One or more configured fittings need review. This roster status covers all configurations; the selected plan is validated separately.</p>{/if}
         {#if row.readAt}<p class="note">Read at {new Date(row.readAt).toLocaleTimeString()} · refresh to update</p>{/if}
         {#if row.result || row.queue || row.lastApply}
-          <button class="minor" type="button" onclick={() => expanded = expanded === row.key ? null : row.key}>{expanded === row.key ? "Hide stages" : "Inspect stages and plan"}</button>
+          <button class="minor" type="button" onclick={() => expanded = expanded === row.key ? null : row.key}>{expanded === row.key ? "Hide qualifications" : "Training ships and plan"}</button>
           {#if expanded === row.key}
             {#if row.result}<MinerQualification result={row.result} selections={row.selections} mode={row.prefs.mode} {busy}
+              configurations={row.prefs.roles[row.prefs.role] || []} role={row.prefs.role}
+              onSave={(config) => void saveConfiguration(row, config)} onRemove={(id) => void changePreferences(row, removeConfiguration(row.prefs, id))}
               onSelect={(stage, id) => void configureFit(row, stage, id)}
               onAccept={(stage, fit) => void configureFit(row, stage, fit.fittingID, fit)} />{/if}
             <p>Session ownership: {row.owner} · Ownership is rechecked before temporary login.</p>
-            {#if row.prefs.role === "MINER"}<TrainingQueueReview result={row.result} queue={row.queue} review={row.review}
+            {#if row.prefs.role}<TrainingQueueReview result={row.result} queue={row.queue} review={row.review}
               mode={row.prefs.mode} {busy} message={row.queueMessage} lastApply={row.lastApply}
               onReview={() => void reviewQueue(row)} onApply={() => void applyQueue(row)} />{/if}
-            {#if row.prefs.role === "MINER" && (row.review?.blockers.some((blocker) => blocker.code === "SKILLBOOK_REQUIRED") || row.acquisition || row.acquisitionOutcome || row.acquisitionMessage)}
+            {#if row.prefs.role && (row.review?.blockers.some((blocker) => blocker.code === "SKILLBOOK_REQUIRED") || row.acquisition || row.acquisitionOutcome || row.acquisitionMessage)}
               <SkillAcquisition review={row.acquisition} outcome={row.acquisitionOutcome} {busy} mode={row.prefs.mode}
-                stage={row.result?.report.previews[row.prefs.mode].stage ?? null} message={row.acquisitionMessage}
+                targetName={(id) => row.result ? qualificationName(row.result.report, id) : id}
+                stage={row.result?.report.previews[row.prefs.mode].stage ? qualificationName(row.result.report, row.result.report.previews[row.prefs.mode].stage) : null}
+                trainingWallet={settings.trainingWallet} message={row.acquisitionMessage}
                 officers={rows.filter((entry) => entry.key !== row.key).map((entry) => ({ key: entry.key, label: `${entry.account} · ${entry.pilot.name}` }))}
                 onReview={(policy, officer, division) => void reviewAcquisition(row, policy, officer, division)}
                 onAcquire={() => void acquireSkills(row)} onChange={() => update(row.key, { acquisition: null })} />
