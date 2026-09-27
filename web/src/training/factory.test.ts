@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { fittingConfigKey, readSelections, saveSelections, readPilotPreferences, savePilotPreferences,
   readFactoryAccounts, rememberFactoryAccount, factoryStatus, requirementCounts, skillTargetLabel,
   readLastQueueApply, rememberQueueApply } from "./factory.ts";
+import { factoryError } from "./factory.ts";
+import { BridgeCallError } from "../bridge/callMethod.ts";
 import type { MinerReport, RequirementRow, QueueApplyOutcome } from "./types.ts";
 import { isGoblinFactoryPath } from "../app/pageRoute.ts";
 
@@ -10,6 +12,9 @@ function storage() {
   const data = new Map<string, string>();
   return { getItem: (key: string) => data.get(key) ?? null, setItem: (key: string, value: string) => { data.set(key, value); } };
 }
+test("unknown technical account is an actionable refusal, never an empty owned account", () => {
+  assert.match(factoryError(new BridgeCallError("UNKNOWN_EVEJS_ACCOUNT", "Unknown", 401)), /does not exist.*does not create accounts/);
+});
 test("existing accepted fitting configuration survives role/mode changes and a fresh read", () => {
   const local = storage();
   const key = "pilot-training:miner:BMiner7:90000001";
@@ -21,7 +26,7 @@ test("existing accepted fitting configuration survives role/mode changes and a f
   savePilotPreferences(local, "BMiner7", 90000001, { role: "MINER", mode: "MASTERY" });
   assert.equal(local.getItem(key), saved, "preferences never rewrite the accepted stage map");
   assert.deepEqual(readSelections(local, "BMiner7", 90000001), JSON.parse(saved));
-  assert.deepEqual(readPilotPreferences(local, "BMiner7", 90000001), { role: "MINER", mode: "MASTERY" });
+  assert.deepEqual(readPilotPreferences(local, "BMiner7", 90000001), { role: "MINER", mode: "MASTERY", targetStage: null });
   assert.deepEqual(readSelections(local, "BMiner7", 90000002), {});
   assert.deepEqual(readSelections(local, "Other", 90000001), {});
   const accepted = readSelections(local, "BMiner7", 90000001);
@@ -43,6 +48,12 @@ test("remembered accounts are distinct from explicit character roles", () => {
   rememberFactoryAccount(local, "Other");
   assert.deepEqual(readFactoryAccounts(local), ["BMiner7", "Other"]);
   assert.equal(readPilotPreferences(local, "Other", 1).role, "");
+});
+test("explicit Pioneer target survives F5 without changing accepted fitting storage", () => {
+  const local = storage();
+  savePilotPreferences(local, "BMiner10", 10, { role: "MINER", mode: "FAST", targetStage: "PIONEER" });
+  assert.deepEqual(readPilotPreferences(local, "BMiner10", 10), { role: "MINER", mode: "FAST", targetStage: "PIONEER" });
+  assert.deepEqual(readSelections(local, "BMiner10", 10), {});
 });
 test("factory filters derive from evidence, with review and unknown taking priority", () => {
   const target = { state: "MISSING" } as RequirementRow;

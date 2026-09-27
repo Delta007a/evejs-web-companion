@@ -1,7 +1,15 @@
 import type { MinerReport, RequirementRow, StageFittingSelection, QueueApplyOutcome } from "./types.ts";
+import { BridgeCallError } from "../bridge/callMethod.ts";
+import { panelErrorWords } from "../bridge/refusals.ts";
+
+export function factoryError(cause: unknown): string {
+  return cause instanceof BridgeCallError && cause.code === "UNKNOWN_EVEJS_ACCOUNT"
+    ? "UNKNOWN_EVEJS_ACCOUNT: This account does not exist in the current EveJS runtime. Factory does not create accounts."
+    : panelErrorWords(cause);
+}
 
 export type PlanMode = "FAST" | "BALANCED" | "MASTERY";
-export interface PilotPreferences { role: "MINER" | ""; mode: PlanMode }
+export interface PilotPreferences { role: "MINER" | ""; mode: PlanMode; targetStage?: "VENTURE" | "PIONEER" | "PROCURER" | null }
 export interface FactoryStorage { getItem(key: string): string | null; setItem(key: string, value: string): void }
 export type LastQueueApply = Pick<QueueApplyOutcome, "mode" | "stage" | "status" | "at" | "added" | "attemptedAdditions" | "verified" | "code">;
 const applyKey = (account: string, id: number) => `goblin-factory:last-apply:v1:${account}:${id}`;
@@ -41,7 +49,8 @@ export function saveSelections(storage: FactoryStorage, account: string, charact
 export function readPilotPreferences(storage: FactoryStorage, account: string, characterID: number): PilotPreferences {
   const value = JSON.parse(storage.getItem(pilotPreferenceKey(account, characterID)) || "{}") as Partial<PilotPreferences> | null;
   return { role: value?.role === "MINER" ? "MINER" : "",
-    mode: value?.mode === "FAST" || value?.mode === "MASTERY" ? value.mode : "BALANCED" };
+    mode: value?.mode === "FAST" || value?.mode === "MASTERY" ? value.mode : "BALANCED",
+    targetStage: value?.targetStage && ["VENTURE", "PIONEER", "PROCURER"].includes(value.targetStage) ? value.targetStage : null };
 }
 export function savePilotPreferences(storage: FactoryStorage, account: string, characterID: number, prefs: PilotPreferences): void {
   storage.setItem(pilotPreferenceKey(account, characterID), JSON.stringify(prefs));

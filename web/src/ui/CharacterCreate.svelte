@@ -24,8 +24,11 @@
     loadCharCreationInfo,
     rollRandomCharacterName,
     validateCharacterName,
+    loadCharacterCreationState,
+    type CharacterCreationState,
   } from "../app/api.ts";
   import { BridgeCallError } from "../bridge/callMethod.ts";
+  import { creationNeedsRecovery } from "../app/characterCreationSafety.ts";
   import {
     bloodlineChoicesForRace,
     bloodlineForAncestry,
@@ -37,7 +40,7 @@
   import { panelErrorWords } from "../bridge/refusals.ts";
 
   let { flow, onCancel, onCreated }: {
-    flow: AppFlow;
+    flow: Pick<AppFlow, "requestOptions" | "createCharacter">;
     /** Back to the character list without creating anything. */
     onCancel: () => void;
     /** The new pilot exists and the roster has been re-read. */
@@ -57,17 +60,19 @@
   let rollingName = $state(false);
   let creating = $state(false);
   let error = $state("");
+  let creationState = $state<CharacterCreationState | null>(null);
+  let uncertain = $state(false);
 
   const choices = $derived(tables ? bloodlineChoicesForRace(tables, raceID) : []);
   const bloodline = $derived(tables ? bloodlineForAncestry(tables, ancestryID) : null);
   const race = $derived(tables?.races.find((row) => row.raceID === raceID) ?? null);
   const nameProblem = $derived(nameValidationMessage(nameCode));
   const trimmedName = $derived(name.trim().replace(/\s+/g, " "));
-  // A name the SERVER has not yet blessed does not block the button — it has the
-  // last word anyway, and blocking on an in-flight check would make the form
-  // feel stuck on a slow link. Only a code we have and that is a refusal does.
+  // Require the account/slot read and a positive name verdict. The BFF repeats
+  // these checks at creation time and never retries an ambiguous dispatch.
   const canCreate = $derived(
-    !creating && trimmedName.length > 0 && raceID > 0 && nameProblem === null,
+    !creating && !uncertain && creationState !== null && creationState.freeSlots > 0 && !creationState.pendingName &&
+      trimmedName.length > 0 && raceID > 0 && nameCode === 1,
   );
 
   /**
@@ -104,6 +109,8 @@
   async function load(): Promise<void> {
     loadError = "";
     try {
+      creationState = await loadCharacterCreationState(flow.requestOptions());
+      if (creationState.recoveredCharacterID) { onCreated(creationState.recoveredCharacterID); return; }
       const loaded = await loadCharCreationInfo(flow.requestOptions());
       tables = loaded;
       if (loaded.races.length > 0) {
@@ -191,6 +198,7 @@
       });
       onCreated(created.characterID);
     } catch (cause) {
+      uncertain = creationNeedsRecovery(cause);
       error =
         cause instanceof BridgeCallError
           ? cause.code === "CharNameInvalid"
@@ -201,12 +209,27 @@
       creating = false;
     }
   }
+
+  async function checkCreation(): Promise<void> {
+    if (creating) return;
+    creating = true;
+    try {
+      creationState = await loadCharacterCreationState(flow.requestOptions());
+      const found = creationState.characters.find((row) => row.name.toLowerCase() === trimmedName.toLowerCase());
+      if (creationState.recoveredCharacterID || found) onCreated(creationState.recoveredCharacterID || found!.characterID);
+      else error = "Creation is not confirmed. Do not retry; inspect the account roster.";
+    } catch (cause) { error = panelErrorWords(cause); }
+    finally { creating = false; }
+  }
 </script>
 
 <section class="panel">
   <header class="panel-head">
     <h2>New character</h2>
   </header>
+  <p>Available slots: {creationState?.freeSlots ?? "UNKNOWN"} / {creationState?.slots ?? "UNKNOWN"}. Creation does not log the pilot in.</p>
+  {#if creationState?.pendingName}<p class="error">Unresolved creation: {creationState.pendingName}. Inspect the roster before another create.</p>{/if}
+  {#if uncertain || creationState?.pendingName}<button type="button" disabled={creating} onclick={checkCreation}>Check creation result (read only)</button>{/if}
 
   {#if loadError}
     <p class="error" role="alert">{loadError}</p>

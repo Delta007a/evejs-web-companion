@@ -23,7 +23,7 @@ function createFactorySkills({ store, gateway, data, queues, sessions, now = Dat
     for (const [id, item] of reviews) if (item.expiresAt <= now()) reviews.delete(id);
     while (reviews.size >= 100) reviews.delete(reviews.keys().next().value);
     if (quote.canAcquire && released) reviews.set(reviewID, { accountID: context.account.accountID, sessionID: context.sessionID,
-      characterID: request.characterID, mode: request.mode, stage: q.stage, selections: structuredClone(request.selections || {}),
+      characterID: request.characterID, mode: request.mode, stage: q.stage, targetStage: request.targetStage || null, selections: structuredClone(request.selections || {}),
       planHash: planFingerprint(q.fresh.report, request.mode), funding: funding ? { accountID: funding.account.accountID, sessionID: funding.sessionID, characterID: funding.characterID } : null,
       runtimeReviewID, expiresAt: quote.expiresAt });
     return { ...quote, reviewID: quote.canAcquire && released ? reviewID : null, canAcquire: quote.canAcquire && released,
@@ -37,7 +37,7 @@ function createFactorySkills({ store, gateway, data, queues, sessions, now = Dat
     reviews.delete(request.reviewID);
     if (review.funding && (!funding || funding.account.accountID !== review.funding.accountID || funding.sessionID !== review.funding.sessionID || funding.characterID !== review.funding.characterID)) throw trainingError("FUNDING_AUTHORITY_CHANGED");
     if (!review.funding) funding = null;
-    const current = await loadPilot({ store, gateway, data, account: context.account, characterID: review.characterID, selections: review.selections });
+    const current = await loadPilot({ store, gateway, data, account: context.account, characterID: review.characterID, selections: review.selections, targetStage: review.targetStage });
     if (planFingerprint(current.read.report, review.mode) !== review.planHash) throw trainingError("PLAN_CHANGED", "Stage, fitting or plan changed. Review again.");
     let result;
     try {
@@ -54,7 +54,7 @@ function createFactorySkills({ store, gateway, data, queues, sessions, now = Dat
         cleanup: error.cleanup || [], mode: review.mode, stage: review.stage, at: now(), fresh: null };
     }
     let fresh = null;
-    try { fresh = (await loadPilot({ store, gateway, data, account: context.account, characterID: review.characterID, selections: review.selections })).read; } catch { /* outcome still reports verified runtime facts */ }
+    try { fresh = (await loadPilot({ store, gateway, data, account: context.account, characterID: review.characterID, selections: review.selections, targetStage: review.targetStage })).read; } catch { /* outcome still reports verified runtime facts */ }
     return { ...result.value, cleanup: result.cleanup, mode: review.mode, stage: review.stage, at: now(), fresh,
       readyForQueueReview: result.value.verified && result.cleanup.every((row) => row.released) };
   }

@@ -7,7 +7,8 @@ function trainingError(code, message = code, statusCode = 409) {
   return Object.assign(new Error(message), { code, statusCode });
 }
 
-async function readMinerPilot({ store, gateway, data, account, characterID, selections, sheet: providedSheet }) {
+async function readMinerPilot({ store, gateway, data, account, characterID, selections, targetStage = null, sheet: providedSheet }) {
+  if (targetStage !== null && !training.STAGES.some((stage) => stage.id === targetStage)) throw trainingError("INVALID_TARGET_STAGE", "Unknown explicit training target.", 400);
   const library = await fittingAuthority.readAccountCorpFittings({ store, gateway, data,
     accountID: account.accountID, characterID });
   if (library.status === "NOT_OWNED") throw trainingError("CHARACTER_NOT_FOUND", "Account does not own this pilot.", 404);
@@ -17,7 +18,7 @@ async function readMinerPilot({ store, gateway, data, account, characterID, sele
   if (!sheet) throw trainingError("SKILL_STATE_UNAVAILABLE", "Skill state is unreadable.", 503);
   let report;
   try {
-    report = training.buildMinerReport(data, sheet, { characterID, name: library.character.characterName, account: account.username }, fittings);
+    report = training.buildMinerReport(data, sheet, { characterID, name: library.character.characterName, account: account.username }, fittings, targetStage);
   } catch (error) {
     throw trainingError("STATIC_SKILL_DATA_UNAVAILABLE", error.message, 503);
   }

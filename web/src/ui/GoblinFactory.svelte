@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { loadKnownCharacters } from "../app/knownCharacters.ts";
+  import CharacterCreate from "./CharacterCreate.svelte";
+  import { createCharacter, type CreateCharacterRequest } from "../app/api.ts";
   import { loadTrainingCharacters, reviewTrainingQueue, applyTrainingQueue, reviewSkillAcquisition, acquireFactorySkills, factoryOwnership, type ApiOptions } from "../app/api.ts";
   import { BridgeCallError } from "../bridge/callMethod.ts";
   import { readFactoryAccount, readFactoryPilot } from "../training/factoryClient.ts";
-  import { panelErrorWords } from "../bridge/refusals.ts";
+  import { factoryError as panelErrorWords } from "../training/factory.ts";
   import { formatDuration } from "../bridge/skills.ts";
   import { acceptStageFitting } from "../training/fittingSelection.ts";
   import { readSelections, saveSelections, readPilotPreferences, savePilotPreferences,
@@ -34,7 +36,20 @@
   let query = $state("");
   let filter = $state<"ALL" | FactoryStatus>("ALL");
   let expanded = $state<string | null>(null);
+  let creatingAccount = $state<string | null>(null);
+  let newTraineeAccount = $state("");
   const credentials = new Map<string, ApiOptions>(); // Memory only; never gameplay sessions.
+  const creatorFlow = (account: string) => ({
+    requestOptions: () => credentials.get(account)!,
+    createCharacter: (request: CreateCharacterRequest) => createCharacter(request, credentials.get(account)!),
+  });
+  async function created(account: string): Promise<void> {
+    creatingAccount = null;
+    busy = true;
+    const ticket = ++generation;
+    await readAccount(account, ticket);
+    if (ticket === generation) busy = false;
+  }
   let generation = 0;
   const keyOf = (account: string, id: number) => JSON.stringify([account, id]);
   const visible = $derived(rows.filter((row) =>
@@ -42,6 +57,11 @@
     (filter === "ALL" || factoryStatus(row.result?.report ?? null, row.prefs.mode, row.error) === filter)));
   function update(key: string, fields: Partial<PilotRow>): void {
     rows = rows.map((row) => row.key === key ? { ...row, ...fields } : row);
+  }
+  function assertLocalPlan(row: PilotRow): void {
+    const prefs = readPilotPreferences(localStorage, row.account, row.pilot.characterID);
+    if (prefs.role !== row.prefs.role || prefs.mode !== row.prefs.mode ||
+        (prefs.targetStage ?? null) !== (row.result?.report.targetStage ?? null)) throw new Error("PLAN_CHANGED: local target changed; refresh and review again.");
   }
   function makeRow(account: string, pilot: TrainingCharacter): PilotRow {
     let prefs: PilotPreferences = { role: "", mode: "BALANCED" };
@@ -61,7 +81,7 @@
       const options = credentials.get(row.account);
       if (!options) throw new Error("Account authentication is unavailable; refresh the roster.");
       const selections = readSelections(localStorage, row.account, row.pilot.characterID);
-      const result = await readFactoryPilot(row.pilot.characterID, selections, options);
+      const result = await readFactoryPilot(row.pilot.characterID, selections, options, row.prefs.targetStage ?? null);
       let owner = "UNKNOWN";
       try { owner = (await factoryOwnership(row.pilot.characterID, options)).owner; } catch { /* unreadable ownership stays unknown */ }
       if (ticket === generation) update(row.key, { result, selections, queue: result.queue ?? null, error: "", readAt: Date.now(), owner });
@@ -120,7 +140,7 @@
     try {
       savePilotPreferences(localStorage, row.account, row.pilot.characterID, prefs);
       update(row.key, { prefs, review: null, queueMessage: "", acquisition: null });
-      if (prefs.role !== row.prefs.role) {
+      if (prefs.role !== row.prefs.role || prefs.targetStage !== row.prefs.targetStage) {
         busy = true;
         const ticket = ++generation;
         const fresh = makeRow(row.account, row.pilot);
@@ -155,6 +175,7 @@
     busy = true;
     update(row.key, { acquisition: null, acquisitionMessage: "Reading live purchase authority; temporary sessions will be released…" });
     try {
+      assertLocalPlan(row);
       const preview = row.result.report.previews[row.prefs.mode];
       const selections = readSelections(localStorage, row.account, row.pilot.characterID);
       if (JSON.stringify(selections) !== JSON.stringify(row.selections)) throw new Error("PLAN_CHANGED: refresh the fitting configuration.");
@@ -162,7 +183,7 @@
       const token = officer && credentials.get(officer.account)?.token;
       const funding = policy === "CHARACTER_PLUS_CORPORATION_SHORTFALL" && officer && token ? { characterID: officer.pilot.characterID, token } : null;
       const acquisition = await reviewSkillAcquisition({ characterID: row.pilot.characterID, role: "MINER", mode: row.prefs.mode,
-        stage: preview.stage, displayedTargets: preview.targets.map(({ typeID, level }) => ({ typeID, level })), selections,
+        stage: preview.stage, targetStage: row.prefs.targetStage ?? null, displayedTargets: preview.targets.map(({ typeID, level }) => ({ typeID, level })), selections,
         policy, funding, division }, options);
       update(row.key, { acquisition, acquisitionFunding: funding, acquisitionMessage: "No money has moved. Confirm the exact review below." });
     } catch (cause) { update(row.key, { acquisitionMessage: queueError(cause) }); }
@@ -175,7 +196,8 @@
     busy = true;
     update(row.key, { acquisition: null, acquisitionMessage: "Acquiring exactly the reviewed skills…", review: null });
     try {
-      if (review.mode !== row.prefs.mode || JSON.stringify(readSelections(localStorage, row.account, row.pilot.characterID)) !== JSON.stringify(row.selections)) throw new Error("PLAN_CHANGED: review again.");
+      if (review.mode !== row.prefs.mode || (readPilotPreferences(localStorage, row.account, row.pilot.characterID).targetStage ?? null) !== (row.result?.report.targetStage ?? null) || JSON.stringify(readSelections(localStorage, row.account, row.pilot.characterID)) !== JSON.stringify(row.selections)) throw new Error("PLAN_CHANGED: review again.");
+      assertLocalPlan(row);
       const outcome = await acquireFactorySkills(review.reviewID, row.acquisitionFunding, options);
       update(row.key, { acquisitionOutcome: outcome, acquisitionMessage: outcome.status, result: outcome.fresh,
         queue: outcome.fresh?.queue ?? null, acquisitionFunding: null });
@@ -191,12 +213,13 @@
     const ticket = ++generation;
     update(row.key, { review: null, queueMessage: "" });
     try {
+      assertLocalPlan(row);
       const preview = row.result.report.previews[row.prefs.mode];
       const selections = readSelections(localStorage, row.account, row.pilot.characterID);
       // Changing a local fit in another tab invalidates this displayed preview.
       if (JSON.stringify(selections) !== JSON.stringify(row.selections)) throw new Error("PLAN_CHANGED: fitting configuration changed; refresh first.");
       const review = await reviewTrainingQueue({ characterID: row.pilot.characterID, role: "MINER", mode: row.prefs.mode,
-        stage: preview.stage, displayedTargets: preview.targets.map(({ typeID, level }) => ({ typeID, level })), selections }, options);
+        stage: preview.stage, targetStage: row.prefs.targetStage ?? null, displayedTargets: preview.targets.map(({ typeID, level }) => ({ typeID, level })), selections }, options);
       if (ticket === generation) update(row.key, { review, result: review.fresh, queue: review.queue, readAt: Date.now() });
     } catch (cause) {
       if (ticket === generation) {
@@ -221,8 +244,9 @@
     update(row.key, { review: null, queueMessage: "Applying reviewed append…" });
     try {
       const selections = readSelections(localStorage, row.account, row.pilot.characterID);
-      if (row.prefs.mode !== reviewed.mode || JSON.stringify(selections) !== JSON.stringify(row.selections))
+      if (row.prefs.mode !== reviewed.mode || (readPilotPreferences(localStorage, row.account, row.pilot.characterID).targetStage ?? null) !== (row.result?.report.targetStage ?? null) || JSON.stringify(selections) !== JSON.stringify(row.selections))
         throw new Error("PLAN_CHANGED: local configuration changed; review again.");
+      assertLocalPlan(row);
       const outcome = await applyTrainingQueue(reviewed.reviewID, options);
       if (ticket !== generation) return;
       update(row.key, { result: outcome.fresh, queue: outcome.queue, queueMessage: `${outcome.status}${outcome.code ? ` · ${outcome.code}` : ""}: ${outcome.message}`,
@@ -275,6 +299,23 @@
   {#each Object.entries(accountErrors).filter(([, message]) => message) as [account, message] (account)}
     <p class="error">{account}: {message}</p>
   {/each}
+  {#if creatingAccount}
+    <section><h2>Create on account: {creatingAccount}</h2>
+      <CharacterCreate flow={creatorFlow(creatingAccount)} onCancel={() => creatingAccount = null}
+        onCreated={() => { if (creatingAccount) void created(creatingAccount); }} />
+    </section>
+  {:else}
+    <div class="factory-controls">
+      <label>New trainee account <select bind:value={newTraineeAccount} disabled={busy}>
+        <option value="">Choose an authenticated account</option>
+      {#each accounts.filter((account) => credentials.has(account) && (!accountErrors[account] || accountErrors[account] === "No characters on this account.")) as account}
+        <option value={account}>{account}</option>
+      {/each}
+      </select></label>
+      <button class="minor" type="button" disabled={busy || !newTraineeAccount} onclick={() => creatingAccount = newTraineeAccount}>Open character creator</button>
+      <span class="note">Uses the existing character creator; authoritative free slots are checked before creation.</span>
+    </div>
+  {/if}
   <div class="factory-controls">
     <label>Search <input aria-label="Search account or character" bind:value={query} placeholder="Account or character" /></label>
     <label>Status <select bind:value={filter}><option value="ALL">All</option>{#each Object.entries(factoryStatusLabels) as [value, label]}<option {value}>{label}</option>{/each}</select></label>
@@ -293,6 +334,9 @@
         <div class="factory-controls">
           <label>Role <select aria-label={`Role for ${row.pilot.name}`} value={row.prefs.role} disabled={busy} onchange={(event) => void changePreferences(row, { ...row.prefs, role: event.currentTarget.value === "MINER" ? "MINER" : "" })}>
             <option value="">Unassigned</option><option value="MINER">MINER</option>
+          </select></label>
+          <label>Target stage <select aria-label={`Target stage for ${row.pilot.name}`} value={row.prefs.targetStage ?? ""} disabled={busy} onchange={(event) => void changePreferences(row, { ...row.prefs, targetStage: (event.currentTarget.value || null) as PilotPreferences["targetStage"] })}>
+            <option value="">Automatic (next / current mastery)</option><option value="VENTURE">Venture</option><option value="PIONEER">Pioneer</option><option value="PROCURER">Procurer</option>
           </select></label>
           <label>Plan <select aria-label={`Plan for ${row.pilot.name}`} value={row.prefs.mode} disabled={busy} onchange={(event) => void changePreferences(row, { ...row.prefs, mode: event.currentTarget.value as PlanMode })}>
             <option>FAST</option><option>BALANCED</option><option>MASTERY</option>

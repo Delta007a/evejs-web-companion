@@ -69,7 +69,7 @@
     </details>
   {/each}
   <h3>{mode} preview → {preview.stage ?? "No next stage"}</h3>
-  <p class="note">{mode === "FAST" ? "Next-stage hard requirements only." : mode === "BALANCED" ? "Next-stage hard requirements plus selected support targets." : "Current-stage hard requirements and selected support/mastery targets, including intentional level V goals."}</p>
+  <p class="note">{mode === "FAST" ? "Target-stage hard requirements only." : mode === "BALANCED" ? "Next-stage hard requirements plus selected support targets." : "Current-stage hard requirements and selected support/mastery targets, including intentional level V goals."}</p>
   <p>ETA: {preview.eta.kind === "READY" ? "Already trained" : preview.eta.kind === "SERVER_QUEUE" ? `${formatDuration(preview.eta.remainingMs)} · authoritative server queue` : `UNKNOWN · ${preview.eta.reason}`}</p>
   {#if preview.targets.length > 0}{@render skillRows(preview.targets)}{/if}
   <p class="note">This preview does not change training. Review the append below before explicitly applying. Equipment is not issued.</p>

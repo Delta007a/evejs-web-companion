@@ -39,3 +39,20 @@ test("funding authority explicit, bound to review, and not inferred from trainee
   await assert.rejects(h.service.acquire(h.context,{reviewID:q.reviewID,confirm:true},{...funding,characterID:99}),/FUNDING_AUTHORITY_CHANGED/);assert.equal(h.bought,0);
 });
 test("failed release prevents actionable review or offline queue handoff",async()=>{const h=harness();h.failCleanup();const q=await h.service.review(h.context,h.request,null);assert.equal(q.reviewID,null);assert.equal(q.canAcquire,false);});
+
+test("explicit Pioneer acquisition retains the reviewed target on every reread and never applies queue", async () => {
+  const seen = [];
+  const report = { targetStage:"PIONEER", policyVersion:1, stages:[{id:"PIONEER",fitting:{status:"READY"}}],
+    previews:{FAST:{stage:"PIONEER",requirements:[{typeID:11,level:1}]}} };
+  const context = {account:{accountID:1},sessionID:"session"};
+  const service = createFactorySkills({data:{getSkillType:()=>({name:"Skill"})},
+    queues:{review:async()=>({stage:"PIONEER",fresh:{report},blockers:[{code:"SKILLBOOK_REQUIRED",typeID:11}]})},
+    sessions:{withSessions:async(refs, fn)=>({value:await fn([{}]),cleanup:[{released:true}]})},
+    gateway:{quoteFactorySkills:async()=>({reviewID:"runtime",canAcquire:true,expiresAt:Date.now()+10000,skills:[]}),
+      acquireFactorySkills:async()=>({verified:true,status:"SKILLS_ACQUIRED"})},
+    loadPilot:async(args)=>{seen.push(args.targetStage);return {read:{report}};},
+  });
+  const q = await service.review(context,{characterID:10,mode:"FAST",targetStage:"PIONEER",stage:"PIONEER"},null);
+  const out = await service.acquire(context,{reviewID:q.reviewID,confirm:true},null);
+  assert.equal(out.stage,"PIONEER"); assert.deepEqual(seen,["PIONEER","PIONEER"]);
+});

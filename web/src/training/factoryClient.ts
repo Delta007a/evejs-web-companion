@@ -9,6 +9,6 @@ export async function readFactoryAccount(account: string, options: ApiOptions = 
   return { ...roster, requestOptions };
 }
 
-export async function readFactoryPilot(characterID: number, selections: Readonly<Record<string, StageFittingSelection>>, options: ApiOptions) {
-  return loadMinerTraining(characterID, selections, options);
+export async function readFactoryPilot(characterID: number, selections: Readonly<Record<string, StageFittingSelection>>, options: ApiOptions, targetStage: string | null = null) {
+  return loadMinerTraining(characterID, selections, options, targetStage);
 }

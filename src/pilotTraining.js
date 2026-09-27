@@ -171,7 +171,10 @@ function etaFor(targets, sheet, rows) {
   return { kind: "SERVER_QUEUE", completionMs, remainingMs: Math.max(0, completionMs - Number(sheet.serverNowMs)) };
 }
 
-function buildMinerReport(data, sheet, identity = {}, stageFittings = {}) {
+function buildMinerReport(data, sheet, identity = {}, stageFittings = {}, targetStage = null) {
+  if (targetStage !== null && !STAGES.some((stage) => stage.id === targetStage)) {
+    throw Object.assign(new Error("Unknown explicit training target."), { code: "INVALID_TARGET_STAGE", statusCode: 400 });
+  }
   const rows = readSkillState(sheet);
   const stages = STAGES.map((stage) => {
     const fitting = stageFittings[stage.id] || { status: "UNCONFIGURED" };
@@ -200,11 +203,11 @@ function buildMinerReport(data, sheet, identity = {}, stageFittings = {}) {
   const current = stages[Math.max(currentIndex, 0)];
   const previews = {};
   for (const mode of ["FAST", "BALANCED", "MASTERY"]) {
-    if (mode !== "MASTERY" && !next) {
+    if (!targetStage && mode !== "MASTERY" && !next) {
       previews[mode] = { stage: null, requirements: [], targets: [], eta: { kind: "READY", remainingMs: 0 } };
       continue;
     }
-    const base = mode === "MASTERY" ? current : next;
+    const base = targetStage ? stages.find((stage) => stage.id === targetStage) : mode === "MASTERY" ? current : next;
     if (base.fitting.status !== "READY") {
       previews[mode] = { stage: base.id, requirements: [], targets: [], eta: { kind: "UNKNOWN", reason: "Stage fitting is not accepted and readable." } };
       continue;
@@ -225,7 +228,7 @@ function buildMinerReport(data, sheet, identity = {}, stageFittings = {}) {
     };
   }
   return {
-    role: "MINER", policyVersion: SUPPORT_POLICY_VERSION,
+    role: "MINER", policyVersion: SUPPORT_POLICY_VERSION, targetStage,
     trainingState: !rows ? "UNKNOWN" : sheet.queue.active && sheet.queue.entries.length > 0 ? "TRAINING"
       : sheet.queue.entries.length > 0 ? "QUEUED" : "IDLE",
     pilot: { characterID: identity.characterID || null, name: sheet?.characterName || identity.name || "Unknown", account: identity.account || "" },

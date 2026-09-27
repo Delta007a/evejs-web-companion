@@ -340,6 +340,17 @@ export interface CreateCharacterResult {
   readonly ancestryID: number | null;
 }
 
+export interface CharacterCreationState {
+  slots: number; freeSlots: number; pendingName: string | null; recoveredCharacterID: number | null;
+  characters: readonly { characterID: number; name: string }[];
+}
+export async function loadCharacterCreationState(options: ApiOptions = {}): Promise<CharacterCreationState> {
+  const data = await getJson("/api/bridge/character/creation-state", options);
+  if (!Number.isSafeInteger(data.slots) || !Number.isSafeInteger(data.freeSlots) || !Array.isArray(data.characters))
+    throw new BridgeCallError("CREATION_STATE_UNKNOWN", "Account slot authority is unreadable.", 502);
+  return data as unknown as CharacterCreationState;
+}
+
 /**
  * The create screen's picker tables: the world's own races and bloodlines
  * (retail, authoritative) joined with the SDE's ancestries.
@@ -4489,8 +4500,10 @@ export async function loadMinerTraining(
   characterID: number,
   selections: Readonly<Record<string, StageFittingSelection>> = {},
   options: ApiOptions = {},
+  targetStage: string | null = null,
 ): Promise<MinerTrainingRead> {
   const query = new URLSearchParams({ characterID: String(characterID), selections: JSON.stringify(selections) });
+  if (targetStage) query.set("targetStage", targetStage);
   const data = await getJson(`/api/pilot-training/miner?${query}`, options);
   const report = data.report as unknown as MinerTrainingRead["report"] | null;
   if (!report || report.role !== "MINER" || !Array.isArray(report.stages) ||
@@ -4505,7 +4518,7 @@ export async function loadMinerTraining(
 
 export async function reviewTrainingQueue(
   request: { characterID: number; role: "MINER"; mode: "FAST" | "BALANCED" | "MASTERY";
-    stage: string | null; displayedTargets: readonly { typeID: number; level: number }[];
+    stage: string | null; targetStage?: string | null; displayedTargets: readonly { typeID: number; level: number }[];
     selections: Readonly<Record<string, StageFittingSelection>> }, options: ApiOptions,
 ): Promise<QueueReview> {
   const data = await postJson("/api/pilot-training/queue/review", request, options);

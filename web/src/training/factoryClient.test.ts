@@ -55,6 +55,15 @@ test("review is separate from explicit confirmed Apply and keeps the account tok
   assert.deepEqual(calls[1], { path: "/api/pilot-training/queue/apply", body: { reviewID: "review-one", confirm: true } });
 });
 
+test("explicit target is sent with the account-owned qualification read", async () => {
+  await readFactoryPilot(10, {}, { token: "owner", fetch: async (input) => {
+    const url = new URL(String(input), "http://localhost");
+    assert.equal(url.searchParams.get("targetStage"), "PIONEER");
+    return Response.json({ ok: true, corporationID: 98, fittings: [],
+      report: { role: "MINER", pilot: { characterID: 10 }, stages: [], previews: {} } });
+  } }, "PIONEER");
+});
+
 test("mismatched account identity and failed qualification reads reject instead of returning stale data", async () => {
   const transport: typeof fetch = async (input) => String(input).endsWith("/login")
     ? Response.json({ ok: true, sessionToken: "A-token", account: { username: "A" } })

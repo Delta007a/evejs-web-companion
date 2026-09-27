@@ -19,7 +19,7 @@ function queueFingerprint(sheet) {
 function planFingerprint(report, mode) {
   const preview = report.previews[mode];
   const stage = report.stages.find((entry) => entry.id === preview.stage);
-  return hash({ mode, stage: preview.stage, policy: report.policyVersion,
+  return hash({ mode, targetStage: report.targetStage || null, stage: preview.stage, policy: report.policyVersion,
     requirements: targets(preview.requirements || []), fitting: stage?.fitting });
 }
 
@@ -107,9 +107,9 @@ function createTrainingQueueService({ store, gateway, data, now = Date.now, uuid
       throw trainingError("PILOT_MUST_BE_OFFLINE", "Pilot is controlled/online. Factory will not release or take over its session.");
     return state;
   }
-  async function fresh(account, characterID, selections) {
+  async function fresh(account, characterID, selections, targetStage) {
     const before = await status(account, characterID);
-    const pilot = await loadPilot({ store, gateway, data, account, characterID, selections });
+    const pilot = await loadPilot({ store, gateway, data, account, characterID, selections, targetStage });
     const after = await status(account, characterID);
     if (before.stateVersion !== after.stateVersion) throw trainingError("QUEUE_CHANGED", "Character state changed while reading; review again.");
     return { ...pilot, version: after.stateVersion };
@@ -119,13 +119,13 @@ function createTrainingQueueService({ store, gateway, data, now = Date.now, uuid
     while (reviews.size >= 100) reviews.delete(reviews.keys().next().value);
   }
   async function review(account, request) {
-    const { characterID, selections = {}, mode, stage, displayedTargets, role } = request;
+    const { characterID, selections = {}, mode, stage, displayedTargets, role, targetStage = null } = request;
     if (!Number.isSafeInteger(characterID) || characterID <= 0 || role !== "MINER" || !MODES.includes(mode) ||
         !Array.isArray(displayedTargets) || displayedTargets.length > 1000 || displayedTargets.some((row) => !row ||
           !Number.isSafeInteger(row.typeID) || row.typeID <= 0 || !Number.isInteger(row.level) || row.level < 1 || row.level > 5) ||
         !selections || typeof selections !== "object" ||
         Array.isArray(selections) || JSON.stringify(selections).length > 4096) throw trainingError("INVALID_TRAINING_PLAN", "An explicit Miner plan is required.", 400);
-    const current = await fresh(account, characterID, selections);
+    const current = await fresh(account, characterID, selections, targetStage);
     const report = current.read.report;
     const preview = report.previews[mode];
     if (stage !== preview.stage || hash(targets(displayedTargets)) !== hash(targets(preview.targets)))
@@ -138,7 +138,7 @@ function createTrainingQueueService({ store, gateway, data, now = Date.now, uuid
     let reviewID = null;
     if (canApply) {
       prune(); reviewID = uuid();
-      reviews.set(reviewID, { accountID: account.accountID, characterID, selections: structuredClone(selections), mode, stage,
+      reviews.set(reviewID, { accountID: account.accountID, characterID, selections: structuredClone(selections), mode, stage, targetStage,
         delta, expiresAt, version: current.version, queueHash: queueFingerprint(current.sheet), planHash: planFingerprint(report, mode),
         commandID: uuid(), controllerID: `goblin-factory-${uuid()}` });
     }
@@ -152,7 +152,7 @@ function createTrainingQueueService({ store, gateway, data, now = Date.now, uuid
     // One shot, including failures/timeouts; no automatic replay or blind rollback.
     reviews.delete(reviewID);
     if (reviewed.expiresAt <= now()) throw trainingError("REVIEW_REQUIRED", "Review expired; review again.");
-    const current = await fresh(account, reviewed.characterID, reviewed.selections);
+    const current = await fresh(account, reviewed.characterID, reviewed.selections, reviewed.targetStage);
     if (current.version !== reviewed.version || queueFingerprint(current.sheet) !== reviewed.queueHash)
       throw trainingError("QUEUE_CHANGED", "Skills or queue changed since review; nothing was submitted. Refresh and review again.");
     if (planFingerprint(current.read.report, reviewed.mode) !== reviewed.planHash)
@@ -171,7 +171,7 @@ function createTrainingQueueService({ store, gateway, data, now = Date.now, uuid
     let afterSheet = null;
     try {
       afterSheet = await gateway.getSkills(account.accountID, reviewed.characterID);
-      after = await loadPilot({ store, gateway, data, account, characterID: reviewed.characterID, selections: reviewed.selections, sheet: afterSheet });
+      after = await loadPilot({ store, gateway, data, account, characterID: reviewed.characterID, selections: reviewed.selections, targetStage: reviewed.targetStage, sheet: afterSheet });
     }
     catch { /* report unverified, never infer success or retry */ }
     const verified = !writeError && afterSheet && verifyMergedQueue(afterSheet, merged, reviewed.delta.activate, current.sheet);

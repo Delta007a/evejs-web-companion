@@ -171,6 +171,7 @@ function fakeStaticData() {
 }
 
 function fakeGateway() {
+  let createdName = null;
   const calls = { callMethod: [] };
   return {
     calls,
@@ -201,7 +202,12 @@ function fakeGateway() {
       if (method === "GetCharCreationInfo") {
         return { service, method, result: creationInfoResult(), notifications: [] };
       }
+      if (method === "GetCharacterSelectionData") return { result: [
+        { type: "list", items: [keyVal([["userName", ACCOUNT.username], ["characterSlots", 3]])] }, null,
+        { type: "list", items: createdName ? [keyVal([["characterID", NEW_CHARACTER_ID], ["characterName", createdName]])] : [] }, null] };
+      if (method === "ValidateNameEx") return { result: 1 };
       if (method === "CreateCharacterWithDoll") {
+        createdName = args[0];
         return { service, method, result: NEW_CHARACTER_ID, notifications: [] };
       }
       return { service, method, result: null, notifications: [] };
@@ -287,6 +293,22 @@ test("a character can be created with NO character selected", async () => {
   const [call] = createCalls(gateway);
   assert.equal(call.bridgeSessionID, undefined, "creation must not need a held session");
   assert.deepEqual(call.sessionFields, { userid: ACCOUNT.accountID });
+});
+
+test("creation refuses unauthenticated access and pins account despite a crafted owner field", async () => {
+  const gateway = fakeGateway();
+  const { baseUrl } = await startTestServer({ gateway });
+  const denied = await ORIGINAL_FETCH(`${baseUrl}/api/bridge/character/create-with-doll`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "BMiner10", raceID: 1, confirm: true }),
+  });
+  assert.equal(denied.status, 401); assert.equal(createCalls(gateway).length, 0);
+  const allowed = await apiRequest(baseUrl, "/api/bridge/character/create-with-doll", {
+    method: "POST", body: { name: "BMiner10", raceID: 1, accountID: 999, userid: 999, confirm: true },
+  });
+  assert.equal(allowed.response.status, 200);
+  assert.deepEqual(createCalls(gateway)[0].sessionFields, { userid: ACCOUNT.accountID });
+  const state = await apiRequest(baseUrl, "/api/bridge/character/creation-state");
+  assert.equal(state.payload.freeSlots, 2); assert.equal(state.payload.characters[0].name, "BMiner10");
 });
 
 // --- the confirm gate ---------------------------------------------------------

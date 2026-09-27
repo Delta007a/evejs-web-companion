@@ -96,11 +96,11 @@ function harness() {
         entries: command.payload.entries.map((entry, i) => ({ ...entry, startTimeMs: NOW + i * 1000, endTimeMs: NOW + (i + 1) * 1000 })) };
     },
   };
-  const loadPilot = async ({ account: who, characterID, sheet: supplied }) => {
+  const loadPilot = async ({ account: who, characterID, sheet: supplied, targetStage }) => {
     assert.equal(who.accountID, 4); assert.equal(characterID, 7);
     const input = supplied === undefined ? await gateway.getSkills() : supplied;
     return { sheet: input, read: { corporationID: 99, fittings: [], queue: input.queue,
-      report: buildMinerReport(data, input, { characterID: 7, account: "Miner" }, fits()) } };
+      report: buildMinerReport(data, input, { characterID: 7, account: "Miner" }, fits(), targetStage) } };
   };
   const service = createTrainingQueueService({ gateway, data, loadPilot, now: () => time });
   async function request(mode = "FAST") {
@@ -136,6 +136,27 @@ test("MASTERY on proven Pioneer remains Pioneer, not next Procurer", async () =>
   const review = await h.service.review(h.account, await h.request("MASTERY"));
   assert.equal(review.stage, "PIONEER");
   assert.equal((await h.service.apply(h.account, { reviewID: review.reviewID, confirm: true })).stage, "PIONEER");
+});
+
+test("new trainee explicitly targets Pioneer; review/apply/readback retain target and become idempotent", async () => {
+  const h = harness(); h.sheet.skills.find((row) => row.typeID === 10).level = 0;
+  const preview = buildMinerReport(data, h.sheet, {}, { PIONEER: { status: "READY", typeIDs: [89240] } }, "PIONEER").previews.FAST;
+  const request = { ...(await h.request()), targetStage: "PIONEER", stage: "PIONEER", displayedTargets: preview.targets };
+  const review = await h.service.review(h.account, request);
+  assert.equal(review.fresh.report.currentStage, null);
+  assert.equal(review.fresh.report.targetStage, "PIONEER");
+  assert.deepEqual(review.additions.map(({ typeID, toLevel }) => [typeID, toLevel]), [[10, 1], [10, 2], [20, 1], [20, 2]]);
+  const outcome = await h.service.apply(h.account, { reviewID: review.reviewID, confirm: true });
+  assert.equal(outcome.verified, true); assert.equal(outcome.fresh.report.previews.FAST.stage, "PIONEER");
+  assert.equal((await h.service.review(h.account, request)).status, "NOTHING_TO_ADD");
+  await assert.rejects(h.service.review(h.account, { ...request, targetStage: null }), { code: "PLAN_CHANGED" });
+});
+
+test("explicit target is fingerprinted independently from an identical automatic preview", () => {
+  const { planFingerprint } = require("../src/pilotTrainingQueue");
+  const report = buildMinerReport(data, sheet({ 10: 1 }), {}, { PIONEER: { status: "READY", typeIDs: [89240] } }, "PIONEER");
+  assert.notEqual(planFingerprint(report, "FAST"), planFingerprint({ ...report, targetStage: null }, "FAST"));
+  assert.throws(() => buildMinerReport(data, sheet(), {}, {}, "HAULER"), /Unknown explicit/);
 });
 test("queue version, queue content, trained-level or fitting changes refuse without any write", async () => {
   for (const alter of [h => h.setVersion("epoch.other"), h => h.sheet.queue.entries.push(q(30, 2)),

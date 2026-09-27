@@ -17,6 +17,7 @@ const { readMinerPilot } = require("./pilotTrainingRead");
 const { createTrainingQueueService } = require("./pilotTrainingQueue");
 const { createFactorySessions } = require("./factorySessions");
 const { createFactorySkills } = require("./factorySkills");
+const { createCharacterCreation } = require("./characterCreation");
 const config = require("./config");
 const botScriptStoreModule = require("./botScriptStore");
 const botHostModule = require("./botHost");
@@ -64,6 +65,7 @@ const gateway = options.eveGatewayClient || eveGatewayClient;
 const auth = options.webAuth || webAuth;
 const staticData = options.staticData || staticDataModule;
 const trainingQueues = createTrainingQueueService({ store, gateway, data: staticData });
+const characterCreation = createCharacterCreation({ call: (...args) => accountLevelCall(...args) });
 // The player Bot Builder library — web-app data in data/bot-scripts.json, keyed
 // PLATFORM-WIDE (every account sees every saved bot). Never eve.js's store; this
 // is our own JSON file.
@@ -6323,10 +6325,12 @@ function creationBodyID(value) {
 // Race reaches the server through the bloodline, which is where it genuinely
 // lives.
 //
-// The NAME is not pre-validated here. validateCharacterName runs server-side on
-// every create and rejects with CharNameInvalid; the screen calls ValidateNameEx
-// as the player types so the refusal is not a surprise, and this route lets the
-// server have the last word.
+// The shared guard checks the account's advertised slots and ValidateNameEx
+// immediately before dispatch, then proves completion through the account
+// roster. The runtime also validates the name on the actual create.
+app.get("/api/bridge/character/creation-state", requireAuth, async (req, res, next) => {
+  try { res.json({ ok: true, ...(await characterCreation.state(req)) }); } catch (error) { next(error); }
+});
 app.post("/api/bridge/character/create-with-doll", requireAuth, async (req, res, next) => {
   if (!requireWriteConfirmation(req, res, "This creates a NEW character. This must be confirmed explicitly.")) {
     return;
@@ -6402,7 +6406,7 @@ app.post("/api/bridge/character/create-with-doll", requireAuth, async (req, res,
     }
 
     const args = [name, bloodline.bloodlineID, genderID, ancestryID, null, null, 0];
-    const outcome = await accountLevelCall(req, "charUnboundMgr", "CreateCharacterWithDoll", args);
+    const outcome = await characterCreation.create(req, name, () => accountLevelCall(req, "charUnboundMgr", "CreateCharacterWithDoll", args));
     const characterID = Number(outcome.result) || 0;
     res.json({
       ok: true,
@@ -18438,7 +18442,7 @@ app.get("/api/pilot-training/miner", requireTrainingAuth, async (req, res, next)
         return;
       }
     }
-    const { read } = await readMinerPilot({ store, gateway, data: staticData, account: req.account, characterID, selections });
+    const { read } = await readMinerPilot({ store, gateway, data: staticData, account: req.account, characterID, selections, targetStage: req.query.targetStage ?? null });
     res.json({ ok: true, ...read });
   } catch (error) {
     next(error);

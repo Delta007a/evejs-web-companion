@@ -29,3 +29,15 @@ test("Factory remains standalone: no space polling, queue writes only separate A
   const acquisition=src.slice(src.indexOf("  async function acquireSkills("),src.indexOf("  async function reviewQueue("));
   assert.doesNotMatch(acquisition,/applyTrainingQueue\(/);
 });
+
+test("shared creator consumes authoritative recovery on reopen and on explicit check", () => {
+  const source = readFileSync(new URL("./CharacterCreate.svelte", import.meta.url), "utf8");
+  assert.match(source, /if \(creationState.recoveredCharacterID\) \{ onCreated/);
+  assert.match(source, /if \(creationState.recoveredCharacterID \|\| found\) onCreated/);
+  assert.match(source, /creationState.freeSlots > 0/);
+  assert.match(source, /nameCode === 1/);
+  const factory = readFileSync(new URL("./GoblinFactory.svelte", import.meta.url), "utf8");
+  assert.match(factory, /<CharacterCreate flow=/);
+  assert.match(factory, /Target stage for/);
+  assert.doesNotMatch(factory, /CreateCharacterWithDoll/);
+});

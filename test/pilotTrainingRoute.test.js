@@ -113,6 +113,18 @@ test("Factory authentication is existing-only and does not replace cockpit cooki
   assert.ok(normal.headers.get("set-cookie"), "normal WC login retains its cookie behavior");
 });
 
+test("qualification HTTP read retains explicit Pioneer even before Venture and refuses unsupported targets", async (t) => {
+  const server = app().listen(0, "127.0.0.1"); t.after(() => server.close()); await once(server, "listening");
+  const base = `http://127.0.0.1:${server.address().port}/api/pilot-training/miner?characterID=${CHARACTER_ID}`;
+  const headers = { authorization: "Bearer test-token" };
+  const read = await (await fetch(`${base}&targetStage=PIONEER`, { headers })).json();
+  assert.equal(read.report.currentStage, null);
+  assert.equal(read.report.targetStage, "PIONEER"); assert.equal(read.report.previews.FAST.stage, "PIONEER");
+  assert.equal(read.report.previews.FAST.eta.kind, "UNKNOWN", "target fitting still must be accepted");
+  const invalid = await fetch(`${base}&targetStage=HAULER`, { headers });
+  assert.equal(invalid.status, 400);
+});
+
 test("training authentication refuses expired/deleted/banned identities without cockpit cleanup", async (t) => {
   let released = 0;
   const held = { accountID: ACCOUNT.accountID, characterID: CHARACTER_ID, bridgeSessionID: "held-gameplay" };
