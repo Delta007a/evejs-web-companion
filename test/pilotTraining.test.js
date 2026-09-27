@@ -145,3 +145,30 @@ test("current EveJS dogma closes selected fitting types without a drone-count fl
   assert.ok(report.previews.FAST.targets.length > 0);
   assert.equal(report.stages[0].equipmentReadiness, "UNKNOWN");
 });
+
+test("highest proven stage is retained when an earlier fitting is unavailable", () => {
+  const report = buildMinerReport(fixture(), sheet({ 11: 3 }), {}, {
+    ...accepted, VENTURE: { status: "UNKNOWN" },
+  });
+  assert.equal(report.stages[0].skillQualification, "UNKNOWN");
+  assert.equal(report.currentStage, "PROCURER");
+  assert.equal(report.nextStage, null);
+  assert.equal(report.currentStageStatus, "READY");
+});
+
+test("Mining Drone Operation trained I satisfies I but not a higher support target", () => {
+  const state = sheet({ 3438: 1 });
+  const rows = new Map(state.skills.map((row) => [row.typeID, row]));
+  assert.equal(targetState(3438, 1, state, rows), "TRAINED");
+  assert.equal(targetState(3438, 2, state, rows), "MISSING");
+  assert.equal(targetState(3438, 1, state, null), "UNKNOWN");
+});
+
+test("report queue state distinguishes active, paused, empty and unreadable", () => {
+  const entries = [{ typeID: 11, toLevel: 1, endTimeMs: NOW + 1000 }];
+  const read = (input) => buildMinerReport(fixture(), input, {}, accepted).trainingState;
+  assert.equal(read(sheet({}, entries)), "TRAINING");
+  assert.equal(read(sheet({}, [], { queue: { active: false, entries } })), "QUEUED");
+  assert.equal(read(sheet()), "IDLE");
+  assert.equal(read(sheet({}, [], { skills: null })), "UNKNOWN");
+});

@@ -251,16 +251,15 @@ function readSessionToken(req, { allowQueryParam = false } = {}) {
   return cookies[config.sessionCookieName] || "";
 }
 
-// One implementation, two doors — `requireAuth` for everything, and the
-// query-tolerant variant the SSE route needs. The auth itself is identical;
-// only the accepted carrier set differs.
-function makeRequireAuth({ allowQueryParam = false } = {}) {
+// Shared identity verification: normal gameplay auth, query-tolerant SSE auth,
+// and training reads without session-cleanup side effects.
+function makeRequireAuth({ allowQueryParam = false, cleanupSession = true } = {}) {
   return async function requireAuthenticatedSession(req, res, next) {
     const payload = auth.verifySessionToken(readSessionToken(req, { allowQueryParam }));
     if (!payload) {
       // An expired but correctly signed credential may release ONLY its own
       // held session. Forged/invalid tokens convey no cleanup authority.
-      const expired = auth.verifySessionToken(readSessionToken(req, { allowQueryParam }), { allowExpired: true });
+      const expired = cleanupSession && auth.verifySessionToken(readSessionToken(req, { allowQueryParam }), { allowExpired: true });
       const held = expired && bridgeSessions.get(expired.sessionID);
       if (held && Number(held.accountID) === Number(expired.accountID)) {
         void releaseHeldBridgeSession(expired.sessionID).catch(errorLogger);
@@ -279,12 +278,12 @@ function makeRequireAuth({ allowQueryParam = false } = {}) {
         () => store.getAccount(payload.username),
       );
       if (!account || account.accountID !== Number(payload.accountID)) {
-        clearSessionCookie(res);
+        if (cleanupSession) clearSessionCookie(res);
         res.status(401).json({ ok: false, error: "ACCOUNT_NOT_FOUND" });
         return;
       }
       if (account.banned) {
-        clearSessionCookie(res);
+        if (cleanupSession) clearSessionCookie(res);
         res.status(403).json({ ok: false, error: "ACCOUNT_BANNED" });
         return;
       }
@@ -300,6 +299,9 @@ function makeRequireAuth({ allowQueryParam = false } = {}) {
 // Every route. Header or cookie only — a token in the query string is REFUSED
 // here, deliberately; see requireStreamAuth.
 const requireAuth = makeRequireAuth();
+// Control-plane inspection must not release a cockpit or clear its cookie when
+// discovery encounters an expired/deleted account credential.
+const requireTrainingAuth = makeRequireAuth({ cleanupSession: false });
 
 // The SSE push channel alone. `EventSource` cannot set request headers — the
 // API has no hook for it — so GET /api/bridge/events accepts the token as the
@@ -348,7 +350,11 @@ app.get("/api/health", async (req, res) => {
 // src/webAuth.js verifyWebPassword/upsertWebPassword, data/web-users.json, and
 // `npm run webpass` stay in place (data-preservation rule) but are deprecated
 // for login.
-app.post("/api/login", async (req, res, next) => {
+app.post(["/api/login", "/api/goblin-factory/login"], async (req, res, next) => {
+  // Factory authentication uses the normal web token, but must never create a
+  // game account or replace the cookie used by an existing cockpit.
+  // Match Express's default case-insensitive, optional-trailing-slash routing.
+  const factoryLogin = /^\/api\/goblin-factory\/login\/?$/i.test(req.path);
   const username = String(req.body && req.body.username || "").trim();
   try {
     // An empty username can never name or create an account; refuse it here
@@ -370,7 +376,7 @@ app.post("/api/login", async (req, res, next) => {
         throw error;
       }
     }
-    if (!account) {
+    if (!account && !factoryLogin) {
       try {
         const outcome = await store.createAccount(username);
         account = outcome && outcome.account || null;
@@ -411,7 +417,7 @@ app.post("/api/login", async (req, res, next) => {
     // sessionStorage so ten tabs can hold ten different accounts. Read the
     // security note above setSessionCookie before copying this anywhere.
     const token = auth.createSessionToken(account);
-    setSessionCookie(res, token);
+    if (!factoryLogin) setSessionCookie(res, token);
     res.json({
       ok: true,
       sessionToken: token,
@@ -18372,19 +18378,21 @@ app.get("/api/roster/training", requireAuth, async (req, res, next) => {
 
 // Account-owned, session-free qualification read. No bridge selection and no
 // queue write: an online browser or server bot keeps control of its character.
-app.get("/api/pilot-training/characters", requireAuth, async (req, res, next) => {
+app.get("/api/pilot-training/characters", requireTrainingAuth, async (req, res, next) => {
   try {
     const characters = await store.listCharactersForAccount(req.account.accountID);
     res.json({ ok: true, account: req.account.username, characters: characters.map((character) => ({
       characterID: character.characterID,
       name: character.characterName,
+      corporationID: character.corporationID,
+      corporationName: character.corporationName,
     })) });
   } catch (error) {
     next(error);
   }
 });
 
-app.get("/api/pilot-training/miner", requireAuth, async (req, res, next) => {
+app.get("/api/pilot-training/miner", requireTrainingAuth, async (req, res, next) => {
   const characterID = Number(req.query.characterID);
   if (!Number.isSafeInteger(characterID) || characterID <= 0) {
     res.status(400).json({ ok: false, error: "INVALID_CHARACTER_ID" });

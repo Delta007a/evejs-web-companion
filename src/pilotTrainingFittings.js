@@ -111,7 +111,11 @@ function resolveStageFittings(stages, fittings, selections, corporationID) {
 }
 
 async function readAccountCorpFittings({ store, gateway, accountID, characterID, data }) {
-  const character = await store.getCharacterForAccount(accountID, characterID);
+  // The account-filtered gateway roster carries identity and corporation. Avoid
+  // getCharacterForAccount here: that older seam also reads a broad /snapshot.
+  const ownedCharacter = async () => (await store.listCharactersForAccount(accountID))
+    .find((entry) => entry.characterID === characterID && entry.accountID === accountID) || null;
+  const character = await ownedCharacter();
   if (!character) return { status: "NOT_OWNED" };
   const corporationID = character.corporationID;
   if (!positive(corporationID)) return { status: "CORP_UNAVAILABLE", character };
@@ -124,7 +128,7 @@ async function readAccountCorpFittings({ store, gateway, accountID, characterID,
   } catch (error) {
     return { status: "CORP_UNAVAILABLE", character, corporationID };
   }
-  const current = await store.getCharacterForAccount(accountID, characterID);
+  const current = await ownedCharacter();
   if (!current || current.corporationID !== corporationID) {
     return { status: "CORP_UNAVAILABLE", character, corporationID };
   }

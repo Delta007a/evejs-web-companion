@@ -4446,6 +4446,16 @@ export async function salvageDrones(
 
 // --- Pilot Training: account-owned read-only qualification -------------------
 
+/** Existing accounts only; no cookie/global-token change and no pilot selection. */
+export async function loginFactoryAccount(username: string, options: ApiOptions = {}): Promise<{ account: string; token: string }> {
+  const data = await postJson("/api/goblin-factory/login", { username }, { ...options, token: null });
+  const account = data.account as { username?: unknown } | null;
+  if (typeof data.sessionToken !== "string" || !data.sessionToken || typeof account?.username !== "string") {
+    throw new BridgeCallError("BRIDGE_BAD_RESPONSE", "Account authentication is incomplete.", 502);
+  }
+  return { account: account.username, token: data.sessionToken };
+}
+
 /** Account-owned identities for a read-only training preview; no selection. */
 export async function loadTrainingCharacters(options: ApiOptions = {}): Promise<{
   readonly account: string;

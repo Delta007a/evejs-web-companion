@@ -135,7 +135,7 @@
 {:else if tab === "skills"}
   <Skills {store} {flow} />
 {:else if tab === "pilotTraining"}
-  <PilotTraining {store} {flow} />
+  <PilotTraining />
 {:else if tab === "planets"}
   <Planets {store} {flow} />
 {:else if tab === "travel"}

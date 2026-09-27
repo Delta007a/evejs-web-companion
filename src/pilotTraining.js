@@ -194,8 +194,7 @@ function buildMinerReport(data, sheet, identity = {}, stageFittings = {}) {
   });
   let currentIndex = -1;
   for (let index = 0; index < stages.length; index += 1) {
-    if (stages[index].skillQualification !== "READY") break;
-    currentIndex = index;
+    if (stages[index].skillQualification === "READY") currentIndex = index;
   }
   const next = stages[currentIndex + 1] || null;
   const current = stages[Math.max(currentIndex, 0)];
@@ -226,6 +225,8 @@ function buildMinerReport(data, sheet, identity = {}, stageFittings = {}) {
   }
   return {
     role: "MINER", policyVersion: SUPPORT_POLICY_VERSION,
+    trainingState: !rows ? "UNKNOWN" : sheet.queue.active && sheet.queue.entries.length > 0 ? "TRAINING"
+      : sheet.queue.entries.length > 0 ? "QUEUED" : "IDLE",
     pilot: { characterID: identity.characterID || null, name: sheet?.characterName || identity.name || "Unknown", account: identity.account || "" },
     currentStage: currentIndex >= 0 ? stages[currentIndex].id : null,
     currentStageStatus: rows ? (currentIndex >= 0 ? "READY" : stages[0].skillQualification) : "UNKNOWN",

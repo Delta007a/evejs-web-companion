@@ -22,17 +22,16 @@ function app() {
     2464, 10246, 2046, 31370, 31752, 3829, 17482, 31790, 31754, 15508]);
   return createApp({
     webAuth: {
+      createSessionToken: () => "test-token",
       verifySessionToken: (token) => token === "test-token"
         ? { username: ACCOUNT.username, accountID: ACCOUNT.accountID, sessionID: "test-session" }
         : null,
     },
     eveStore: {
       async getAccount(name) { return name === ACCOUNT.username ? ACCOUNT : null; },
-      async getCharacterForAccount(accountID, id) {
-        return accountID === ACCOUNT.accountID && id === CHARACTER_ID
-          ? { characterID: id, characterName: "Test Miner", corporationID: CORP } : null;
-      },
-      async listCharactersForAccount() { return [{ characterID: CHARACTER_ID, characterName: "Test Miner" }]; },
+      async createAccount() { throw new Error("Factory must never create an account"); },
+      async getCharacterForAccount() { throw new Error("Factory must never request a broad snapshot"); },
+      async listCharactersForAccount() { return [{ accountID: ACCOUNT.accountID, characterID: CHARACTER_ID, characterName: "Test Miner", corporationID: CORP, corporationName: "Mining Corp" }]; },
     },
     eveGatewayClient: {
       async getSkills(accountID, id) {
@@ -63,7 +62,7 @@ test("training routes read only account-owned pilots without selecting a gamepla
   const headers = { authorization: "Bearer test-token" };
   const roster = await fetch(`${base}/api/pilot-training/characters`, { headers });
   assert.equal(roster.status, 200);
-  assert.deepEqual((await roster.json()).characters, [{ characterID: CHARACTER_ID, name: "Test Miner" }]);
+  assert.deepEqual((await roster.json()).characters, [{ characterID: CHARACTER_ID, name: "Test Miner", corporationID: CORP, corporationName: "Mining Corp" }]);
   const own = await fetch(`${base}/api/pilot-training/miner?characterID=${CHARACTER_ID}`, { headers });
   assert.equal(own.status, 200);
   const payload = await own.json();
@@ -86,4 +85,60 @@ test("training routes read only account-owned pilots without selecting a gamepla
   assert.equal(requests.length, 4);
   const unauthenticated = await fetch(`${base}/api/pilot-training/miner?characterID=${CHARACTER_ID}`);
   assert.equal(unauthenticated.status, 401);
+});
+
+test("Factory authentication is existing-only and does not replace cockpit cookies", async (t) => {
+  const server = app().listen(0, "127.0.0.1");
+  t.after(() => server.close());
+  await once(server, "listening");
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const login = (path, username) => fetch(`${base}${path}`, { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ username }) });
+  for (const path of ["/api/goblin-factory/login", "/api/goblin-factory/login/", "/API/GOBLIN-FACTORY/LOGIN"]) {
+    for (const username of ["", "NotAnExistingAccount"]) {
+      const denied = await login(path, username);
+      assert.equal(denied.status, 401);
+      assert.equal(denied.headers.get("set-cookie"), null);
+    }
+  }
+  const auth = await login("/api/goblin-factory/login", ACCOUNT.username);
+  assert.equal(auth.status, 200);
+  assert.equal(auth.headers.get("set-cookie"), null);
+  const payload = await auth.json();
+  assert.equal(payload.sessionToken, "test-token");
+  assert.equal(payload.accountCreated, false);
+  assert.equal(payload.account.username, ACCOUNT.username);
+  const normal = await login("/api/login", ACCOUNT.username);
+  assert.equal(normal.status, 200);
+  assert.ok(normal.headers.get("set-cookie"), "normal WC login retains its cookie behavior");
+});
+
+test("training authentication refuses expired/deleted/banned identities without cockpit cleanup", async (t) => {
+  let released = 0;
+  const held = { accountID: ACCOUNT.accountID, characterID: CHARACTER_ID, bridgeSessionID: "held-gameplay" };
+  const sessions = new Map([["cockpit-session", held]]);
+  const instance = createApp({
+    bridgeSessionStore: sessions,
+    webAuth: { verifySessionToken(token, options) {
+      assert.equal(options?.allowExpired, undefined, "read-only auth never seeks cleanup authority");
+      return token === "expired" ? null : { username: token, accountID: ACCOUNT.accountID, sessionID: "cockpit-session" };
+    } },
+    eveStore: { async getAccount(name) { return name === "deleted" ? null : { ...ACCOUNT, banned: true }; } },
+    eveGatewayClient: { async releaseBridgeSession() { released++; } },
+    errorLogger() {},
+  });
+  const server = instance.listen(0, "127.0.0.1");
+  t.after(() => server.close());
+  await once(server, "listening");
+  for (const route of ["characters", `miner?characterID=${CHARACTER_ID}`]) {
+    for (const [token, code] of [["expired", 401], ["deleted", 401], ["banned", 403]]) {
+      const result = await fetch(`http://127.0.0.1:${server.address().port}/api/pilot-training/${route}`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      assert.equal(result.status, code);
+      assert.equal(result.headers.get("set-cookie"), null);
+      assert.equal(sessions.get("cockpit-session"), held);
+    }
+  }
+  assert.equal(released, 0);
 });

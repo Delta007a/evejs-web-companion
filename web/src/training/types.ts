@@ -75,6 +75,7 @@ export interface PlanPreview {
 export interface MinerReport {
   readonly role: "MINER";
   readonly policyVersion: number;
+  readonly trainingState: "TRAINING" | "QUEUED" | "IDLE" | "UNKNOWN";
   readonly pilot: { readonly characterID: number; readonly name: string; readonly account: string };
   readonly currentStage: string | null;
   readonly currentStageStatus: QualificationState;
@@ -86,4 +87,6 @@ export interface MinerReport {
 export interface TrainingCharacter {
   readonly characterID: number;
   readonly name: string;
+  readonly corporationID?: number | null;
+  readonly corporationName?: string | null;
 }

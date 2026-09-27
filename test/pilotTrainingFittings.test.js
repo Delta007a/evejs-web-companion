@@ -93,9 +93,9 @@ test("accepted fitting drives hard closure; support remains independent; missing
 
 test("session-free corporation read verifies ownership and never selects pilot", async () => {
   const calls = [];
-  const store = { async getCharacterForAccount(accountID, characterID) {
-    calls.push(["owner", accountID, characterID]);
-    return accountID === ACCOUNT && characterID === PILOT ? { corporationID: CORP } : null;
+  const store = { async listCharactersForAccount(accountID) {
+    calls.push(["owner", accountID]);
+    return accountID === ACCOUNT ? [{ accountID, characterID: PILOT, corporationID: CORP }] : [];
   } };
   const gateway = { async callMethod(service, method, args, kwargs, session, bridgeSessionID) {
     calls.push([service, method, args, session, bridgeSessionID]);
@@ -114,10 +114,10 @@ test("session-free corporation read verifies ownership and never selects pilot",
 
 test("corporation change or denied service read fails closed", async () => {
   let reads = 0;
-  const store = { async getCharacterForAccount() { return { corporationID: reads++ ? 99 : CORP }; } };
+  const store = { async listCharactersForAccount() { return [{ accountID: ACCOUNT, characterID: PILOT, corporationID: reads++ ? 99 : CORP }]; } };
   const gateway = { async callMethod() { return { result: library() }; } };
   assert.equal((await readAccountCorpFittings({ store, gateway, accountID: ACCOUNT, characterID: PILOT, data })).status, "CORP_UNAVAILABLE");
   const denied = { async callMethod() { throw new Error("OWNER_SCOPE_DENIED"); } };
-  assert.equal((await readAccountCorpFittings({ store: { async getCharacterForAccount() { return { corporationID: CORP }; } },
+  assert.equal((await readAccountCorpFittings({ store: { async listCharactersForAccount() { return [{ accountID: ACCOUNT, characterID: PILOT, corporationID: CORP }]; } },
     gateway: denied, accountID: ACCOUNT, characterID: PILOT, data })).status, "CORP_UNAVAILABLE");
 });

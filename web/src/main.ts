@@ -9,7 +9,7 @@
 // into public/dist/, and the built index.html links it automatically.
 import "./styles.css";
 import { mount } from "svelte";
-import App from "./ui/App.svelte";
+import { isGoblinFactoryPath } from "./app/pageRoute.ts";
 import { installErrorOverlay } from "./app/errorOverlay.ts";
 
 // Before anything else: a framework-free net for uncaught errors and unhandled
@@ -22,5 +22,9 @@ installErrorOverlay();
 // itself (app/sessions.ts). There is no single app-wide store/flow any more.
 const target = document.getElementById("app");
 if (target) {
-  mount(App, { target });
+  // Never initialize cockpit restore/polling on the control-plane URL.
+  const { default: Page } = isGoblinFactoryPath(window.location.pathname)
+    ? await import("./ui/GoblinFactory.svelte")
+    : await import("./ui/App.svelte");
+  mount(Page, { target });
 }
