@@ -45,8 +45,9 @@ export const BOT_RISK_LABELS: Readonly<Record<BotRiskClass, string>> = Object.fr
   destructive: "perform an action that can permanently lose assets",
 });
 
-export const DEFAULT_SERVER_BOT_RUNTIME_MINUTES = 12 * 60;
-export const MAX_SERVER_BOT_RUNTIME_MINUTES = 24 * 60;
+export { DEFAULT_HOSTED_RUN_MINUTES as DEFAULT_SERVER_BOT_RUNTIME_MINUTES } from "./hostedRunPolicy.ts";
+import { DEFAULT_HOSTED_RUN_MINUTES as DEFAULT_SERVER_BOT_RUNTIME_MINUTES, hostedRunPolicy } from "./hostedRunPolicy.ts";
+export const MAX_SERVER_BOT_RUNTIME_MINUTES = hostedRunPolicy().maxRuntimeMinutes;
 
 /**
  * Authority for one server-side launch. It is intentionally narrow: the exact
@@ -223,6 +224,7 @@ export function validateBotLaunchGrant(
   value: unknown,
   scriptRev: number,
   policy: BotRunPolicy,
+  maxRuntimeMinutes = MAX_SERVER_BOT_RUNTIME_MINUTES,
 ): BotLaunchGrantVerdict {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return {
@@ -240,11 +242,11 @@ export function validateBotLaunchGrant(
     };
   }
   const runtime = Number(row.maxRuntimeMinutes);
-  if (!Number.isSafeInteger(runtime) || runtime < 1 || runtime > MAX_SERVER_BOT_RUNTIME_MINUTES) {
+  if (!Number.isSafeInteger(runtime) || runtime < 1 || runtime > maxRuntimeMinutes) {
     return {
       ok: false,
       code: "BOT_GRANT_INVALID",
-      message: `Choose a run limit between 1 and ${MAX_SERVER_BOT_RUNTIME_MINUTES} minutes.`,
+      message: `Choose a run limit between 1 and ${maxRuntimeMinutes} minutes.`,
     };
   }
   if (

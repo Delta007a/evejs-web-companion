@@ -47,11 +47,13 @@
     COMPANION_GRANT_SCRIPT_REV,
   } from "../bots/companionRunPolicy.ts";
   import { createBotLaunchGrant, DEFAULT_SERVER_BOT_RUNTIME_MINUTES } from "../bots/runPolicy.ts";
+  import { hostedDurationLabel, type HostedRunPolicy } from "../bots/hostedRunPolicy.ts";
   import type { CompanionSetup } from "../nav/fleetCompanionLoop.ts";
   import ActionButton from "./ActionButton.svelte";
 
   let {
     group,
+    hostedRunPolicy = null,
     scripts,
     sessions,
     serverBots,
@@ -61,6 +63,7 @@
     onChanged,
   }: {
     group: PilotGroup;
+    hostedRunPolicy?: HostedRunPolicy | null;
     /** The library rows the panel already loaded — this row never fetches its own. */
     scripts: readonly BotScriptSummary[];
     /** Every pilot this browser tab holds, for "Run here" and for per-pilot tokens. */
@@ -130,6 +133,9 @@
   // so a built-in in this list would be a choice with no button under it.
   let selectedScriptID = $state<string | null>(null);
   let runtimeMinutes = $state(DEFAULT_SERVER_BOT_RUNTIME_MINUTES);
+  $effect(() => {
+    if (hostedRunPolicy && !hostedRunPolicy.durationChoices.includes(runtimeMinutes)) runtimeMinutes = hostedRunPolicy.defaultRuntimeMinutes;
+  });
 
   const isCompanions = $derived(group.kind === "companions");
   /** Companions flies itself; a squad needs a bot chosen first. */
@@ -192,7 +198,7 @@
   }
 
   async function runOnServer(): Promise<void> {
-    if (busy || !canStart) return;
+    if (busy || !canStart || !hostedRunPolicy) return;
     // ⚠ THE COMPANIONS LIST IS NARROWED HERE, NOT INSIDE THE START. A member
     // whose setup went missing between the read and the press has nothing to
     // fly, and queueing it would put a row on screen that can never resolve.
@@ -258,7 +264,7 @@
           const grant = createBotLaunchGrant(
             COMPANION_GRANT_SCRIPT_REV,
             analyzeCompanionRunPolicy(setup),
-            DEFAULT_SERVER_BOT_RUNTIME_MINUTES,
+            hostedRunPolicy!.defaultRuntimeMinutes,
           );
           await startServerCompanion(characterID, setup, grant, optionsFor(characterID));
           try {
@@ -417,7 +423,7 @@
           <ActionButton
             action="run-on-server"
             primary={isCompanions}
-            disabled={busy || !canStart || plan.onServer.length === 0}
+            disabled={busy || !canStart || plan.onServer.length === 0 || !hostedRunPolicy}
             label={busy ? "Starting" : undefined}
             onclick={runOnServer}
           />
@@ -427,11 +433,8 @@
           {#if !isCompanions}
             <label class="pilot-launch-limit">
               for up to
-              <select bind:value={runtimeMinutes} disabled={busy}>
-                <option value={60}>1 hour</option>
-                <option value={240}>4 hours</option>
-                <option value={720}>12 hours</option>
-                <option value={1440}>24 hours</option>
+              <select bind:value={runtimeMinutes} disabled={busy || !hostedRunPolicy}>
+                {#each hostedRunPolicy?.durationChoices ?? [] as minutes}<option value={minutes}>{hostedDurationLabel(minutes)}</option>{/each}
               </select>
             </label>
           {/if}

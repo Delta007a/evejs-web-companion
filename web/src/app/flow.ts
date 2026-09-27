@@ -5,6 +5,7 @@
 // it stays framework-agnostic and unit-testable under node:test.
 
 import { clearSessionToken } from "./sessionToken.ts";
+import { scriptObservationRead } from "./scriptObservationRead.ts";
 import { getCharacterSelectionData } from "../bridge/characterSelection.ts";
 import {
   getStationGuests,
@@ -226,6 +227,7 @@ import {
   type CapabilityScope,
 } from "../nav/scriptCapabilities.ts";
 import { SCRIPT_MACROS, resolveStationRef, scriptTravelHome } from "../nav/scriptMacros.ts";
+import { runFleetParking, parkingScript, type FleetParkingPolicy } from "../nav/fleetParking.ts";
 import {
   EMPTY_SURVEY_MEMORY,
   decideSurveyScan,
@@ -237,6 +239,9 @@ import {
   type SurveyMemory,
 } from "../nav/surveyScan.ts";
 import type { DryBelt, ScriptObservation } from "../nav/scriptConditions.ts";
+import { iceHoldFraction, iceMiningType, siteMiningFitRefusal } from "../nav/miningSite.ts";
+import { ensureSiteLogisticsBookmark } from "../nav/siteLogisticsBookmark.ts";
+import { fittedTravelPropulsion, travelPropulsionActivation } from "../nav/travelAssist.ts";
 import {
   THREAT_ATTRIBUTE_IDS,
   threatFromAttributes,
@@ -344,6 +349,8 @@ export interface AppFlowOptions {
   readonly perSessionToken?: boolean;
   /** Browser pilot selection performs lost-flight recovery before automation. */
   readonly browserPilotRecovery?: boolean;
+  /** Host-verified operation identity: assignment reads must fail closed. */
+  readonly miningOperationID?: string | null;
   /**
    * Server bot host — a session token this flow starts out holding, so a
    * headless flow whose owner ALREADY authenticated (the bot-start route runs
@@ -451,6 +458,8 @@ export interface AppFlow {
    * per-tab global, not here).
    */
   sessionToken(): string | null;
+  /** Host-only signed renewal; must retain the same held session identity. */
+  replaceHostedSessionToken(token: string): void;
   /**
    * The request options owned by THIS flow (base URL, injected fetch and its
    * per-session token). Components that call api.ts directly must use this
@@ -1141,6 +1150,9 @@ export interface AppFlow {
   stopCustomBot(): Promise<void>;
   /** User Stop or timed expiry; rejects while drone return is unconfirmed. */
   gracefulStopCustomBot(cleanupDeadlineMs?: () => number | null): Promise<void>;
+  prepareCustomBotParking(): Promise<void>;
+  parkCustomBot(policy: FleetParkingPolicy, deadlineMs: number): Promise<void>;
+  cancelCustomBotParking(): void;
   /** The character's saved-fitting library (for the Bot Builder's fitting picker). */
   listSavedFittings(): Promise<readonly import("../bridge/fittings.ts").SavedFitting[]>;
   /** The character's saved bookmarks (for the Bot Builder's saved-spot picker). */
@@ -7292,16 +7304,23 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     }
   }
 
-  async function confirmDronesHomeForManualStop(cleanupDeadlineMs?: () => number | null): Promise<void> {
+  async function confirmDronesHomeForManualStop(cleanupDeadlineMs?: () => number | null, controller?: ScriptRunnerController): Promise<void> {
     await recallFlightBeforeManualStop({
       read: async () => {
         const flight = decodeFlightStatus((await api.getFlightStatus(callOptions)).flight);
-        if (flight.docked) return { bay: [], out: [], maxActive: 0, roles: {} };
+        if (flight.docked) {
+          controller?.confirmTravelAssistStopped?.([]); // docked ships cannot cycle propulsion
+          return { bay: [], out: [], maxActive: 0, roles: {} };
+        }
         // One authority read can take 65 seconds. Do not begin the second read
         // after the timed-run cleanup window has closed.
         const deadline = cleanupDeadlineMs?.() ?? null;
         if (deadline !== null && Date.now() >= deadline) return null;
-        const raw = await api.getDrones(callOptions);
+        // Replace, never duplicate, the existing cleanup snapshot. This lets a
+        // finite prop cycle settle alongside drone return on the same cadence.
+        const combined = controller?.travelAssistPending?.() ? await api.getScriptObservation(callOptions) : null;
+        if (combined) controller?.confirmTravelAssistStopped?.(decodeSpaceSnapshot(combined.space)?.ship?.activeModuleIDs ?? null);
+        const raw = combined ?? await api.getDrones(callOptions);
         const out = decodeDronesInSpace(raw.inSpace);
         // The ordinary decoder treats an absent `controlled` flag as false for
         // the recovery UI. Stop needs stronger authority before letting go.
@@ -7313,6 +7332,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       recall: async ids => { await api.recallDrones(ids, callOptions); },
       sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
       deadlineMs: cleanupDeadlineMs,
+      additionalSettlement: () => !(controller?.travelAssistPending?.() ?? false),
     });
   }
 
@@ -7343,7 +7363,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       autopilot?.abort();
       try {
         await settleIssuedWork(controller.beginGracefulStop());
-        await confirmDronesHomeForManualStop(cleanupDeadlineMs);
+        await confirmDronesHomeForManualStop(cleanupDeadlineMs, controller);
         await stopCustomController();
       } catch (error) {
         controller.blockManualStop(error instanceof Error ? error.message : "Drone return could not be confirmed; Stop is paused.");
@@ -7352,6 +7372,48 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     })();
     customManualStop = pending.finally(() => { customManualStop = null; });
     return customManualStop;
+  }
+
+  async function prepareCustomBotParking(): Promise<void> {
+    customBotGeneration += 1;
+    autopilot?.abort();
+    if (!scriptRunner) throw new Error("The operation runner is unavailable; parking cannot take over another pilot controller.");
+    await settleIssuedWork(scriptRunner.beginGracefulStop());
+    autopilot?.abort(); // a route issued by the last pending tick has now settled
+    await confirmDronesHomeForManualStop(undefined, scriptRunner);
+    const flight = decodeFlightStatus((await api.getFlightStatus(callOptions)).flight);
+    if (flight.docked === true) return;
+    const mining = await resolveMiningModuleIDs();
+    const fit = store.fitting.get();
+    const names = store.names.get().resolved;
+    if (!flight.shipID || fit.activeShipID !== flight.shipID || fit.slotsError !== null ||
+        ungroupedHighSlotModules(fit.slots, id => names[nameKey("type", id)] ?? null,
+          id => names[nameKey("typeGroup", id)] ?? null).length > 0) {
+      throw new Error("Mining module state is unreadable; parking settlement is blocked.");
+    }
+    // One-off Stop verification, not another polling loop. A refused/slow module
+    // shutdown fails closed and is retried only by an explicit Stop request.
+    const before = decodeSpaceSnapshot((await api.getScriptObservation(callOptions)).space);
+    if (before?.shipID !== flight.shipID || before?.ship?.activeModuleIDs == null) throw new Error("Active module state is unreadable; parking settlement is blocked.");
+    for (const id of mining.filter(id => before.ship!.activeModuleIDs!.includes(id))) await api.deactivateModule(id, {}, callOptions);
+    const after = decodeSpaceSnapshot((await api.getScriptObservation(callOptions)).space);
+    if (after?.shipID !== flight.shipID || after?.ship?.activeModuleIDs == null || mining.some(id => after.ship!.activeModuleIDs!.includes(id))) {
+      throw new Error("Mining modules have not confirmed stopped; parking settlement is blocked. Ice Harvesters and crystal miners may finish their current cycle first. Retry Stop after the modules stop; pilot control is retained.");
+    }
+  }
+
+  async function parkCustomBot(policy: FleetParkingPolicy, deadlineMs: number): Promise<void> {
+    requireAutomationReady();
+    const doc = parkingScript(policy);
+    await stopCustomController();
+    const capabilities = await resolveScriptModuleCapabilities();
+    store.apply({ type: "custom-bot/started", name: doc.name });
+    try {
+      await runFleetParking(makeScriptRunnerDeps(capabilities, null, doc.home, new Set(), true), policy, deadlineMs,
+        runner => { scriptRunner = runner; });
+    } finally {
+      autopilot?.abort();
+    }
   }
 
   function stopCompanionController(): void {
@@ -8724,6 +8786,16 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   // Blocks that fly to a cosmic anomaly, and so pay for the scanner read. Both
   // kinds are here: each one filters the SAME list down to the sites it wants.
   const ANOMALY_MACROS = new Set(["warp-to-anomaly", "warp-to-ore-anomaly"]);
+  // These blocks consume only the BFF's stored operation assignment. The read
+  // rides the existing script observation cadence; it never starts a poller or
+  // asks for another space snapshot.
+  const MINING_OPERATION_MACROS = new Set([
+    "mine-at-belt",
+    "warp-to-ore-anomaly",
+    "travel-to-belt",
+    "loot-containers",
+    "deliver-ore",
+  ]);
   const FLEET_MANAGEMENT_MACROS = new Set([
     "create-fleet",
     "invite-to-fleet",
@@ -8790,6 +8862,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   interface ScriptModuleCapabilities {
     readonly shipID: number | null;
     readonly mining: readonly number[];
+    readonly iceMining: readonly number[];
+    readonly travelPropulsion: readonly import("../nav/propulsion.ts").PropulsionModule[];
+    readonly oreMining: readonly number[];
     readonly salvage: readonly number[];
     readonly defense: DefenseModuleIDs;
     readonly remoteReps: RemoteRepModuleIDs;
@@ -8935,9 +9010,25 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     // re-resolves every list above without re-asking a question whose answer a
     // module swap cannot have changed.
     const droneControlRangeM = await resolveDroneControlRange(fit);
+    let iceMining: number[] = [];
+    let oreMining: number[] = [];
+    if (options.miningOperationID && mining.length > 0) {
+      const modules = fit.slots.flatMap(slot => slot.module !== null && slot.module.online && mining.includes(slot.module.itemID) ? [slot.module] : []);
+      const facts: Readonly<Record<number, Readonly<Record<number, number>>>> = await api.fetchTypeDogma(modules.map(module => module.typeID), [77, 182, 183, 184, 1285, 1289, 1290], callOptions).catch(() => ({}));
+      iceMining = modules.filter(module => iceMiningType(facts[module.typeID])).map(module => module.itemID);
+      oreMining = modules.filter(module => (facts[module.typeID]?.[77] ?? 0) > 0 && !iceMiningType(facts[module.typeID]) &&
+        ["Mining Laser", "Strip Miner", "Frequency Mining Laser", "Citizen Mining Laser"].includes(store.names.get().resolved[nameKey("typeGroup", module.typeID)] ?? ""))
+        .map(module => module.itemID);
+    }
     return {
       shipID: fit.activeShipID,
       mining,
+      iceMining,
+      travelPropulsion: fit.slotsError === null ? fittedTravelPropulsion(fit.slots.flatMap(slot => slot.module ? [{
+        itemID: slot.module.itemID, typeID: slot.module.typeID, online: slot.module.online,
+        effect: store.names.get().resolved[nameKey("propulsionEffect", slot.module.typeID)] ?? null,
+      }] : [])) : [],
+      oreMining,
       salvage: resolveSalvageModuleIDs(),
       defense,
       remoteReps: resolveRemoteRepModuleIDs(),
@@ -9317,6 +9408,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     startingStationID: number | null,
     home: WorldRef,
     watchedKinds: ReadonlySet<string> = new Set<string>(),
+    parking = false,
   ): ScriptRunnerDeps {
     const walletWatched = watchedKinds.has("wallet-below") || watchedKinds.has("wallet-above");
     const cargoWatched = watchedKinds.has("cargo-full");
@@ -9330,6 +9422,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     // hitting the BFF on every tick.
     const BELT_MEMORY_CACHE_MS = 10_000;
     let beltMemoryCache: { system: string; at: number; rows: readonly DryBelt[] } | null = null;
+    // A non-operation run proves that fact once. Operation runs keep reading so
+    // the same lightweight call renews the bounded target lease and observes
+    // target changes made by another member.
+    const miningOperationRequired = !parking && typeof options.miningOperationID === "string" && options.miningOperationID.length > 0;
+    let miningOperationProbe: "unknown" | "member" | "none" = parking ? "none" : miningOperationRequired ? "member" : "unknown";
+    const unavailableMiningTargets = new Map<string, number>();
+    const miningSiteBookmarks: Record<string, number> = {};
+    const siteBookmarkScope = `${options.miningOperationID}:${Date.now()}`;
     // The hunt's jump-distance table, computed once per home system (a full
     // breadth-first sweep over the gate graph is too much to redo every tick).
     let huntDistanceAnchor: number | null = null;
@@ -9397,12 +9497,17 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         acquire: (owner, system, itemID, renewOnly) => api.claimContainer(owner, system, itemID, renewOnly, callOptions),
         release: (owner) => api.releaseContainerClaims(owner, callOptions),
       },
+      travelAssist: { change: async (module, on) => {
+        const result = on ? await api.activateModule(module.itemID, travelPropulsionActivation(module), callOptions)
+          : await api.deactivateModule(module.itemID, { typeID: module.typeID }, callOptions);
+        return on ? result.active === true : result.stopped === true;
+      } },
       observe: async (hint) => {
         const [flightStep, observation, targetsResult, holdsResult] = await Promise.all([
-          api.getFlightStatus(callOptions),
-          api.getScriptObservation(callOptions),
-          api.getTargets(callOptions),
-          api.getMiningHolds(callOptions),
+          scriptObservationRead("flight status", () => api.getFlightStatus(callOptions)),
+          scriptObservationRead("space and drones", () => api.getScriptObservation(callOptions)),
+          scriptObservationRead("locked targets", () => api.getTargets(callOptions)),
+          scriptObservationRead("ship holds", () => api.getMiningHolds(callOptions)),
         ]);
         // Both projections belong to this read, never a previous tick or command.
         // As before, this observer does not dispatch snapshot notifications.
@@ -9461,6 +9566,30 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
         // ── Mission reads, gated by the active block (see MISSION_MACROS). Every
         // read is best-effort: a failure lands as null (unreadable, never "no").
         const macro = hint.activeMacro;
+        let miningOperation: ScriptObservation["miningOperation"] = null;
+        let miningOperationReadError: string | null = null;
+        if (miningOperationRequired || (macro !== null && miningOperationProbe !== "none" &&
+          (miningOperationProbe === "member" || MINING_OPERATION_MACROS.has(macro)))) {
+          try {
+            miningOperation = await api.readMiningOperationAssignment(callOptions);
+            if (miningOperationRequired && miningOperation?.operationID !== options.miningOperationID) {
+              miningOperationReadError = miningOperation === null
+                ? "The host returned no assignment for this operation bot."
+                : "The host returned a different operation assignment.";
+              miningOperation = null;
+            }
+            miningOperationProbe = miningOperationRequired ? "member" : miningOperation === null ? "none" : "member";
+          } catch (error) {
+            // A hosted operation treats a transient read failure as unknown for
+            // this tick and retries; it never becomes an ordinary script.
+            miningOperationReadError = error instanceof Error ? error.message : String(error);
+            miningOperation = null;
+          }
+        }
+        const operationNow = Date.now();
+        for (const [key, retryAt] of unavailableMiningTargets) {
+          if (retryAt <= operationNow) unavailableMiningTargets.delete(key);
+        }
         const targetGroupNames = await classifyTargetGroups(
           snapshot,
           origin,
@@ -9658,7 +9787,13 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
                 ? []
                 : [{
                     label: site.targetID,
+                    siteID: Number.isSafeInteger(Number(site.siteID)) && Number(site.siteID) > 0 ? Number(site.siteID) : null,
+                    instanceID: Number.isSafeInteger(Number(site.fields["instanceID"])) && Number(site.fields["instanceID"]) > 0 ? Number(site.fields["instanceID"]) : null,
                     kind: siteKind(site.fields["scanStrengthAttribute"], site.fields["archetypeID"]),
+                    archetypeID:
+                      typeof site.fields["archetypeID"] === "number"
+                        ? site.fields["archetypeID"]
+                        : null,
                     // The row's own `position`, carried so a refused warp can be
                     // told apart from standing in the site already. A row
                     // without one stays null — never an origin, which would
@@ -10148,6 +10283,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           agentSearchFailure,
           jumpsToDropoff,
           anomalies,
+          miningOperation,
+          miningOperationRequired,
+          miningOperationReadError,
+          unavailableMiningTargetKeys: [...unavailableMiningTargets.keys()],
           scannerOperations,
           localPlayers,
           dscanHitIDs,
@@ -10178,7 +10317,8 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           armorRatio: ship?.armorRatio ?? null,
           hullRatio: ship?.hullRatio ?? null,
           health: lowestHealth(snapshot),
-          oreHoldFraction,
+          oreHoldFraction: (miningOperation?.logisticsTarget ?? miningOperation?.currentTarget)?.targetType === "ICE" ||
+            (miningOperation?.area.targetClasses.length === 1 && miningOperation.area.targetClasses[0] === "ICE") ? iceHoldFraction(holds) : oreHoldFraction,
           holdEmpty,
           hostileOnGrid,
           dronesOut,
@@ -10194,6 +10334,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           salvageDroneIDs: droneRoles.out?.salvage ?? null,
           unclassifiedDroneBayItemIDs: droneRoles.bay?.unknown ?? null,
           miningModuleIDs: capabilities.mining,
+          iceMiningModuleIDs: capabilities.iceMining,
+          oreMiningModuleIDs: capabilities.oreMining,
+          miningSiteBookmarks,
           salvageModuleIDs: capabilities.salvage,
           shieldRepairerIDs: capabilities.defense.shield,
           armorRepairerIDs: capabilities.defense.armor,
@@ -10245,6 +10388,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           // fleet companion's ladder runs on, resolved once by
           // `resolveDefenseModuleIDs` rather than a second time here.
           propulsionModules: capabilities.defense.propulsion,
+          travelPropulsionModules: capabilities.travelPropulsion,
           unloadedWeaponIDs: capabilities.unloadedWeaponIDs,
           jammingSourceIDs,
           scrammed,
@@ -10391,6 +10535,53 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
             await api.rememberBeltDry(action.systemName, action.beltName, action.groupID, callOptions);
             // The next tick must see this mark, not the cached list from before it.
             beltMemoryCache = null;
+            return;
+          case "reserveMiningTarget":
+            if (!await api.reserveMiningOperationTarget({
+              targetType: action.targetType,
+              systemID: action.systemID,
+              systemName: action.systemName,
+              targetName: action.targetName,
+              siteIdentity: action.siteIdentity,
+              siteID: action.siteID,
+              instanceID: action.instanceID,
+              position: action.position,
+              candidates: action.candidates,
+            }, callOptions)) {
+              unavailableMiningTargets.set(
+                `${action.targetType}:${action.systemID}:${action.siteIdentity ?? action.targetName}`,
+                Date.now() + 35_000,
+              );
+            }
+            return;
+          case "bookmarkMiningSite": {
+            // Revalidate ownership at the write boundary, without reading space.
+            const assignment = await api.readMiningOperationAssignment(callOptions);
+            const target = assignment?.logisticsTarget ?? assignment?.currentTarget;
+            const shipID = capabilityCache.peek().shipID;
+            if (assignment?.stopRequested || assignment?.role !== "HAULER" || target?.targetKey !== action.targetKey || target.claimedByOperationID !== assignment.operationID || !shipID) {
+              throw new Error("SITE_TARGET_AUTHORITY_LOST: cannot save a logistics return point.");
+            }
+            miningSiteBookmarks[action.targetKey] = await ensureSiteLogisticsBookmark(target, siteBookmarkScope, shipID, {
+              read: async () => decodeActiveBookmarks(await api.loadActiveBookmarks(callOptions)),
+              create: (id, folder, name, note) => api.bookmarkMiningSiteLocation(id, folder, name, note, callOptions),
+            });
+            return;
+          }
+          case "activateMiningTarget":
+            await api.activateMiningOperationTarget(action.targetKey, callOptions);
+            return;
+          case "depleteMiningTarget":
+            await api.depleteMiningOperationTarget(action.targetKey, action.evidence, callOptions);
+            // The belt board is a projection of the same authority; force the
+            // next ordinary belt-memory read to see the mark immediately.
+            beltMemoryCache = null;
+            return;
+          case "miningMemberReady":
+            await api.markMiningOperationMemberReady(callOptions);
+            return;
+          case "miningDrainComplete":
+            await api.finishMiningOperationDrain(action.targetKey, callOptions);
             return;
           case "agentButton": {
             // The same call the mission bot presses buttons with; the fresh
@@ -10725,7 +10916,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           note: snapshot.note,
           refusals: snapshot.refusals,
         });
-        if (snapshot.status === "error") {
+        if (snapshot.status === "error" && !parking) {
           stopLiveStream();
           store.apply({ type: "character/offline" });
         }
@@ -10762,6 +10953,10 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     // Seed the fitted-module cache. The runner refreshes it after a refit or
     // active-hull change; this first read only keeps tick one honest.
     const initialCapabilities = await resolveScriptModuleCapabilities();
+    if (options.miningOperationID) {
+      const refusal = siteMiningFitRefusal(doc, initialCapabilities.oreMining, initialCapabilities.iceMining);
+      if (refusal) throw Object.assign(new Error(refusal), { code: refusal.split(":")[0] });
+    }
     if (gen !== customBotGeneration) {
       return; // a newer start / a stop / a panic superseded us during the read
     }
@@ -11246,6 +11441,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
 
     sessionToken() {
       return callOptions.token ?? null;
+    },
+
+    replaceHostedSessionToken(token: string): void {
+      if (!options.perSessionToken || !token) throw new Error("A hosted per-session credential is required.");
+      callOptions.token = token; // same signed sessionID; no login/select or runner mutation
     },
 
     requestOptions() {
@@ -11899,6 +12099,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       return stopCustomController();
     },
     gracefulStopCustomBot,
+    prepareCustomBotParking,
+    parkCustomBot,
+    cancelCustomBotParking() { scriptRunner?.pause(); autopilot?.abort(); },
 
     panicRecallAndDock,
 

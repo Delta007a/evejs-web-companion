@@ -48,6 +48,7 @@ const fs = require("fs");
 const path = require("path");
 const { pathToFileURL } = require("url");
 const { CONTAINER_LEASE_MS } = require("./lootMemory");
+const { hostedRunPolicy } = require("./config");
 
 // An unguessable per-run claim capability. The public botID is deliberately NOT
 // accepted by the select guard: account-scoped bot listings expose bot IDs, so
@@ -198,10 +199,10 @@ function createBotHost(options) {
   const persistPath = options.persistPath || null;
   const loadAccount = options.loadAccount || (async () => null);
   // The saved-script library is platform-wide: any account's characters may
-  // run any account's script. `loadScript(scriptID) -> Record | null` looks a
-  // script up by ID alone — it does NOT check who authored it. Authority over
-  // characters and running bots stays account-scoped elsewhere in this file
-  // (claims, list(), stop()); only the script lookup is global.
+  // run any account's script. `loadScript(scriptID, rosterRow)` still looks
+  // saved scripts up by ID alone, not author; the optional roster context lets
+  // MCC reconstruct an operation-owned profile from its durable definition.
+  // Character and running-bot authority stays account-scoped below.
   const loadScript = options.loadScript || (() => null);
 
   /**
@@ -239,6 +240,16 @@ function createBotHost(options) {
             maxRuntimeMinutes: record.maxRuntimeMinutes,
             expiresAt: record.expiresAt,
             startedAt: record.startedAt,
+            // Mining Operations persist only this stable association. Their
+            // current target and lifecycle are deliberately reconstructed;
+            // they are not trusted from this restart roster. Ordinary roster
+            // rows retain their established wire/disk shape.
+            ...(record.operationID ? {
+              operationID: record.operationID,
+              operationRole: record.operationRole,
+              operationControllerAccountID: record.operationControllerAccountID,
+              ...(record.operationStopRequested ? { operationStopRequested: true } : {}),
+            } : {}),
           };
           if (record.kind === "companion") {
             // THE DIVERGENCE FROM A SCRIPT (docs/fleet-companion-handoff.md,
@@ -300,6 +311,10 @@ function createBotHost(options) {
       scriptName: record.scriptName,
       scriptRev: record.scriptRev,
       scriptHash: record.scriptHash,
+      operationID: record.operationID,
+      operationRole: record.operationRole,
+      operationStopRequested: record.operationStopRequested === true,
+      parking: record.parking || null,
       restartSafe: record.restartSafe,
       riskClasses: record.riskClasses,
       maxRuntimeMinutes: record.maxRuntimeMinutes,
@@ -433,6 +448,15 @@ function createBotHost(options) {
     if (snapshot.lastAlert) {
       record.lastAlert = { message: String(snapshot.lastAlert.message), atMs: Number(snapshot.lastAlert.atMs) };
     }
+    if (record.operationStopRequested && record.parking?.state === "PARKING_FAILED") {
+      // The paused/terminal finite runner can still receive ordinary store
+      // updates. Those must not erase the host-owned parking failure or make
+      // the live claim look ended (and stop renewing a still-unsafe target).
+      record.status = "paused";
+      record.phase = "Parking failed";
+      record.why = record.parking.reason;
+      record.pauseReason = record.parking.reason;
+    }
   }
 
   // The ring: keep at most MAX_ENDED_RUNS finalized records, evicting the
@@ -554,6 +578,9 @@ function createBotHost(options) {
     expectedExpiresAt = null,
     callerSessionID = null,
     beforeStart = null,
+    operationID = null,
+    operationRole = null,
+    operationControllerAccountID = null,
   }) {
     const isCompanion = kind === "companion";
     let resumingAbandonment = null;
@@ -655,7 +682,7 @@ function createBotHost(options) {
       recordScriptName = scriptName;
     }
 
-    const grantVerdict = stack.validateBotLaunchGrant(grant, normalizedRev, runPolicy);
+    const grantVerdict = stack.validateBotLaunchGrant(grant, normalizedRev, runPolicy, hostedRunPolicy.maxRuntimeMinutes);
     if (!grantVerdict.ok) {
       return { ok: false, code: grantVerdict.code, message: grantVerdict.message };
     }
@@ -677,6 +704,12 @@ function createBotHost(options) {
         code: "BOT_GRANT_EXPIRED",
         message: "This bot's approved run time has ended. Review and start it again.",
       };
+    }
+
+    // Persisted absolute expiry is not a fresh grant. Refuse malformed or
+    // over-policy future deadlines before credentials, claims or timer creation.
+    if (deadlineMs - now() > grantVerdict.grant.maxRuntimeMinutes * 60_000) {
+      return { ok: false, code: "BOT_GRANT_INVALID", message: "Recovered expiry exceeds the approved finite runtime." };
     }
 
     if (claims.has(characterID)) {
@@ -706,6 +739,9 @@ function createBotHost(options) {
       scriptName: recordScriptName,
       scriptRev: normalizedRev,
       scriptHash: normalizedHash,
+      operationID: typeof operationID === "string" && operationID.length > 0 ? operationID : null,
+      operationRole: ["MINER", "HAULER", "DEFENDER"].includes(operationRole) ? operationRole : null,
+      operationControllerAccountID,
       restartSafe: runPolicy.restartSafe === true,
       riskClasses: [...runPolicy.riskClasses],
       maxRuntimeMinutes: grantVerdict.grant.maxRuntimeMinutes,
@@ -752,6 +788,7 @@ function createBotHost(options) {
     claims.set(characterID, botID);
     records.set(botID, record);
 
+    let startStage = "AUTHENTICATION";
     try {
       const token = auth.createBotSessionToken(account, deadlineMs);
       const store = stack.createClientStore();
@@ -768,14 +805,25 @@ function createBotHost(options) {
         perSessionToken: true,
         initialSessionToken: token,
         eventSource: stubEventSource,
+        // Operation bots may acquire a pilot without a browser workspace. They
+        // must run the same login lost-drone gate before automation starts.
+        browserPilotRecovery: record.operationID !== null,
+        miningOperationID: record.operationID,
       });
       record.flow = flow;
       record.store = store;
 
       // Validation, credentials, flow construction and the private claim exist
       // before the route releases the caller. The hook is internal, never wire data.
+      startStage = "SESSION_HANDOFF";
       if (beforeStart) await beforeStart();
+      startStage = "SELECT_CHARACTER";
       await flow.selectCharacter(characterID);
+      if (record.operationID !== null) {
+        startStage = "DRONE_RECOVERY";
+        await flow.retryDroneRecovery();
+        flow.requireAutomationReady();
+      }
       const online = store.station.get().online;
       record.characterName = online ? online.characterName : null;
 
@@ -789,36 +837,25 @@ function createBotHost(options) {
         if (snapshot.status === "running" || snapshot.status === "paused") {
           sawRunning = true;
         }
-        if (sawRunning && ENDED_STATUSES.has(snapshot.status)) {
+        if (sawRunning && ENDED_STATUSES.has(snapshot.status) && !record.operationStopRequested) {
           void finalize(record);
         }
       });
 
       if (isCompanion) {
+        startStage = "START_AUTOMATION";
         await flow.startFleetCompanion(decodedRequest, resumingAbandonment);
         applySnapshot(record, store.companion.get());
       } else {
+        startStage = "START_AUTOMATION";
         await flow.startCustomBot(decodedDoc);
         applySnapshot(record, store.customBot.get());
       }
       if (record.startError !== null) {
         await finalize(record);
-        return { ok: false, code: "BOT_START_FAILED", message: record.startError };
+        return { ok: false, code: "BOT_START_FAILED", stage: startStage, message: `${startStage}: ${record.startError}` };
       }
-      const remainingMs = Math.max(1, Date.parse(record.expiresAt) - now());
-      record.deadlineTimer = setDeadlineTimeout(() => {
-        if (record.finalized) {
-          return;
-        }
-        record.deadlineTimer = null;
-        record.expiryRequested = true;
-        // The ordinary Stop and this timer share one in-progress operation.
-        // Neither may finalize the runner before its controlled flight returns.
-        return stop(record.botID, record.accountID).catch(logError);
-      }, remainingMs);
-      if (typeof record.deadlineTimer.unref === "function") {
-        record.deadlineTimer.unref();
-      }
+      armDeadline(record);
       persistRoster();
       // First vitals sample right away (fire-and-forget), so the landing
       // page's next poll already has ship state instead of a blank line.
@@ -828,9 +865,60 @@ function createBotHost(options) {
       logError(error);
       record.status = "error";
       record.why = error && error.message ? String(error.message) : "The bot could not be started.";
+      const causeCode = typeof error?.code === "string" ? error.code : null;
       await finalize(record);
-      return { ok: false, code: "BOT_START_FAILED", message: record.why };
+      return { ok: false, code: "BOT_START_FAILED", stage: startStage, causeCode,
+        message: `${startStage}${causeCode ? ` (${causeCode})` : ""}: ${record.why}` };
     }
+  }
+
+  function armDeadline(record) {
+    if (record.deadlineTimer !== null) clearDeadlineTimeout(record.deadlineTimer);
+    const expectedExpiry = record.expiresAt;
+    record.deadlineTimer = setDeadlineTimeout(() => {
+      // A canceled callback already queued before extension has no authority.
+      if (record.finalized || record.expiresAt !== expectedExpiry) return;
+      record.deadlineTimer = null;
+      record.expiryRequested = true;
+      if (record.operationStopRequested) {
+        record.flow?.cancelCustomBotParking();
+        record.parking = { state: "PARKING_FAILED", reason: "Approved runtime expired before parking completed; control retained for explicit recovery." };
+        record.status = "paused";
+        record.phase = "Parking failed";
+        record.why = record.parking.reason;
+        persistRoster();
+        return;
+      }
+      return stop(record.botID, record.accountID).catch(logError);
+    }, Math.max(1, Date.parse(expectedExpiry) - now()));
+    record.deadlineTimer.unref?.();
+  }
+
+  async function extendOperationGrant(botID, operationID, controllerAccountID, minutes) {
+    const stack = await loadStack();
+    const record = records.get(botID);
+    if (!record || !operationID || record.operationID !== operationID ||
+        !record.operationControllerAccountID || record.operationControllerAccountID !== Number(controllerAccountID) ||
+        claims.get(record.characterID) !== botID) return { ok: false, code: "OPERATION_GRANT_FORBIDDEN", message: "Only this run's initiating account can extend its operation-owned members. Legacy ownership cannot be inferred." };
+    if (record.finalized || record.expiryRequested || record.operationStopRequested || record.gracefulStopPromise ||
+        record.status !== "running" || Date.parse(record.expiresAt) <= now()) {
+      return { ok: false, code: "BOT_GRANT_NOT_ACTIVE", message: "This member is not running or its Stop/expiry boundary has begun; extension cannot resume it." };
+    }
+    if (!hostedRunPolicy.durationChoices.includes(minutes)) return { ok: false, code: "BOT_GRANT_INVALID", message: "Choose an extension offered by the configured hosted-run policy." };
+    const maxRuntimeMinutes = record.maxRuntimeMinutes + minutes;
+    const verdict = stack.validateBotLaunchGrant({ scriptRev: record.scriptRev, riskClasses: record.riskClasses, maxRuntimeMinutes }, record.scriptRev, { riskClasses: record.riskClasses }, hostedRunPolicy.maxRuntimeMinutes);
+    if (!verdict.ok) return { ...verdict, message: `${verdict.message} Extension adds to the already approved total, not a fresh run.` };
+    const expiresAt = new Date(Date.parse(record.expiresAt) + minutes * 60_000).toISOString();
+    try {
+      const token = auth.extendBotSessionToken(record.flow.sessionToken(), Date.parse(expiresAt));
+      record.flow.replaceHostedSessionToken(token);
+    } catch (error) { return { ok: false, code: "BOT_GRANT_CREDENTIAL_FAILED", message: error.message }; }
+    // No await between final live checks, credential replacement and timer update.
+    record.maxRuntimeMinutes = maxRuntimeMinutes;
+    record.expiresAt = expiresAt;
+    armDeadline(record);
+    persistRoster();
+    return { ok: true, bot: publicBot(record) };
   }
 
   async function stop(botID, accountID) {
@@ -868,6 +956,65 @@ function createBotHost(options) {
     try { return await pending; } finally { if (record.gracefulStopPromise === pending) record.gracefulStopPromise = null; }
   }
 
+  function operationRecord(botID, accountID, operationID) {
+    const record = records.get(botID);
+    return record && !record.finalized && record.accountID === Number(accountID) &&
+      record.operationID === operationID && claims.get(record.characterID) === record.botID ? record : null;
+  }
+
+  async function prepareOperationStop(botID, accountID, operationID) {
+    const record = operationRecord(botID, accountID, operationID);
+    if (!record) return { ok: false, code: "PARKING_MEMBER_UNAVAILABLE", message: "Operation does not own this live pilot." };
+    if (record.prepareParkingPromise) return record.prepareParkingPromise;
+    // Persist the stop intent BEFORE any await. Restart must never resurrect
+    // the old mining routine after the user asked to park it.
+    record.operationStopRequested = true;
+    record.parking = { state: "SETTLING", reason: null };
+    persistRoster();
+    const pending = (async () => {
+      try {
+        await record.flow.prepareCustomBotParking();
+        record.parking = { state: "READY", reason: null };
+        return { ok: true };
+      } catch (error) {
+        record.parking = { state: "PARKING_FAILED", reason: error.message };
+        record.status = "paused";
+        record.phase = "Parking settlement blocked";
+        record.why = error.message;
+        return { ok: false, code: "PARKING_PREPARE_FAILED", message: error.message };
+      }
+    })();
+    record.prepareParkingPromise = pending;
+    try { return await pending; } finally { record.prepareParkingPromise = null; }
+  }
+
+  async function parkOperationMember(botID, accountID, operationID, policy) {
+    const record = operationRecord(botID, accountID, operationID);
+    if (!record) return { ok: false, code: "PARKING_MEMBER_UNAVAILABLE", message: "Operation does not own this live pilot." };
+    if (record.parkingPromise) return record.parkingPromise;
+    if (record.parking?.state !== "READY") return { ok: false, code: "PARKING_NOT_SETTLED", message: "Settle the operation member before parking." };
+    const pending = (async () => {
+      try {
+        record.parking = { state: "PARKING", reason: null };
+        await record.flow.parkCustomBot(policy, Date.parse(record.expiresAt));
+        record.parking = { state: "PARKED", reason: null };
+        // Final scoped release still crosses the existing graceful Stop path.
+        const stopped = await stop(botID, accountID);
+        if (!stopped.ok) throw new Error(stopped.message || "Final graceful Stop could not complete.");
+        return stopped;
+      } catch (error) {
+        record.status = "paused";
+        record.phase = "Parking failed";
+        record.why = error.message;
+        record.parking = { state: "PARKING_FAILED", reason: error.message };
+        persistRoster();
+        return { ok: false, code: "PARKING_FAILED", message: error.message };
+      }
+    })();
+    record.parkingPromise = pending;
+    try { return await pending; } finally { record.parkingPromise = null; }
+  }
+
   function list(accountID) {
     const rows = [];
     for (const record of records.values()) {
@@ -877,6 +1024,21 @@ function createBotHost(options) {
     }
     rows.sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)));
     return rows;
+  }
+
+  /** Internal, authenticated callers use this to reconcile cross-account operations. */
+  function listAll() {
+    return [...records.values()].map(publicBot);
+  }
+
+  /** The operation association carried by this exact running bot capability. */
+  function operationForClaim(characterID, secret) {
+    if (!authorizesClaim(characterID, secret)) return null;
+    const botID = claims.get(Number(characterID));
+    const record = botID ? records.get(botID) : null;
+    return record?.operationID
+      ? { operationID: record.operationID, operationRole: record.operationRole }
+      : null;
   }
 
   /** The RUNNING bot claiming this character, or null — the select guard. */
@@ -994,6 +1156,10 @@ function createBotHost(options) {
       scriptName: String(row.scriptName || "Untitled bot"),
       scriptRev: Number(row.scriptRev || 0),
       scriptHash: String(row.scriptHash || ""),
+      operationID: typeof row.operationID === "string" ? row.operationID : null,
+      operationRole: ["MINER", "HAULER", "DEFENDER"].includes(row.operationRole) ? row.operationRole : null,
+      operationStopRequested: row.operationStopRequested === true,
+      parking: row.operationStopRequested ? { state: "PARKING_FAILED", reason: "Parking interrupted by WC restart; arrival is unknown. Review and recover this pilot explicitly." } : null,
       restartSafe: false,
       riskClasses: Array.isArray(row.riskClasses) ? row.riskClasses.map(String) : [],
       maxRuntimeMinutes: Number(row.maxRuntimeMinutes || 0),
@@ -1028,6 +1194,10 @@ function createBotHost(options) {
   async function resume() {
     const rows = readRoster();
     for (const row of rows) {
+      if (row.operationStopRequested === true) {
+        recordResumeFailure(row, "operation parking was interrupted. The old mining routine was not resumed; docking/unload are unconfirmed.");
+        continue;
+      }
       const characterID = Number(row.characterID);
       const kind = row.kind === "companion" ? "companion" : "script";
       try {
@@ -1038,7 +1208,7 @@ function createBotHost(options) {
         }
         let script = null;
         if (kind === "script") {
-          script = loadScript(String(row.scriptID || ""));
+          script = loadScript(String(row.scriptID || ""), row);
           if (!script) {
             recordResumeFailure(row, "the saved bot no longer exists.");
             continue;
@@ -1089,6 +1259,9 @@ function createBotHost(options) {
                 expectedScriptRev: row.scriptRev,
                 expectedScriptHash: row.scriptHash,
                 expectedExpiresAt: row.expiresAt,
+                operationID: row.operationID ?? null,
+                operationRole: row.operationRole ?? null,
+                operationControllerAccountID: row.operationControllerAccountID ?? null,
               })
             : await start({
                 account,
@@ -1103,6 +1276,9 @@ function createBotHost(options) {
                 expectedScriptRev: row.scriptRev,
                 expectedScriptHash: row.scriptHash,
                 expectedExpiresAt: row.expiresAt,
+                operationID: row.operationID ?? null,
+                operationRole: row.operationRole ?? null,
+                operationControllerAccountID: row.operationControllerAccountID ?? null,
               });
         if (!outcome.ok) {
           recordResumeFailure(row, outcome.message || outcome.code);
@@ -1124,10 +1300,15 @@ function createBotHost(options) {
 
   return {
     start,
+    extendOperationGrant,
     stop,
+    prepareOperationStop,
+    parkOperationMember,
     list,
+    listAll,
     claimedBy,
     authorizesClaim,
+    operationForClaim,
     activeCharacterIDs,
     activeBots,
     sampleAllVitals,

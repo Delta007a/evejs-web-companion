@@ -606,6 +606,7 @@
     </div>
 
     <div class="hangar-head-actions">
+      <a class="hangar-manage" href="/mining-command-center">Mining Command Center</a>
       <button
         type="button"
         class="hangar-manage"

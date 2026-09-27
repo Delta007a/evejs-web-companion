@@ -31,6 +31,7 @@
   } from "../bots/pilotRoster.ts";
   import { BOTS } from "../nav/botRegistry.ts";
   import { DEFAULT_SERVER_BOT_RUNTIME_MINUTES } from "../bots/runPolicy.ts";
+  import { hostedDurationLabel, type HostedRunPolicy } from "../bots/hostedRunPolicy.ts";
   import { startHere, startOnServer, type StartOutcome } from "../bots/startRun.ts";
   import type { StationSlice } from "../store/clientStore.ts";
   import type { BotsState, CustomBotState, FlightState } from "../store/types.ts";
@@ -38,12 +39,14 @@
 
   let {
     session,
+    hostedRunPolicy = null,
     serverBot,
     scripts,
     onChanged,
     onSetUpBuiltIn,
   }: {
     session?: Session;
+    hostedRunPolicy?: HostedRunPolicy | null;
     serverBot: ServerBot | null;
     /** The library rows the panel already loaded — this row never fetches its own. */
     scripts: readonly BotScriptSummary[];
@@ -247,6 +250,9 @@
   );
   const selectedScriptID = $derived(selectedBuiltIn === null ? selectedValue : null);
   let runtimeMinutes = $state(DEFAULT_SERVER_BOT_RUNTIME_MINUTES);
+  $effect(() => {
+    if (hostedRunPolicy && !hostedRunPolicy.durationChoices.includes(runtimeMinutes)) runtimeMinutes = hostedRunPolicy.defaultRuntimeMinutes;
+  });
   let startError = $state<string | null>(null);
 
   function applyOutcome(outcome: StartOutcome): void {
@@ -443,18 +449,15 @@
           <div class="pilot-launch-run">
             <ActionButton
               action="run-on-server"
-              disabled={busy || selectedScriptID === null}
+              disabled={busy || selectedScriptID === null || !hostedRunPolicy}
               label={busy ? "Handing over…" : undefined}
               onclick={runOnServer}
             />
             <span class="pilot-launch-where">on the server</span>
             <label class="pilot-launch-limit">
               for up to
-              <select bind:value={runtimeMinutes} disabled={busy}>
-                <option value={60}>1 hour</option>
-                <option value={240}>4 hours</option>
-                <option value={720}>12 hours</option>
-                <option value={1440}>24 hours</option>
+              <select bind:value={runtimeMinutes} disabled={busy || !hostedRunPolicy}>
+                {#each hostedRunPolicy?.durationChoices ?? [] as minutes}<option value={minutes}>{hostedDurationLabel(minutes)}</option>{/each}
               </select>
             </label>
           </div>

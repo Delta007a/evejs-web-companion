@@ -60,14 +60,19 @@ export function decideMiningDroneFlight(
   hostileID: number | null,
   rockID: number | null,
   leaving: boolean,
-): { action: MiningDroneAction | null; memory: MiningDroneMemory; failedDefense?: boolean } {
+): { action: MiningDroneAction | null; memory: MiningDroneMemory; diagnostic: string; failedDefense?: boolean } {
   const memory = { ...previous };
-  const result = (action: MiningDroneAction | null, failedDefense = false) => ({ action, memory, failedDefense });
+  // Diagnostic data only: no extra reads, retry policy or timing. The runner
+  // records changes, so a steady flight (or a persistent skip) logs once.
+  const result = (action: MiningDroneAction | null, failedDefense = false, reason?: string) => ({
+    action, memory, failedDefense,
+    diagnostic: `${memory.combat ? "combat" : "mining"}: ${reason ?? (action?.kind === "wait" || action?.kind === "pause" ? action.reason : action?.kind ?? "no order needed")}`,
+  });
   const wait = (reason: string) => result({ kind: "wait", reason });
   // A failed read never counts as a clear grid or confirms a return.
   if (state?.out == null) {
     memory.clearTicks = 0;
-    return leaving || hostileID !== null ? wait("reading drone control state") : result(null);
+    return leaving || hostileID !== null ? wait("reading drone control state") : result(null, false, "launch skipped: drone control state unavailable");
   }
   if (hostileID !== null) {
     memory.combat = true;
@@ -96,10 +101,10 @@ export function decideMiningDroneFlight(
   }
   memory.returning = [];
   memory.recallTicks = 0;
-  if (leaving) return result(null);
+  if (leaving) return result(null, false, "launch skipped: flight settled for step exit/travel/target hold");
   const targetID = memory.combat ? hostileID : rockID;
-  if (targetID === null) return result(null);
-  if (state.maxActive === null || !Number.isSafeInteger(state.maxActive) || state.maxActive < 0) return result(null);
+  if (targetID === null) return result(null, false, "launch skipped: no current eligible target");
+  if (state.maxActive === null || !Number.isSafeInteger(state.maxActive) || state.maxActive < 0) return result(null, false, "launch skipped: active-drone limit unreadable");
   const drones = miningDroneTopUp((state.bay ?? []).filter(d => roleOf(d.typeID) === role), state.maxActive - out.length);
   const idle = out.filter(d => d.targetID !== targetID ||
     !(memory.combat ? ["fighting", "chasing", "approaching"] : ["mining", "approaching"]).includes(d.activity ?? ""));
@@ -110,7 +115,12 @@ export function decideMiningDroneFlight(
     memory.commandKey = "";
     memory.attempts = 0;
     memory.cooldown = 0;
-    return result(null);
+    const reason = launchKey === memory.blockedLaunchKey ? "launch skipped: unchanged flight exhausted bounded launch attempts" :
+      state.maxActive === 0 ? "launch skipped: active-drone limit is zero" :
+      out.length >= state.maxActive ? "launch skipped: no free active-drone slots" :
+      state.bay === null ? "launch skipped: drone bay unavailable" :
+      "launch skipped: no additional role-matched bay drones with valid quantities";
+    return result(null, false, `${out.length > 0 ? `controlled flight confirmed (${out.length}); ` : ""}${reason}`);
   }
   const key = JSON.stringify([role, action, out.map(d => d.itemID)]);
   if (key !== memory.commandKey) {
@@ -118,10 +128,10 @@ export function decideMiningDroneFlight(
     memory.attempts = 0;
     memory.cooldown = 0;
   }
-  if (memory.cooldown > 0) { memory.cooldown--; return memory.combat ? wait("waiting for drone order confirmation") : result(null); }
+  if (memory.cooldown > 0) { memory.cooldown--; return memory.combat ? wait("waiting for drone order confirmation") : result(null, false, "waiting for drone order confirmation"); }
   if (memory.attempts >= MINING_DRONE_ORDER_ATTEMPTS) {
     if (action.kind === "launch") memory.blockedLaunchKey = launchKey;
-    return result(null, memory.combat && (action.kind !== "launch" || out.length === 0));
+    return result(null, memory.combat && (action.kind !== "launch" || out.length === 0), `order skipped: unchanged flight exhausted bounded ${action.kind} attempts`);
   }
   memory.attempts++;
   memory.cooldown = 3;
@@ -136,6 +146,8 @@ export async function recallFlightBeforeManualStop(deps: {
   /** Server expiry may shorten the retry window to fit its credential margin. */
   deadlineMs?(): number | null;
   now?(): number;
+  /** Additional owned equipment may settle on the SAME bounded cleanup reads. */
+  additionalSettlement?(): boolean;
 }): Promise<void> {
   let memory = freshDroneMemory();
   let lastFailure: unknown = null;
@@ -154,7 +166,7 @@ export async function recallFlightBeforeManualStop(deps: {
     }
     const decision = decideMiningDroneFlight(state, memory, null, null, true);
     memory = decision.memory;
-    if (state?.out != null && state.out.every(d => !d.controlled) && memory.returning.length === 0) return;
+    if (state?.out != null && state.out.every(d => !d.controlled) && memory.returning.length === 0 && (deps.additionalSettlement?.() ?? true)) return;
     if (deadlineReached()) break;
     if (decision.action?.kind === "recallDrones") {
       try { await deps.recall(decision.action.droneIDs); } catch (error) { lastFailure = error; }
@@ -162,6 +174,7 @@ export async function recallFlightBeforeManualStop(deps: {
     if (decision.action?.kind === "pause") break;
     if (observation + 1 < MANUAL_STOP_RECALL_OBSERVATIONS) await deps.sleep(MANUAL_STOP_RECALL_CADENCE_MS);
   }
+  if (deps.additionalSettlement?.() === false) throw new Error("Travel assist propulsion has not confirmed stopped within the cleanup window; Stop is paused and pilot control retained.");
   throw new Error(lastFailure === null
     ? "Controlled drones have not been confirmed back in the bay; Stop is paused."
     : "Drone recall or return could not be confirmed; Stop is paused.");

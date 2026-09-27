@@ -1,4 +1,5 @@
 import { hostileRows } from "../space/overview.ts";
+import { confirmedDrain } from "./miningLogistics.ts";
 import { decideMiningDroneFlight, freshDroneMemory, type MiningDroneMemory } from "./miningDroneFlight.ts";
 // A4b — the tick orchestrator: given a script, a fresh observation, and the
 // running memory, decide the ONE action this tick, and hand back the next
@@ -62,6 +63,7 @@ import {
 // ─── The one action a tick emits ─────────────────────────────────────────────
 
 export type ScriptAction =
+  | { readonly kind: "bookmarkMiningSite"; readonly targetKey: string }
   | { readonly kind: "haulTransfer"; readonly itemID: number; readonly quantity: number; readonly from: import("../store/types.ts").InventoryPlace; readonly to: import("../store/types.ts").InventoryPlace; readonly stationID: number; readonly typeID: number; readonly sourceQuantity: number }
   | { readonly kind: "wait" }
   | { readonly kind: "undock" }
@@ -205,6 +207,27 @@ export type ScriptAction =
    * by other pilots running the same bot, possibly in other systems.
    */
   | { readonly kind: "rememberBeltDry"; readonly systemName: string; readonly beltName: string; readonly groupID: number | null }
+  /** Stored Mining Operation coordination. None of these actions reads space. */
+  | {
+      readonly kind: "reserveMiningTarget";
+      readonly candidates?: readonly import("../app/api.ts").MiningTargetCandidate[];
+      readonly targetType: "BELT" | "ORE_ANOMALY" | "ICE";
+      readonly siteIdentity?: string;
+      readonly siteID?: number;
+      readonly instanceID?: number | null;
+      readonly position?: import("../store/types.ts").SpaceVector;
+      readonly systemID: number;
+      readonly systemName: string;
+      readonly targetName: string;
+    }
+  | { readonly kind: "activateMiningTarget"; readonly targetKey: string }
+  | {
+      readonly kind: "depleteMiningTarget";
+      readonly targetKey: string;
+      readonly evidence: Readonly<Record<string, string | number | boolean | null>>;
+    }
+  | { readonly kind: "miningMemberReady" }
+  | { readonly kind: "miningDrainComplete"; readonly targetKey: string }
   /**
    * Tell the BFF's SHARED squad board which ship this pilot is on, so the fleet
    * can concentrate its fire (`targetID` null clears the call). Like
@@ -611,6 +634,8 @@ export type MacroOutcome =
 export type ScriptBoard = Readonly<Record<string, number | string | null>>;
 
 export interface MacroTick {
+  /** Explicit same-step safety transition (e.g. operation depletion). */
+  readonly settleDrones?: boolean;
   /** Servicing intent, including approach waits; the runner must lease it. */
   readonly containerTargetID?: number;
   readonly action: ScriptAction;
@@ -936,11 +961,11 @@ export function activeStepToursOreSites(script: BotScript, mem: ScriptMemory): b
     return false;
   }
   const step = activeStep(script, mem.position);
-  if (step === undefined || step === null || step.macro !== "mine-at-belt") {
+  if (step === undefined || step === null || !["mine-at-belt", "travel-to-belt"].includes(step.macro)) {
     return false;
   }
   const belt = step.args["belt"];
-  return belt !== undefined && belt.kind === "belt" && belt.belt.mode === "site";
+  return belt !== undefined && belt.kind === "belt" && ["site", "ice-site"].includes(belt.belt.mode);
 }
 
 /**
@@ -952,7 +977,11 @@ export function activeStepToursOreSites(script: BotScript, mem: ScriptMemory): b
  * names at all (see `ScriptObservation.typeNames`).
  */
 export function activeStepNeedsTypeNames(script: BotScript, mem: ScriptMemory): boolean {
-  if (mem.position.kind === "done" || mem.latched !== null) {
+  // A branch entry is a condition read, not a macro. Its BranchBlock has no
+  // `args`; looking there before the first observation stopped every script
+  // whose loop began with IF (including the operation hauler).
+  if (mem.position.kind === "done" || mem.position.kind === "branch-enter" ||
+      mem.position.kind === "loop-branch-enter" || mem.latched !== null) {
     return false;
   }
   const step = activeStep(script, mem.position);
@@ -972,6 +1001,10 @@ export function activeStepNeedsTypeNames(script: BotScript, mem: ScriptMemory): 
 export type RunStatus = "running" | "paused" | "done";
 
 export interface ScriptTickResult {
+  readonly settleDrones?: boolean;
+  /** Existing-observation diagnostics; never a request for another read. */
+  readonly droneDiagnostic?: string;
+  readonly droneRecallConfirmed?: boolean;
   readonly containerTargetID?: number;
   readonly action: ScriptAction;
   readonly why: string;
@@ -1021,7 +1054,44 @@ export function decideScriptAction(
   script: BotScript, obs: ScriptObservation, mem: ScriptMemory,
   registry: MacroRegistry, travelHome: HomeTravelDecider,
 ): ScriptTickResult {
-  const base = decideScriptCore(script, obs, mem, registry, travelHome);
+  if (obs.miningOperation?.stopRequested) {
+    return { action: WAIT, why: "Operation Stop requested; target-dependent work is disabled while botHost settles this pilot.",
+      phase: "Stopping operation", stepPath: null, interruptID: null, status: "running", pauseReason: null, memory: mem };
+  }
+  let base = decideScriptCore(script, obs, mem, registry, travelHome);
+  const assignmentMissing = obs.miningOperationRequired === true && obs.miningOperation == null;
+  const minerTargetMissing = obs.miningOperationRequired === true &&
+    obs.miningOperation?.role === "MINER" && obs.miningOperation.currentTarget === null;
+  const operationHeld = (assignmentMissing || minerTargetMissing) && base.memory.latched === null;
+  if (operationHeld) {
+    // Do not let the ordinary saved-script path issue a nearest-belt order when
+    // the host's operation assignment cannot be read. Also settle work already
+    // cycling on a target whose claim was lost before selecting another one.
+    const active = new Set(obs.snapshot?.ship?.activeModuleIDs ?? []);
+    const miner = obs.miningModuleIDs?.find((id) => active.has(id));
+    const miningDrones = (obs.miningDrones?.out ?? [])
+      .filter((drone) => drone.controlled && drone.typeID !== null && obs.miningDrones?.roles[drone.typeID] === "mining")
+      .map((drone) => drone.itemID);
+    const why = assignmentMissing
+      ? `The operation assignment is unavailable; standalone target selection is disabled.${obs.miningOperationReadError ? ` ${obs.miningOperationReadError}` : ""}`
+      : "The operation has no owned target; settling mining equipment before selecting another.";
+    if (miner !== undefined || (miningDrones.length > 0 && obs.hostileOnGrid !== true)) {
+      return { ...base, action: miner !== undefined ? { kind: "deactivate", moduleID: miner } : { kind: "recallDrones", droneIDs: miningDrones },
+        droneDiagnostic: `launch skipped: operation target authority unavailable; ${miner !== undefined ? "settling mining module" : "recall requested"}`,
+        why, phase: assignmentMissing ? "Waiting for operation assignment" : "Target claim unavailable",
+        status: "running", pauseReason: null, memory: mem, containerTargetID: undefined };
+    }
+    const activeMacro = activeMacroID(script, mem);
+    const targetlessMinerWork = minerTargetMissing && ![
+      "undock", "mine-at-belt", "warp-to-ore-anomaly", "deliver-ore", "travel-to-station", "unload-cargo",
+    ].includes(activeMacro ?? "");
+    if (assignmentMissing || targetlessMinerWork) {
+      // Keep the drone-flight wrapper below in play so existing hostile
+      // self-defense still runs, but no standalone resource action escapes.
+      base = { ...base, action: WAIT, why, phase: assignmentMissing ? "Waiting for operation assignment" : "Target claim unavailable",
+        status: "running", pauseReason: null, memory: mem, containerTargetID: undefined };
+    }
+  }
   if (obs.inWarp === true || obs.docked === true) return base;
   const mining = activeMacroID(script, mem) === "mine-at-belt";
   const step = mining ? activeStep(script, mem.position) : null;
@@ -1033,21 +1103,34 @@ export function decideScriptAction(
     const role = d.typeID === null ? null : obs.miningDrones?.roles[d.typeID];
     return role == null || role === "mining" || role === "combat";
   }) === true);
-  if (!enabled && mem.miningFlight === undefined && !terminalFlight) return base;
-  const leaving = !enabled || base.status !== "running" || base.memory.latched !== null ||
-    activeStep(script, base.memory.position)?.id !== step?.id ||
-    ["warp", "warpScan", "warpBookmark", "startRoute", "startSystemRoute", "dock", "undock"].includes(base.action.kind);
-  const rocks = obs.snapshot?.entities.filter(e => !e.isSelf && (e.miningYieldTypeID !== null || e.beltID !== null)) ?? [];
-  const picked = base.action.kind === "activate" || base.action.kind === "lock" ? base.action.targetID :
-    step === null ? null : base.memory.macroMem[step.id]?.["rockID"];
-  const rockID = typeof picked === "number" && rocks.some(r => r.itemID === picked) ? picked : null;
+  if (!enabled && mem.miningFlight === undefined && !terminalFlight) return mining
+    ? { ...base, droneDiagnostic: "launch skipped: mining drones disabled by routine (explicit drones toggle required)" }
+    : base;
   const origin = obs.snapshot?.ship?.position ?? { x: 0, y: 0, z: 0 };
   const hostileID = obs.snapshot === null || obs.snapshot === undefined ? null :
     hostileRows(obs.snapshot, origin)[0]?.itemID ?? null;
+  const leaving = base.settleDrones === true || (operationHeld && hostileID === null) || !enabled || base.status !== "running" || base.memory.latched !== null ||
+    activeStep(script, base.memory.position)?.id !== step?.id ||
+    ["warp", "warpScan", "warpBookmark", "startRoute", "startSystemRoute", "dock", "undock"].includes(base.action.kind);
+  const rocks = obs.snapshot?.entities.filter(e => !e.isSelf && (e.miningYieldTypeID !== null || e.beltID !== null)) ?? [];
+  const picked = operationHeld ? null :
+    (base.action.kind === "activate" || base.action.kind === "lock" ? base.action.targetID :
+      step === null ? null : base.memory.macroMem[step.id]?.["rockID"]);
+  // Ice uses the existing defensive flight, but never orders ordinary Mining
+  // Drones to harvest ice. A null rock target also prevents mining-flight launch.
+  const resourceArg = step?.args["belt"];
+  const ice = obs.miningOperation?.currentTarget?.targetType === "ICE" ||
+    (resourceArg?.kind === "belt" && resourceArg.belt.mode === "ice-site");
+  const rockID = !ice && typeof picked === "number" && rocks.some(r => r.itemID === picked) ? picked : null;
   const flight = decideMiningDroneFlight(
     obs.snapshot == null || obs.hostileOnGrid === null ? null : obs.miningDrones ?? null,
     mem.miningFlight ?? freshDroneMemory(), hostileID, rockID, leaving,
   );
+  base = { ...base,
+    droneDiagnostic: operationHeld ? `operation target authority unavailable; ${flight.diagnostic}` : flight.diagnostic,
+    droneRecallConfirmed: (mem.miningFlight?.returning.length ?? 0) > 0 &&
+      obs.miningDrones?.out != null && flight.memory.returning.length === 0,
+  };
   if (flight.failedDefense) {
     return { ...base, action: WAIT, status: "running", memory: { ...mem, miningFlight: flight.memory,
       latched: { interruptID: null, reason: "Combat drones could not defend the ship; heading home after recall." } } };
@@ -2007,7 +2090,14 @@ function runProgram(
         loopBodyIndex !== null
           ? ((script.program[branchNode] as LoopBlock).body[loopBodyIndex] as BranchBlock)
           : (script.program[branchNode] as BranchBlock);
-      const verdict = evaluateCondition(branch.when, obs);
+      // A final tail load is not a normal threshold trip. Route only the
+      // established ore-threshold -> delivery idiom, retaining its explicit
+      // station/division and ordinary macro/interrupt/refusal boundaries.
+      // Never rewrite the observed hold fraction or unrelated custom branches.
+      const finalDelivery = branch.when.kind === "ore-hold-at-least" &&
+        branch.then.length === 1 && branch.then[0]?.kind === "macro" &&
+        branch.then[0].macro === "deliver-ore" && confirmedDrain(obs, board);
+      const verdict = finalDelivery ? "met" : evaluateCondition(branch.when, obs);
       if (verdict === "cannot-tell") {
         // No `isSilent` test here: a branch whose `when` cannot be read waits,
         // full stop, so every tick counted at this position is already a silent
@@ -2228,6 +2318,7 @@ function runProgram(
 
     return {
       action: tick.action,
+      settleDrones: tick.settleDrones,
       containerTargetID: tick.containerTargetID,
       why: tick.why,
       phase: tick.phase,

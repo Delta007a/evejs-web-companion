@@ -52,7 +52,9 @@ function makeFakeStack(log) {
       riskClasses: Array.isArray(doc.riskClasses) ? doc.riskClasses : [],
       restartSafe: doc.restartSafe !== false,
     }),
-    validateBotLaunchGrant: (grant, scriptRev, policy) => {
+    validateBotLaunchGrant: (grant, scriptRev, policy, maximum) => {
+      assert.ok(Number.isSafeInteger(maximum), "host supplies deployment policy to the validator");
+      if (grant && (grant.maxRuntimeMinutes < 1 || grant.maxRuntimeMinutes > maximum)) return { ok: false, code: "BOT_GRANT_INVALID", message: `Maximum approved runtime is ${maximum} minutes.` };
       if (!grant || Number(grant.scriptRev) !== scriptRev) {
         return { ok: false, code: "BOT_GRANT_REQUIRED", message: "Review this run." };
       }
@@ -147,12 +149,17 @@ function makeFakeStack(log) {
       return store;
     },
     createAppFlow: (store, options) => {
-      log.push(["createAppFlow", options.baseUrl, options.perSessionToken, options.initialSessionToken]);
+      let sessionToken = options.initialSessionToken;
+      log.push(["createAppFlow", options.baseUrl, options.perSessionToken, options.initialSessionToken, options.browserPilotRecovery, options.miningOperationID]);
       return {
+        sessionToken: () => sessionToken,
+        replaceHostedSessionToken(token) { sessionToken = token; log.push(["replaceHostedSessionToken", token]); },
         async selectCharacter(characterID) {
           log.push(["selectCharacter", characterID]);
           store._set({ station: { online: { characterID, characterName: "Test Pilot" } } });
         },
+        async retryDroneRecovery() { log.push(["retryDroneRecovery"]); },
+        requireAutomationReady() { log.push(["requireAutomationReady"]); },
         async startCustomBot(doc) {
           log.push(["startCustomBot", doc]);
           store._set({ customBot: { ...IDLE_SLICE, status: "running", phase: "Working" } });
@@ -250,6 +257,97 @@ function settle() {
   return new Promise((resolve) => setTimeout(resolve, 10));
 }
 
+function parkingHost(log, callbacks = {}, options = {}) {
+  return makeHost({ log, ...options, loadStack: async () => {
+    const stack = await makeFakeStack(log)();
+    return { ...stack, createAppFlow(store, opts) {
+      const flow = stack.createAppFlow(store, opts);
+      return { ...flow,
+        async prepareCustomBotParking() {
+          log.push(["prepareParking", store.station.get().online.characterID]);
+          store._set({ customBot: { ...IDLE_SLICE, status: "paused", phase: "Settling drones" } });
+          await callbacks.prepare?.();
+        },
+        async parkCustomBot(policy, deadline) {
+          log.push(["park", policy, deadline]);
+          // Switching and finishing the finite script emits ordinary terminal
+          // progress. Neither emission may release the host claim early.
+          store._set({ customBot: { ...IDLE_SLICE, status: "stopped" } });
+          await callbacks.park?.();
+          store._set({ customBot: { ...IDLE_SLICE, status: "stopped", phase: "Docked" } });
+        },
+        cancelCustomBotParking() { log.push(["cancelParking"]); callbacks.cancel?.(); },
+      };
+    } };
+  } });
+}
+
+test("parking keeps the exact host claim through script replacement and releases only after confirmed docking + graceful Stop", async t => {
+  const log = [];
+  let arrive;
+  const docked = new Promise(resolve => { arrive = resolve; });
+  const host = parkingHost(log, { park: () => docked });
+  t.after(() => host.stopAll());
+  const started = await host.start({ ...START, operationID: "A", operationRole: "MINER" });
+  const id = started.bot.botID;
+  assert.equal((await host.prepareOperationStop(id, ACCOUNT.accountID, "B")).ok, false);
+  assert.equal((await host.prepareOperationStop(id, ACCOUNT.accountID + 1, "A")).ok, false);
+  assert.equal((await host.prepareOperationStop(id, ACCOUNT.accountID, "A")).ok, true);
+  const pending = host.parkOperationMember(id, ACCOUNT.accountID, "A", { mode: "RETURN_HOME_DOCK" });
+  await settle();
+  assert.equal(host.claimedBy(START.characterID), id);
+  assert.equal(log.some(row => row[0] === "logout"), false);
+  arrive();
+  assert.equal((await pending).ok, true);
+  assert.equal(host.claimedBy(START.characterID), null);
+  assert.deepEqual(log.filter(row => ["prepareParking", "park", "gracefulStopCustomBot", "logout"].includes(row[0])).map(row => row[0]), ["prepareParking", "park", "gracefulStopCustomBot", "logout"]);
+  assert.equal(log.find(row => row[0] === "park")[2], Date.parse(started.bot.expiresAt));
+});
+
+test("parking failure retains pilot authority and never resurrects the old mining routine after restart", async t => {
+  const log = [];
+  const rosterPath = tempRosterPath();
+  const before = parkingHost(log, { park: () => { throw new Error("Docking unconfirmed"); } }, { persistPath: rosterPath });
+  t.after(() => before.stopAll());
+  const started = await before.start({ ...START, operationID: "A", operationRole: "MINER" });
+  await before.prepareOperationStop(started.bot.botID, ACCOUNT.accountID, "A");
+  assert.equal(readRosterFile(rosterPath)[0].operationStopRequested, true);
+  const failed = await before.parkOperationMember(started.bot.botID, ACCOUNT.accountID, "A", {});
+  assert.equal(failed.ok, false);
+  assert.match(failed.message, /Docking unconfirmed/);
+  assert.equal(before.claimedBy(START.characterID), started.bot.botID);
+  assert.equal(log.some(row => row[0] === "logout"), false);
+  const resumeLog = [];
+  await before.sampleAllVitals();
+  assert.equal(before.listAll()[0].status, "paused");
+  assert.equal(before.listAll()[0].why, "Docking unconfirmed", "ordinary store refresh must not erase the host failure");
+  const after = makeHost({ log: resumeLog, persistPath: rosterPath });
+  t.after(() => after.stopAll());
+  await after.resume();
+  assert.equal(resumeLog.some(row => ["selectCharacter", "startCustomBot"].includes(row[0])), false);
+  assert.equal(after.listAll()[0].parking.state, "PARKING_FAILED");
+  assert.match(after.listAll()[0].why, /interrupted/);
+});
+
+test("duration expiry during parking cancels travel without claiming docking or logging the member out", async t => {
+  const log = [];
+  let expire, cancel;
+  const trip = new Promise((resolve, reject) => { cancel = () => reject(new Error("Parking duration expired")); });
+  const host = parkingHost(log, { park: () => trip, cancel: () => cancel() }, {
+    setDeadlineTimeout(callback) { expire = callback; return { unref() {} }; }, clearDeadlineTimeout() {},
+  });
+  t.after(() => host.stopAll());
+  const started = await host.start({ ...START, operationID: "A", operationRole: "MINER" });
+  await host.prepareOperationStop(started.bot.botID, ACCOUNT.accountID, "A");
+  const pending = host.parkOperationMember(started.bot.botID, ACCOUNT.accountID, "A", {});
+  expire();
+  assert.equal((await pending).ok, false);
+  assert.equal(host.claimedBy(START.characterID), started.bot.botID);
+  assert.equal(host.listAll()[0].parking.state, "PARKING_FAILED");
+  assert.ok(log.some(row => row[0] === "cancelParking"));
+  assert.equal(log.some(row => row[0] === "logout"), false);
+});
+
 test("start flies the character on its own session and lists it", async () => {
   const log = [];
   const host = makeHost({ log });
@@ -265,7 +363,7 @@ test("start flies the character on its own session and lists it", async () => {
   assert.equal(host.list(8).length, 0);
   // The flow was seeded with the minted token — no password ever crossed.
   const flowCall = log.find((row) => row[0] === "createAppFlow");
-  assert.deepEqual(flowCall.slice(2), [true, "bot-token"]);
+  assert.deepEqual(flowCall.slice(2), [true, "bot-token", false, null]);
 });
 
 test("the approved runtime deadline stops, logs out, and releases the character claim", async () => {
@@ -439,9 +537,9 @@ test("manual Stop and deadline expiry share one pending drone recovery", async (
   assert.equal(h.log.filter(([name]) => name === "logout").length, 1);
 });
 
-test("all four duration presets arm the same graceful expiry path", async (t) => {
+test("all configured duration presets arm the same graceful expiry path", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
-  for (const minutes of [60, 240, 720, 1440]) {
+  for (const minutes of require("./config").hostedRunPolicy.durationChoices) {
     const h = await timedFlightHarness("none");
     await h.host.start({ ...START, grant: { ...START.grant, maxRuntimeMinutes: minutes } });
     assert.equal(h.deadline.delayMs, minutes * 60_000);
@@ -728,6 +826,110 @@ test("the running roster is mirrored to disk and cleared when the bot ends", asy
   assert.equal(readRosterFile(rosterPath).length, 0);
 });
 
+test("stopping one operation's hosted pilots leaves unrelated hosted sessions and claims alive", async () => {
+  const log = [];
+  const loggedOut = [];
+  const factory = makeFakeStack(log);
+  const host = makeHost({ log, loadStack: async () => {
+    const stack = await factory();
+    return { ...stack, createAppFlow(store, options) {
+      const flow = stack.createAppFlow(store, options);
+      let selectedCharacterID = null;
+      return { ...flow,
+        async selectCharacter(characterID) {
+          selectedCharacterID = characterID;
+          await flow.selectCharacter(characterID);
+        },
+        async logout() {
+          loggedOut.push(selectedCharacterID);
+          await flow.logout();
+        },
+      };
+    } };
+  } });
+  const started = [];
+  for (let index = 0; index < 6; index++) {
+    const characterID = 140000100 + index;
+    const result = await host.start({ ...START, characterID,
+      operationID: index < 3 ? "operation-a" : index === 5 ? "operation-b" : null,
+      operationRole: index < 3 ? "MINER" : null,
+    });
+    assert.equal(result.ok, true);
+    started.push(result.bot);
+  }
+  for (const bot of started.slice(0, 3)) {
+    assert.equal((await host.stop(bot.botID, bot.accountID)).ok, true);
+  }
+  assert.deepEqual(loggedOut.sort(), started.slice(0, 3).map((bot) => bot.characterID).sort());
+  for (const bot of started.slice(3)) {
+    assert.equal(host.claimedBy(bot.characterID), bot.botID);
+    assert.equal(host.listAll().find((row) => row.botID === bot.botID).endedAt, null);
+  }
+  await host.stopAll();
+});
+
+test("a Mining Operation association follows the exact hosted claim and persists without runtime target state", async () => {
+  const rosterPath = tempRosterPath();
+  const log = [];
+  const host = makeHost({ persistPath: rosterPath, log });
+  const started = await host.start({ ...START, operationID: "op-1", operationRole: "MINER" });
+  assert.equal(started.ok, true);
+  assert.equal(log.find((row) => row[0] === "createAppFlow")[4], true);
+  assert.equal(log.find((row) => row[0] === "createAppFlow")[5], "op-1");
+  assert.ok(log.findIndex((row) => row[0] === "requireAutomationReady") < log.findIndex((row) => row[0] === "startCustomBot"));
+  assert.equal(started.bot.operationID, "op-1");
+  assert.equal(started.bot.operationRole, "MINER");
+  assert.deepEqual(host.operationForClaim(START.characterID, "private-claim-capability"), {
+    operationID: "op-1",
+    operationRole: "MINER",
+  });
+  assert.equal(host.operationForClaim(START.characterID, "wrong-capability"), null);
+  const row = readRosterFile(rosterPath)[0];
+  assert.equal(row.operationID, "op-1");
+  assert.equal(row.operationRole, "MINER");
+  assert.equal("currentTarget" in row, false);
+  await host.stopAll();
+});
+
+test("an operation pilot cannot start when login drone recovery is blocked", async () => {
+  const log = [];
+  const stack = makeFakeStack(log);
+  const host = makeHost({ log, loadStack: async () => {
+    const base = await stack();
+    return { ...base, createAppFlow(store, options) {
+      const flow = base.createAppFlow(store, options);
+      return { ...flow, requireAutomationReady() { throw new Error("Lost-drone recovery unconfirmed."); } };
+    } };
+  } });
+  const outcome = await host.start({ ...START, operationID: "op-blocked", operationRole: "MINER" });
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.stage, "DRONE_RECOVERY");
+  assert.match(outcome.message, /Lost-drone recovery unconfirmed/);
+  assert.equal(host.claimedBy(START.characterID), null);
+  assert.equal(log.some(([kind]) => kind === "startCustomBot"), false);
+});
+
+test("operation pilot acquisition failure retains its stage and gateway cause code", async () => {
+  const log = [];
+  const stack = makeFakeStack(log);
+  const host = makeHost({ log, loadStack: async () => {
+    const base = await stack();
+    return { ...base, createAppFlow(store, options) {
+      const flow = base.createAppFlow(store, options);
+      return { ...flow, async selectCharacter() {
+        throw Object.assign(new Error("Pilot unavailable"), { code: "SESSION_UNAVAILABLE" });
+      } };
+    } };
+  } });
+  const outcome = await host.start({ ...START, operationID: "op-failed", operationRole: "MINER" });
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.code, "BOT_START_FAILED");
+  assert.equal(outcome.stage, "SELECT_CHARACTER");
+  assert.equal(outcome.causeCode, "SESSION_UNAVAILABLE");
+  assert.match(outcome.message, /SELECT_CHARACTER \(SESSION_UNAVAILABLE\): Pilot unavailable/);
+  assert.equal(host.claimedBy(START.characterID), null);
+});
+
 test("resume restarts a persisted bot on a fresh host (the restart path)", async () => {
   const rosterPath = tempRosterPath();
   const before = makeHost({ persistPath: rosterPath });
@@ -777,6 +979,25 @@ test("resume looks up the script by ID alone — authorship is not account-scope
   assert.equal(stoppedByAuthor.ok, false);
   assert.equal(stoppedByAuthor.code, "BOT_NOT_FOUND");
   assert.notEqual(after.claimedBy(140000001), null);
+});
+
+test("resume supplies the operation roster row to MCC profile resolution", async () => {
+  const rosterPath = tempRosterPath();
+  const before = makeHost({ persistPath: rosterPath });
+  const scriptID = "mcc.belt.hauler-service.hauler";
+  assert.equal((await before.start({ ...START, scriptID, scriptName: "Belt Hauler",
+    operationID: "operation-belt", operationRole: "HAULER" })).ok, true);
+  let received = null;
+  const after = makeHost({ persistPath: rosterPath, loadAccount: async () => ({ ...ACCOUNT }),
+    loadScript: (id, row) => {
+      received = { id, row };
+      return { scriptID, name: "Belt Hauler", rev: 1, doc: { valid: true } };
+    } });
+  await after.resume();
+  assert.equal(received.id, scriptID);
+  assert.equal(received.row.operationID, "operation-belt");
+  assert.equal(received.row.characterID, START.characterID);
+  assert.equal(after.list(7)[0].status, "running");
 });
 
 test("resume refuses a script whose saved revision changed after launch", async () => {
@@ -1472,4 +1693,114 @@ test("preflight refusal never invokes the browser-release hook", async () => {
   assert.equal(result.ok, false);
   assert.equal(released, false);
   assert.equal(host.claimedBy(START.characterID), null);
+});
+
+test("operation extension adds to expiry, renews same runner credential, and cancels stale expiry callback", async () => {
+  const log = [], timers = []; let clock = 1_000;
+  const host = makeHost({ log, now: () => clock,
+    webAuth: { createBotSessionToken: () => "original", extendBotSessionToken: (token, deadline) => { assert.equal(token, "original"); return `renewed:${deadline}`; } },
+    setDeadlineTimeout(callback, delayMs) { const timer = { callback, delayMs, unref() {} }; timers.push(timer); return timer; }, clearDeadlineTimeout() {},
+  });
+  const started = await host.start({ ...START, operationID: "A", operationRole: "MINER", operationControllerAccountID: 99 });
+  const oldExpiry = Date.parse(started.bot.expiresAt), oldToken = host.claimedBy(START.characterID);
+  clock += 11 * 60 * 60_000;
+  const extended = await host.extendOperationGrant(started.bot.botID, "A", 99, 240);
+  assert.equal(extended.ok, true); assert.equal(Date.parse(extended.bot.expiresAt), oldExpiry + 240 * 60_000);
+  assert.equal(extended.bot.maxRuntimeMinutes, 960); assert.equal(timers[1].delayMs, 5 * 60 * 60_000);
+  await timers[0].callback();
+  assert.equal(host.list(ACCOUNT.accountID)[0].status, "running"); assert.equal(host.claimedBy(START.characterID), oldToken);
+  assert.equal(log.filter(row => row[0] === "startCustomBot").length, 1);
+  assert.equal(log.filter(row => row[0] === "selectCharacter").length, 1);
+  assert.equal(log.filter(row => row[0] === "logout").length, 0);
+  await host.stopAll();
+});
+
+test("extension refuses other operations/accounts, oversized grants and elapsed deadlines", async () => {
+  let clock = 1000;
+  const host = makeHost({ now: () => clock });
+  const started = await host.start({ ...START, operationID: "A", operationControllerAccountID: 99 });
+  for (const [operation, accountID, minutes, code] of [["B", 99, 60, "OPERATION_GRANT_FORBIDDEN"], ["A", 7, 60, "OPERATION_GRANT_FORBIDDEN"],
+    ["A", 99, require("./config").hostedRunPolicy.maxRuntimeMinutes, "BOT_GRANT_INVALID"], ["A", 99, 1, "BOT_GRANT_INVALID"]]) {
+    assert.equal((await host.extendOperationGrant(started.bot.botID, operation, accountID, minutes)).code, code);
+  }
+  clock = Date.parse(started.bot.expiresAt);
+  assert.equal((await host.extendOperationGrant(started.bot.botID, "A", 99, 60)).code, "BOT_GRANT_NOT_ACTIVE");
+  await host.stopAll();
+});
+
+test("manual or natural-expiry cleanup already in progress cannot be resurrected", async () => {
+  for (const expiry of [false, true]) {
+    let release, expire;
+    const gate = new Promise(resolve => { release = resolve; });
+    const factory = makeFakeStack([]);
+    const host = makeHost({ loadStack: async () => {
+      const stack = await factory(); return { ...stack, createAppFlow(store, options) {
+        return { ...stack.createAppFlow(store, options), gracefulStopCustomBot: () => gate };
+      } };
+    }, setDeadlineTimeout(callback) { expire = callback; return { unref() {} }; }, clearDeadlineTimeout() {} });
+    const started = await host.start({ ...START, operationID: "A", operationControllerAccountID: 99 });
+    const stopping = expiry ? expire() : host.stop(started.bot.botID, ACCOUNT.accountID);
+    assert.equal((await host.extendOperationGrant(started.bot.botID, "A", 99, 60)).code, "BOT_GRANT_NOT_ACTIVE");
+    release(); await stopping; await host.stopAll();
+  }
+});
+
+test("24h +24h +24h retains run/claim and performs no restart; old callbacks lose authority", async t => {
+  const log = [], timers = []; let clock = 1000;
+  const host = makeHost({ log, now: () => clock,
+    webAuth: { createBotSessionToken: () => "initial", extendBotSessionToken: (_token, deadline) => `renewed:${deadline}` },
+    setDeadlineTimeout(callback, delayMs) { const timer = { callback, delayMs, unref() {} }; timers.push(timer); return timer; }, clearDeadlineTimeout() {},
+  });
+  t.after(() => host.stopAll());
+  const started = await host.start({ ...START, operationID: "A", operationRole: "MINER", operationControllerAccountID: 99,
+    grant: { ...START.grant, maxRuntimeMinutes: 24 * 60 } });
+  const origin = Date.parse(started.bot.expiresAt);
+  for (const hours of [48, 72]) {
+    clock += 60_000;
+    const extended = await host.extendOperationGrant(started.bot.botID, "A", 99, 24 * 60);
+    assert.equal(extended.ok, true);
+    assert.equal(extended.bot.botID, started.bot.botID);
+    assert.equal(extended.bot.operationID, "A");
+    assert.equal(extended.bot.maxRuntimeMinutes, hours * 60);
+    assert.equal(Date.parse(extended.bot.expiresAt), origin + (hours - 24) * 3_600_000);
+    assert.equal(timers.at(-1).delayMs, Date.parse(extended.bot.expiresAt) - clock);
+    await timers.at(-2).callback();
+    assert.equal(host.listAll()[0].status, "running");
+    assert.equal(host.claimedBy(START.characterID), started.bot.botID);
+  }
+  for (const name of ["startCustomBot", "selectCharacter"]) assert.equal(log.filter(row => row[0] === name).length, 1);
+  assert.equal(log.filter(row => row[0] === "logout").length, 0);
+});
+
+test("long recovered run retains absolute expiry and total grant, and rejects oversized roster expiry", async t => {
+  let clock = 1000; const rosterPath = tempRosterPath();
+  const before = makeHost({ now: () => clock, persistPath: rosterPath });
+  const started = await before.start({ ...START, operationID: "A", operationControllerAccountID: 99,
+    grant: { ...START.grant, maxRuntimeMinutes: 7 * 24 * 60 } });
+  assert.equal(started.ok, true);
+  t.after(() => before.stopAll());
+  clock += 2 * 24 * 3_600_000;
+  let delay;
+  const opts = { now: () => clock, persistPath: rosterPath, loadAccount: async () => ACCOUNT,
+    loadScript: () => ({ scriptID: "s1", name: "Miner", rev: 1, doc: { valid: true } }),
+    setDeadlineTimeout(_fn, ms) { delay = ms; return { unref() {} }; }, clearDeadlineTimeout() {},
+  };
+  const after = makeHost(opts); t.after(() => after.stopAll()); await after.resume();
+  const resumed = after.listAll()[0];
+  assert.equal(resumed.status, "running"); assert.equal(resumed.expiresAt, started.bot.expiresAt);
+  assert.equal(resumed.maxRuntimeMinutes, 7 * 24 * 60); assert.equal(delay, 5 * 24 * 3_600_000);
+  assert.equal(readRosterFile(rosterPath)[0].operationControllerAccountID, 99);
+  const bad = readRosterFile(rosterPath)[0]; bad.expiresAt = new Date(clock + 30 * 24 * 3_600_000).toISOString();
+  fs.writeFileSync(rosterPath, JSON.stringify({ version: 2, bots: [bad] }));
+  const refused = makeHost(opts); t.after(() => refused.stopAll()); await refused.resume();
+  assert.notEqual(refused.listAll()[0].status, "running");
+  assert.match(refused.listAll()[0].why, /expiry exceeds/);
+});
+
+test("long run cannot be extended after operation Parking intent", async t => {
+  const host = parkingHost([]); t.after(() => host.stopAll());
+  const started = await host.start({ ...START, operationID: "A", operationControllerAccountID: 99,
+    grant: { ...START.grant, maxRuntimeMinutes: 48 * 60 } });
+  await host.prepareOperationStop(started.bot.botID, ACCOUNT.accountID, "A");
+  assert.equal((await host.extendOperationGrant(started.bot.botID, "A", 99, 24 * 60)).code, "BOT_GRANT_NOT_ACTIVE");
 });

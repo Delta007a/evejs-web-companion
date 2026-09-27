@@ -138,10 +138,22 @@ function createSessionToken(account) {
 // Internal-only: the host supplies its validated run deadline, never an HTTP field.
 function createBotSessionToken(account, deadlineMs) {
   const now = Date.now();
-  if (!Number.isFinite(deadlineMs) || deadlineMs <= now || deadlineMs > now + 24 * 60 * 60 * 1000) {
+  if (!Number.isFinite(deadlineMs) || deadlineMs <= now || deadlineMs > now + config.hostedRunPolicy.maxRuntimeMinutes * 60_000) {
     throw new Error("Invalid server bot authentication deadline.");
   }
   return signSessionToken(account, deadlineMs + 5 * 60 * 1000);
+}
+
+// Internal host-only renewal: preserve the held bridge-session identity.
+// No HTTP refresh door, login, new session, or expired-token resurrection.
+function extendBotSessionToken(token, deadlineMs) {
+  const payload = verifySessionToken(token);
+  if (!payload || !Number.isFinite(deadlineMs) || deadlineMs <= Date.now() ||
+      deadlineMs > Date.now() + config.hostedRunPolicy.maxRuntimeMinutes * 60_000 || deadlineMs + 5 * 60 * 1000 <= payload.exp) {
+    throw new Error("The hosted credential cannot be extended to that deadline.");
+  }
+  const encoded = base64UrlJson({ ...payload, exp: deadlineMs + 5 * 60 * 1000 });
+  return `${encoded}.${signPayload(encoded)}`;
 }
 
 function signSessionToken(account, expiresAt) {
@@ -203,6 +215,7 @@ module.exports = {
   countConfiguredUsers,
   createSessionToken,
   createBotSessionToken,
+  extendBotSessionToken,
   verifySessionToken,
   verifyWebPassword,
   upsertWebPassword,

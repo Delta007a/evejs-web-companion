@@ -47,6 +47,8 @@ export type BotLogKind =
   | "issue"
   /** How that call came back: ok, or the server's refusal. */
   | "result"
+  /** A failed observation; names the failed read and raw authority error. */
+  | "read"
   /** The run ended, and why. */
   | "end";
 
@@ -74,6 +76,8 @@ export interface BotLogEntry {
   /** result lines: whether the call landed, and the server's words when not. */
   readonly ok?: boolean;
   readonly refusal?: string;
+  /** First non-native error stack frame for a read failure; local diagnostic only. */
+  readonly source?: string;
   /** start/end lines: the script and how it finished. */
   readonly script?: string;
   readonly reason?: string | null;
@@ -196,6 +200,18 @@ export function describeAction(action: ScriptAction): string {
       return `repair ${action.itemIDs.join(",")}`;
     case "rememberBeltDry":
       return `note ${action.beltName} in ${action.systemName} dry${action.groupID === null ? "" : ` of group ${action.groupID}`}`;
+    case "reserveMiningTarget":
+      return `reserve operation target ${action.targetName} in ${action.systemName}`;
+    case "bookmarkMiningSite":
+      return `confirm temporary logistics return point for ${action.targetKey}`;
+    case "activateMiningTarget":
+      return `activate operation target ${action.targetKey}`;
+    case "depleteMiningTarget":
+      return `mark operation target ${action.targetKey} depleted`;
+    case "miningMemberReady":
+      return "mark mining-operation member ready";
+    case "miningDrainComplete":
+      return `finish mining-operation logistics tail at ${action.targetKey}`;
     case "callPrimary":
       return action.targetID === null ? "clear the fleet's called primary" : `call ${action.targetID} as the fleet's primary`;
     case "moveItems":

@@ -160,7 +160,12 @@ async function signInAndSelect(baseUrl, characterID) {
     body: { username: FARMER.username, password: "x" },
   });
   const token = login.payload.sessionToken;
-  await request(baseUrl, "/api/bridge/select", { method: "POST", token, body: { characterID } });
+  const selected = await request(baseUrl, "/api/bridge/select", { method: "POST", token, body: { characterID } });
+  await request(baseUrl, "/api/bridge/drone-recovery/ready", {
+    method: "POST",
+    token,
+    body: { checkID: selected.payload.droneRecoveryCheckID },
+  });
   return token;
 }
 
@@ -245,6 +250,31 @@ test("a public bot ID cannot bypass the claimed-character select guard", async (
     body: { characterID: 7001 },
   });
   assert.equal(authorized.response.status, 200);
+});
+
+test("an operation bot select stays behind the lost-drone gate until recovery acknowledges", async () => {
+  const log = [];
+  const host = {
+    ...fakeBotHost(log),
+    claimedBy: (characterID) => Number(characterID) === 7001 ? "operation-bot" : null,
+    authorizesClaim: (characterID, secret) => Number(characterID) === 7001 && secret === "private-operation-capability",
+    operationForClaim: (characterID, secret) => Number(characterID) === 7001 && secret === "private-operation-capability"
+      ? { operationID: "op-1", operationRole: "MINER" } : null,
+  };
+  const { baseUrl, app } = await startTestServer(log, host);
+  const signed = await request(baseUrl, "/api/login", { method: "POST", body: { username: FARMER.username, password: "x" } });
+  const token = signed.payload.sessionToken;
+  const selected = await request(baseUrl, "/api/bridge/select", {
+    method: "POST", token, headers: { "x-evejs-bot-claim": "private-operation-capability" }, body: { characterID: 7001 },
+  });
+  assert.equal(selected.response.status, 200);
+  const sessionID = webAuth.verifySessionToken(token).sessionID;
+  assert.equal(app.locals.bridgeSessions.get(sessionID).droneRecoveryReady, false);
+  const ready = await request(baseUrl, "/api/bridge/drone-recovery/ready", {
+    method: "POST", token, body: { checkID: selected.payload.droneRecoveryCheckID },
+  });
+  assert.equal(ready.response.status, 200);
+  assert.equal(app.locals.bridgeSessions.get(sessionID).droneRecoveryReady, true);
 });
 
 // ── kind: "companion" — the SAME route, branched by the body ────────────────
@@ -475,21 +505,22 @@ for (const route of ["/api/bots", "/api/logout"]) {
 }
 
 
-test("real host hands off through private-claim loopback with a 24-hour credential", async (t) => {
+for (const hours of [24, 168]) {
+test(`real host hands off through private-claim loopback with a ${hours}-hour credential`, async (t) => {
   const log = [];
   const { app, baseUrl } = await startTestServer(log, null, { loopback: true });
   t.after(() => app.locals.botHost.stopAll());
   const token = await signInAndSelect(baseUrl, 7001);
   const browser = webAuth.verifySessionToken(token);
   const result = await request(baseUrl, "/api/bots/start", {
-    method: "POST", token, body: { characterID: 7001, scriptID: "s1", grant: { ...GRANT, maxRuntimeMinutes: 1440 } },
+    method: "POST", token, body: { characterID: 7001, scriptID: "s1", grant: { ...GRANT, maxRuntimeMinutes: hours * 60 } },
   });
   assert.equal(result.response.status, 200);
   const botToken = log.find(([name]) => name === "bot-select")[2];
   const bot = webAuth.verifySessionToken(botToken);
   assert.notEqual(bot.sessionID, browser.sessionID);
   assert.equal(bot.exp, Date.parse(result.payload.bot.expiresAt) + 5 * 60 * 1000);
-  assert.ok(bot.exp - bot.iat > 24 * 60 * 60 * 1000);
+  assert.ok(bot.exp - bot.iat > hours * 60 * 60 * 1000);
   assert.equal(app.locals.bridgeSessions.has(browser.sessionID), false);
   assert.equal(app.locals.bridgeSessions.get(bot.sessionID).characterID, 7001);
   // The browser's post-success UI sync cannot log the bot out.
@@ -497,6 +528,7 @@ test("real host hands off through private-claim loopback with a 24-hour credenti
   assert.equal(app.locals.bridgeSessions.has(bot.sessionID), true);
   assert.ok(app.locals.botHost.claimedBy(7001));
 });
+}
 
 test("ambiguous gateway release failure preserves caller and never selects a bot", async (t) => {
   const log = [];

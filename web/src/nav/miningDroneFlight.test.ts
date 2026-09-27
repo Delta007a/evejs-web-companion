@@ -26,9 +26,35 @@ test("normal flight launches the mining stack then mines the selected asteroid",
   const out = [11, 12, 13, 14, 15].map(id => drone(id));
   assert.deepEqual(tick(state(out)).action, { kind: "mineDrones", droneIDs: out.map(d => d.itemID), targetID: 90 });
 });
+
+test("Ice's null mining target retains defensive combat flight without ever launching ore drones", () => {
+  const tick = driver();
+  assert.equal(tick(state(), null, null).action, null);
+  assert.deepEqual(tick(state(), 80, null).action, { kind: "launch", drones: [{ itemID: 2, quantity: 5 }] });
+  const combat = [drone(21, 100, 80, "fighting")];
+  tick(state(combat), null, null);
+  tick(state(combat), null, null);
+  assert.equal(tick(state(combat), null, null).action?.kind, "recallDrones");
+  for (let i = 0; i < 5; i++) assert.equal(tick(state(), null, null).action, null);
+});
 test("a correctly mining flight causes neither launch nor order spam", () => {
   const tick = driver();
   for (let i = 0; i < 12; i++) assert.equal(tick(state([drone(11, 101, 90, "mining")], 1)).action, null);
+});
+
+test("drone diagnostics distinguish unreadable control/limits/bay, no target, quantities and bounded launch exhaustion", () => {
+  const decide = (s: MiningDroneState | null, rock: number | null = 90) =>
+    decideMiningDroneFlight(s, freshDroneMemory(), null, rock, false);
+  assert.match(decide(null).diagnostic, /drone control state unavailable/);
+  assert.match(decide(state(), null).diagnostic, /no current eligible target/);
+  assert.match(decide(state([], null)).diagnostic, /active-drone limit unreadable/);
+  assert.match(decide({ ...state(), bay: null }).diagnostic, /drone bay unavailable/);
+  assert.match(decide({ ...state(), bay: [{ itemID: 1, typeID: 101, quantity: 0 }] }).diagnostic, /valid quantities/);
+  const tick = driver();
+  const attempts = Array.from({ length: 25 }, () => tick(state()));
+  assert.equal(attempts.filter(r => r.action?.kind === "launch").length, 3);
+  assert.match(attempts.at(-1)!.diagnostic, /exhausted bounded launch attempts/);
+  assert.doesNotMatch(attempts.at(-1)!.diagnostic, /controlled flight confirmed/);
 });
 test("one active miner plus three in bay tops up only three", () => {
   const s = state([drone(11)]);

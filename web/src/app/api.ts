@@ -50,6 +50,7 @@ import type {
   ScannerOperationsSnapshot,
   ScannerProbeOperation,
 } from "../scanner/scannerCenter.ts";
+import type { MiningOperationAssignment, MiningOperationTarget, MiningTargetType } from "../nav/scriptConditions.ts";
 
 export interface LoginResult {
   readonly accountID: number;
@@ -1856,6 +1857,259 @@ export async function rememberBeltDry(
   await postJson("/api/bots/belt-memory", { system, beltName, groupID }, options);
 }
 
+/** Read this exact hosted bot's stored Mining Operation assignment. No space read. */
+export async function readMiningOperationAssignment(
+  options: ApiOptions = {},
+): Promise<MiningOperationAssignment | null> {
+  const data = await getJson("/api/mining-operations/assignment/current", options);
+  const value = data.assignment;
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as unknown as MiningOperationAssignment)
+    : null;
+}
+
+export interface MiningTargetCandidate {
+  readonly candidates?: readonly MiningTargetCandidate[];
+  readonly siteIdentity?: string;
+  readonly siteID?: number;
+  readonly instanceID?: number | null;
+  readonly position?: import("../store/types.ts").SpaceVector;
+  readonly targetType: MiningTargetType;
+  readonly systemID: number;
+  readonly systemName: string;
+  readonly targetName: string;
+}
+
+export async function reserveMiningOperationTarget(
+  candidate: MiningTargetCandidate,
+  options: ApiOptions = {},
+): Promise<boolean> {
+  const data = await postJson(
+    "/api/mining-operations/target/reserve",
+    candidate as unknown as JsonValue,
+    options,
+  );
+  return data.acquired === true;
+}
+
+export async function activateMiningOperationTarget(targetKey: string, options: ApiOptions = {}): Promise<void> {
+  await postJson("/api/mining-operations/target/activate", { targetKey }, options);
+}
+
+export async function depleteMiningOperationTarget(
+  targetKey: string,
+  evidence: Readonly<Record<string, JsonValue>> = {},
+  options: ApiOptions = {},
+): Promise<void> {
+  await postJson("/api/mining-operations/target/depleted", { targetKey, evidence }, options);
+}
+
+export async function markMiningOperationMemberReady(options: ApiOptions = {}): Promise<void> {
+  await postJson("/api/mining-operations/member/ready", {}, options);
+}
+
+export async function finishMiningOperationDrain(targetKey: string, options: ApiOptions = {}): Promise<void> {
+  await postJson("/api/mining-operations/member/drain-complete", { targetKey }, options);
+}
+
+export interface MiningOperationMemberDefinition {
+  readonly characterID: number;
+  readonly characterName: string;
+  readonly accountName: string;
+  readonly role: "MINER" | "HAULER" | "DEFENDER";
+  readonly routineMode?: "STANDARD" | "CUSTOM";
+  readonly automationID: string;
+}
+
+export interface MiningOperationDefinition {
+  readonly policies?: {
+    readonly version: 1;
+    readonly parking: {
+      readonly mode: "STAY_IN_PLACE" | "RETURN_HOME_DOCK" | "RETURN_HOME_UNLOAD_DOCK";
+      readonly destination: { readonly stationID: number; readonly stationName: string; readonly systemName: string } | null;
+      readonly corporationDivision: number | null;
+    };
+    readonly travelAssist?: { readonly mode: "DISABLED" | "AUTO" };
+    readonly resourceTarget?: { readonly mode: "ANY_ELIGIBLE" };
+    readonly resourcePolicy?: import("../nav/resourcePriority.ts").ResourcePolicy;
+    readonly scouting?: { readonly mode: "DISABLED" };
+    readonly defense?: { readonly mode: "EXISTING_SELF_DEFENSE" };
+  };
+  readonly operationID?: string;
+  readonly name: string;
+  readonly area: {
+    readonly anchorSystemID: number;
+    readonly anchorSystemName: string | null;
+    readonly reach: "CURRENT_SYSTEM" | "CURRENT_AND_ADJACENT";
+    readonly targetClasses: readonly MiningTargetType[];
+  };
+  readonly targetPolicy: "ANY_ELIGIBLE";
+  readonly unloadPolicy: "HAULER_SERVICE" | "SELF_UNLOAD";
+  readonly unloadDestination?: {
+    readonly stationID: number;
+    readonly stationName: string;
+    readonly systemName?: string;
+    readonly corporationDivision: number;
+  } | null;
+  readonly members: readonly MiningOperationMemberDefinition[];
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
+}
+
+export interface MiningOperationRuntime {
+  readonly operationID: string;
+  readonly state: string;
+  readonly statusReason?: string | null;
+  readonly observedAt?: string;
+  readonly recoveryRequired?: boolean;
+  readonly currentTarget: MiningOperationTarget | null;
+  readonly members: readonly (MiningOperationMemberDefinition & {
+    readonly runtimeState: string;
+    readonly phase: string | null;
+    readonly reason: string | null;
+    readonly failureCode?: string | null;
+    readonly parkingState?: string | null;
+    readonly botID: string | null;
+    readonly expiresAt?: string | null;
+    readonly maxRuntimeMinutes?: number | null;
+    readonly hosted?: boolean;
+    readonly hostStartedAt?: string | null;
+    readonly hostResumedAt?: string | null;
+    readonly lastHostReason?: string | null;
+  })[];
+  readonly logisticsTail: readonly {
+    readonly target: MiningOperationTarget;
+    readonly pendingHaulers: readonly number[];
+  }[];
+  readonly rendezvous: {
+    readonly kind: "MINER_CLEARANCE" | "SELF_UNLOAD";
+    readonly target: MiningOperationTarget;
+    readonly required: readonly number[];
+    readonly ready: readonly number[];
+  } | null;
+  readonly history: readonly {
+    readonly kind: string;
+    readonly at: string;
+    readonly target: MiningOperationTarget | null;
+    readonly evidence: unknown;
+  }[];
+  readonly startedAt: string | null;
+  readonly stoppedAt: string | null;
+  readonly stopFailures: readonly { readonly characterID: number; readonly message: string }[];
+}
+
+export interface MiningOperationsPayload {
+  readonly results?: readonly { readonly characterID: number; readonly ok: boolean; readonly error?: string; readonly message?: string }[];
+  readonly operations: readonly {
+    readonly definition: MiningOperationDefinition & { readonly operationID: string };
+    readonly runtime: MiningOperationRuntime;
+  }[];
+  readonly targetBoard: readonly MiningOperationTarget[];
+  readonly capabilities: {
+    readonly hostedRunPolicy?: import("../bots/hostedRunPolicy.ts").HostedRunPolicy;
+    readonly targetClasses: Readonly<Record<MiningTargetType, { readonly executable: boolean; readonly note: string }>>;
+    readonly reach: Readonly<Record<string, { readonly executable: boolean; readonly note?: string }>>;
+    readonly defender: { readonly executable: boolean; readonly note: string };
+    readonly operationOwnedContainers: { readonly executable: boolean; readonly note: string };
+  };
+}
+
+function miningOperationsPayload(data: Record<string, JsonValue>): MiningOperationsPayload {
+  return {
+    ...(Array.isArray(data.results) ? { results: data.results as unknown as NonNullable<MiningOperationsPayload["results"]> } : {}),
+    operations: (Array.isArray(data.operations) ? data.operations : []) as unknown as MiningOperationsPayload["operations"],
+    targetBoard: (Array.isArray(data.targetBoard) ? data.targetBoard : []) as unknown as MiningOperationsPayload["targetBoard"],
+    capabilities: (data.capabilities && typeof data.capabilities === "object" && !Array.isArray(data.capabilities)
+      ? data.capabilities
+      : { targetClasses: {}, reach: {}, defender: {}, operationOwnedContainers: {} }) as unknown as MiningOperationsPayload["capabilities"],
+  };
+}
+
+/** Command Center read: definitions, botHost projection and target board only. */
+export async function loadMiningOperations(options: ApiOptions = {}): Promise<MiningOperationsPayload> {
+  return miningOperationsPayload(await getJson("/api/mining-operations", options));
+}
+
+export interface MiningResourceChoice { readonly typeID: number; readonly name: string; readonly family: "ore" | "ice"; }
+export async function listMiningResources(options: ApiOptions = {}): Promise<readonly MiningResourceChoice[]> {
+  const data = await getJson("/api/mining-operations/resources", options);
+  return (data.resources ?? []) as unknown as readonly MiningResourceChoice[];
+}
+
+export async function extendMiningOperation(operationID: string, minutes: number, options: ApiOptions = {}): Promise<{ payload: MiningOperationsPayload; extension: { ok: boolean; message?: string; results?: { characterID: number; ok: boolean; error?: string; message?: string }[] } }> {
+  const data = await postJson(`/api/mining-operations/${encodeURIComponent(operationID)}/extend`, { minutes }, options);
+  return { payload: miningOperationsPayload(data), extension: data.extension as unknown as { ok: boolean; message?: string; results?: { characterID: number; ok: boolean; error?: string; message?: string }[] } };
+}
+
+export interface OperationRoutineSummary {
+  readonly scriptID: string;
+  readonly name: string;
+  readonly rev: number;
+  readonly roles: Readonly<Record<"MINER" | "HAULER" | "DEFENDER", { readonly compatible: boolean; readonly reason: string | null }>>;
+}
+
+export async function listOperationRoutines(
+  classes: readonly MiningTargetType[],
+  unloadPolicy: "HAULER_SERVICE" | "SELF_UNLOAD",
+  options: ApiOptions = {},
+): Promise<OperationRoutineSummary[]> {
+  const params = new URLSearchParams({ classes: classes.join(","), unloadPolicy });
+  const data = await getJson(`/api/mining-operations/routines?${params}`, options);
+  return (Array.isArray(data.routines) ? data.routines : []) as unknown as OperationRoutineSummary[];
+}
+
+export interface OperationLaunchPlanMember {
+  readonly characterID: number;
+  readonly routineMode: "STANDARD" | "CUSTOM";
+  readonly script: { readonly scriptID: string; readonly name: string; readonly rev: number; readonly doc: JsonValue };
+}
+
+export async function getMiningOperationLaunchPlan(operationID: string, options: ApiOptions = {}): Promise<{ readonly planHash: string; readonly warnings: readonly string[]; readonly members: readonly OperationLaunchPlanMember[] }> {
+  const data = await getJson(`/api/mining-operations/${encodeURIComponent(operationID)}/launch-plan`, options);
+  return { planHash: typeof data.planHash === "string" ? data.planHash : "",
+    warnings: (Array.isArray(data.warnings) ? data.warnings : []).filter((row): row is string => typeof row === "string"),
+    members: (Array.isArray(data.members) ? data.members : []) as unknown as OperationLaunchPlanMember[] };
+}
+
+export interface OperationPilotChoice {
+  readonly accountName: string;
+  readonly characterID: number;
+  readonly characterName: string;
+}
+
+export async function listOperationAccountPilots(accountName: string, options: ApiOptions = {}): Promise<OperationPilotChoice[]> {
+  const data = await getJson(`/api/mining-operations/accounts/${encodeURIComponent(accountName)}/pilots`, options);
+  return (Array.isArray(data.pilots) ? data.pilots : []) as unknown as OperationPilotChoice[];
+}
+
+export async function saveMiningOperation(
+  definition: MiningOperationDefinition,
+  options: ApiOptions = {},
+): Promise<MiningOperationsPayload> {
+  return miningOperationsPayload(await postJson("/api/mining-operations", definition as unknown as JsonValue, options));
+}
+
+export async function deleteMiningOperation(operationID: string, options: ApiOptions = {}): Promise<MiningOperationsPayload> {
+  return miningOperationsPayload(await postJson(`/api/mining-operations/${encodeURIComponent(operationID)}/delete`, {}, options));
+}
+
+export async function startMiningOperation(
+  operationID: string,
+  grants: Readonly<Record<string, BotLaunchGrant>>,
+  planHash: string | null = null,
+  options: ApiOptions = {},
+): Promise<MiningOperationsPayload> {
+  return miningOperationsPayload(await postJson(
+    `/api/mining-operations/${encodeURIComponent(operationID)}/start`,
+    { grants: grants as unknown as JsonValue, planHash },
+    options,
+  ));
+}
+
+export async function stopMiningOperation(operationID: string, options: ApiOptions = {}): Promise<MiningOperationsPayload> {
+  return miningOperationsPayload(await postJson(`/api/mining-operations/${encodeURIComponent(operationID)}/stop`, {}, options));
+}
+
 /** Atomic acquisition/renewal at the BFF's shared loot-memory authority. */
 export async function claimContainer(
   runID: string, system: number, itemID: number, renewOnly: boolean,
@@ -2828,7 +3082,8 @@ function readModuleAction(itemID: number, data: Record<string, JsonValue>): Modu
  * Switch a module on (dogmaIM.Activate).
  *
  * `effect` is optional BY DESIGN: omit it and the server resolves the module's
- * own default activation effect. `repeat` is retail's cycle flag — -1 keeps
+ * own default activation effect. AB/MWD must explicitly name their propulsion
+ * effect to select the physical speed/mass handler. `repeat` is retail's cycle flag — -1 keeps
  * cycling (the default), 0 runs a single cycle. `targetID` is omitted for
  * modules that act on the ship itself.
  */
@@ -3338,6 +3593,9 @@ export interface ServerBot {
    * `scriptID` happens to be the literal "companion".
    */
   readonly kind: "companion" | "script";
+  /** Stable Mining Operation association; null for an ordinary hosted bot. */
+  readonly operationID?: string | null;
+  readonly operationRole?: "MINER" | "HAULER" | "DEFENDER" | null;
   /**
    * The companion badge's facts, or null.
    *
@@ -3378,6 +3636,11 @@ function asServerBot(value: JsonValue): ServerBot {
     // Anything that is not the companion literal is a script, matching the
     // host's own default for a roster row written before `kind` existed.
     kind: row.kind === "companion" ? "companion" : "script",
+    operationID: typeof row.operationID === "string" ? row.operationID : null,
+    operationRole:
+      row.operationRole === "MINER" || row.operationRole === "HAULER" || row.operationRole === "DEFENDER"
+        ? row.operationRole
+        : null,
     companion: asServerBotCompanion(row.companion),
   };
 }
@@ -3440,8 +3703,9 @@ function asLastAlert(value: JsonValue | undefined): { message: string; atMs: num
   return { message, atMs: asNumberOrNull(row.atMs) ?? 0 };
 }
 
-export async function listServerBots(options: ApiOptions = {}): Promise<ServerBot[]> {
+export async function listServerBots(options: ApiOptions = {}, onPolicy?: (policy: import("../bots/hostedRunPolicy.ts").HostedRunPolicy | null) => void): Promise<ServerBot[]> {
   const data = await getJson("/api/bots", options);
+  onPolicy?.((data.hostedRunPolicy ?? null) as unknown as import("../bots/hostedRunPolicy.ts").HostedRunPolicy | null);
   return Array.isArray(data.bots) ? data.bots.map(asServerBot) : [];
 }
 
@@ -4416,6 +4680,11 @@ export async function warpToBookmark(
   options: ApiOptions = {},
 ): Promise<FlightStepResult> {
   return readFlightStep(await postJson("/api/bridge/flight/warp-bookmark", { bookmarkID, minRange }, options));
+}
+
+/** A two-day personal coordinate bookmark of THIS ship, for a site logistics tail. */
+export async function bookmarkMiningSiteLocation(shipID: number, folderID: number, name: string, comment: string, options: ApiOptions = {}): Promise<void> {
+  await postJson("/api/bridge/flight/bookmark-location", { itemID: shipID, folderID, name, comment, expiryMode: 2, confirm: true }, options);
 }
 
 /** Warp to a scanned site by its scan-signature label ("QEE-288"). */

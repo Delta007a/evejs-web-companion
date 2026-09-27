@@ -4,7 +4,7 @@ const express = require("express");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
-const { randomUUID } = require("crypto");
+const { randomUUID, createHash } = require("crypto");
 // R17 mail: mailMgr.GetBody answers a zlib-DEFLATED buffer, and inflating it is
 // this file's job — see mailBodyText. The browser never sees a compressed byte.
 const zlib = require("zlib");
@@ -21,6 +21,20 @@ const { createBeltMemory } = require("./beltMemory");
 const { createSquadBoard } = require("./squadBoard");
 const { createLootMemory, CONTAINER_LEASE_MS } = require("./lootMemory");
 const { createBotLogStore } = require("./botLogStore");
+const { createMiningTargetBoard } = require("./miningTargetBoard");
+const { createMiningOperationStore } = require("./miningOperationStore");
+const { standardProfileFor, buildStandardProfile, familyCapabilities } = require("./miningOperationProfiles");
+const { miningResourceFamily } = require("./miningResourceFamily");
+const { validateResourcePolicy } = require("./miningResourcePolicy");
+const { extendMiningOperation } = require("./miningOperationGrant");
+const { normalizePolicies } = require("./miningOperationPolicies");
+const { createMiningOperationStopper } = require("./miningOperationStop");
+const {
+  createMiningOperations,
+  auditMiningScript,
+  operationRoutineCompatibility,
+  EXECUTABLE_TARGET_CLASSES,
+} = require("./miningOperations");
 const { reconnectCandidate, hasPendingRecovery } = require("./droneRecoveryGate");
 const {
   isBridgeWritePair,
@@ -104,7 +118,13 @@ const botHost =
     // botHost.resume() once listening, so a BFF restart brings them back.
     persistPath: path.join(config.dataDir, "server-bots.json"),
     loadAccount: (username) => store.getAccount(username),
-    loadScript: (scriptID) => botScripts.get(scriptID),
+    loadScript: (scriptID, row) => {
+      if (!scriptID.startsWith("mcc.")) return botScripts.get(scriptID);
+      const def = miningOperationStore.get(row?.operationID);
+      const member = def?.members.find((candidate) => candidate.characterID === Number(row?.characterID));
+      const profile = member && buildStandardProfile(def, member);
+      return profile?.scriptID === scriptID ? profile : null;
+    },
     isCharacterHeld,
     errorLogger,
   });
@@ -120,6 +140,15 @@ app.locals.botScripts = botScripts;
 // belts repopulate and entries expire on their own.
 const beltMemory = options.beltMemory || createBeltMemory();
 app.locals.beltMemory = beltMemory;
+const miningTargetBoard = options.miningTargetBoard || createMiningTargetBoard();
+const miningOperationStore = options.miningOperationStore || createMiningOperationStore({ dataDir: config.dataDir, resolveSystem: (id) => staticData.getSolarSystem(id), resolveStation: (id) => staticData.getStation(id) });
+const miningOperations = options.miningOperations || createMiningOperations({
+  store: miningOperationStore,
+  targetBoard: miningTargetBoard,
+  beltMemory,
+});
+app.locals.miningTargetBoard = miningTargetBoard;
+app.locals.miningOperations = miningOperations;
 // Shared, in-process (never persisted — see src/squadBoard.js) call board: one
 // standing primary per FLEET, so pilots on one grid concentrate their fire
 // instead of each shooting whatever it ranked first for itself. Keyed by the
@@ -939,10 +968,11 @@ app.post("/api/bridge/select", requireAuth, async (req, res, next) => {
     sessionReservation = Symbol("select-session");
     sessionOperations.set(req.webSessionID, sessionReservation);
     const outcome = await selectHeldCharacter(req.webSessionID, req.account, characterID);
-    // A server host is already the claimed automation owner, not a browser
-    // pilot being opened for recovery. Its select carries the private bot
-    // header, so only browser-owned sessions wait for the login check.
-    if (botHost.authorizesClaim(characterID, req.get(botHostModule.BOT_HEADER))) {
+    // Ordinary hosted bots retain their existing select semantics. Mining
+    // operation bots explicitly run the lost-drone recovery gate in botHost,
+    // including a matching /drone-recovery/ready acknowledgement.
+    const botSecret = req.get(botHostModule.BOT_HEADER);
+    if (botHost.authorizesClaim(characterID, botSecret) && !botHost.operationForClaim?.(characterID, botSecret)) {
       bridgeSessions.get(req.webSessionID).droneRecoveryReady = true;
     }
     res.json({
@@ -15289,8 +15319,16 @@ async function readHeldFlight(held, webSessionID) {
     // reads (agents, inventory bind) would still target the select-time station
     // until a full re-login. Adopt a real docked station here; leave the last
     // station in place while in space (agents/inventory are docked-only). The
-    // active ship is owned by the board flow, so it is not synced here.
+    // active ship is owned by the board flow, so a known ship is not synced
+    // here. If selection omits shipID but a later flight read identifies it,
+    // fill only that initial null. Otherwise script observation and holds both
+    // reject NO_ACTIVE_SHIP forever. A later board/leave transition must retain
+    // its own ship authority.
     const flight = outcome && outcome.flight ? outcome.flight : {};
+    if (!held.activeShipID && !held.transition && !held.transitionReservation &&
+        Number.isSafeInteger(Number(flight.shipID)) && Number(flight.shipID) > 0) {
+      held.activeShipID = Number(flight.shipID);
+    }
     if (flight.docked === true && Number(flight.stationID) > 0) {
       held.stationID = Number(flight.stationID);
     }
@@ -16745,6 +16783,9 @@ app.post("/api/bridge/targets/unlock", requireAuth, async (req, res, next) => {
 // module's own default activation effect from its typeID. A caller that DOES
 // know (slice B sends "miningLaser") may name one, and combat will name its
 // own — but that is the caller's argument, not this route's business.
+// Exception: AB/MWD must name the SDE propulsion effect explicitly. EveJS
+// dispatches to its physical propulsion handler before generic default-effect
+// resolution; an unnamed effect may cycle without a speed/mass refresh.
 //
 // `repeat` is the retail cycle flag: -1 keeps cycling until something stops it,
 // 0 runs a single cycle. Default -1, the retail default for a held module.
@@ -17724,6 +17765,7 @@ function withOreStaticFields(space) {
       return {
         ...row,
         oreGrade: typeof grade === "number" && Number.isFinite(grade) ? grade : null,
+        miningResourceFamily: miningResourceFamily(typeof staticData.getType === "function" ? staticData.getType(oreTypeID) : null),
         oreValuePerM3: typeof value === "number" && Number.isFinite(value) ? value : null,
       };
     }),
@@ -17870,7 +17912,9 @@ app.get(["/api/bridge/drones", "/api/bridge/script/observation"], requireAuth, a
       return;
     }
     const observation = req.path === "/api/bridge/script/observation";
-    // Request-local ownership only. Nothing survives this observation.
+    const observationStartedAt = Date.now();
+    // Snapshot/drone projections are request-local. Only the validated member
+    // position may enter the short-lived operation locality cache below.
     const scope = { ...held };
     const readObservation = async () => {
       const outcome = await gateway.readSpaceSnapshot(scope.bridgeSessionID, { userid: scope.accountID });
@@ -17913,6 +17957,8 @@ app.get(["/api/bridge/drones", "/api/bridge/script/observation"], requireAuth, a
           message: "Pilot, ship or scene changed during the observation. Read again." });
         return;
       }
+      const association = botHost.operationForClaim?.(held.characterID, req.get(botHostModule.BOT_HEADER));
+      if (association) miningOperations.observeMemberLocation(association.operationID, held.characterID, space, !held.stationID, observationStartedAt);
     }
     const settledCode = (settled) =>
       settled.status === "rejected"
@@ -19962,6 +20008,491 @@ app.post("/api/botscripts/:scriptID/delete", requireAuth, (req, res, next) => {
   }
 });
 
+// ── Mining Operations / Mining Command Center ──────────────────────────────
+// Definitions are durable JSON config; runtime and the target board are BFF-
+// local coordination state. No route below reads space. Running member status
+// is projected from botHost, the same source Bot Manager already uses.
+const MINING_OPERATION_STATUS = {
+  MINING_OPERATION_INVALID: 400,
+  MINING_OPERATION_NOT_FOUND: 404,
+  MINING_OPERATION_ACTIVE: 409,
+};
+
+function sendMiningOperationError(res, error, next) {
+  const status = error && MINING_OPERATION_STATUS[error.code];
+  if (status) {
+    res.status(status).json({ ok: false, error: error.code, message: error.message });
+    return;
+  }
+  next(error);
+}
+
+function operationPayload() {
+  return {
+    operations: miningOperations.list(botHost.listAll()),
+    targetBoard: miningTargetBoard.list(),
+    capabilities: {
+      hostedRunPolicy: config.hostedRunPolicy,
+      profileFamilies: familyCapabilities(),
+      targetClasses: {
+        BELT: { executable: true, note: "Current-system belt discovery and mining are supported." },
+        ORE_ANOMALY: { executable: true, note: "Current-system scanner sites only; explicit Ore Anomaly profiles." },
+        ICE: { executable: true, note: "Current-system ice sites; online Ice Harvesters required. No Mining Drones." },
+        GAS: { executable: false, note: "Scanner classification exists, but no gas-site travel block exists." },
+      },
+      reach: {
+        CURRENT_SYSTEM: { executable: true },
+        CURRENT_AND_ADJACENT: {
+          executable: false,
+          note: "Modeled; v0.1 executes in the anchor system and never invents remote scanner data.",
+        },
+      },
+      defender: {
+        executable: false,
+        note: "Modeled; current combat blocks have no operation-target escort authority.",
+      },
+      operationOwnedContainers: {
+        executable: false,
+        note: "Existing global leased container claims remain authoritative.",
+      },
+    },
+  };
+}
+
+app.get("/api/mining-operations", requireAuth, (req, res, next) => {
+  try {
+    res.json({ ok: true, ...operationPayload() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/mining-operations/resources", requireAuth, (req, res, next) => {
+  try { res.json({ ok: true, resources: staticData.listMiningResources() }); } catch (error) { next(error); }
+});
+
+function canonicalOperationArea(area) {
+  const systemID = Number(area?.anchorSystemID);
+  const system = Number.isSafeInteger(systemID) && systemID > 0
+    ? staticData.getSolarSystem(systemID) : null;
+  if (!system) {
+    const error = new Error("Choose a known anchor solar system from the map catalog.");
+    error.code = "MINING_OPERATION_INVALID";
+    throw error;
+  }
+  const canonicalName = String(system.solarSystemName || "");
+  if (area.anchorSystemName && String(area.anchorSystemName).trim() !== canonicalName) {
+    const error = new Error("Anchor system name and ID do not identify the same solar system.");
+    error.code = "MINING_OPERATION_INVALID";
+    throw error;
+  }
+  return { ...area, anchorSystemID: systemID, anchorSystemName: canonicalName };
+}
+
+app.get("/api/mining-operations/routines", requireAuth, (req, res, next) => {
+  try {
+    const classes = String(req.query.classes || "BELT").split(",").filter((kind) => EXECUTABLE_TARGET_CLASSES.includes(kind));
+    const unloadPolicy = req.query.unloadPolicy === "SELF_UNLOAD" ? "SELF_UNLOAD" : "HAULER_SERVICE";
+    const definition = { unloadPolicy };
+    const routines = botScripts.list().map((summary) => {
+      const script = botScripts.get(summary.scriptID);
+      const audit = script ? auditMiningScript(script.doc) : null;
+      const roles = {};
+      for (const role of ["MINER", "HAULER", "DEFENDER"]) {
+        const reason = operationRoutineCompatibility(definition, role, audit, classes);
+        roles[role] = { compatible: reason === null, reason };
+      }
+      return { scriptID: summary.scriptID, name: summary.name, rev: summary.rev, roles };
+    });
+    res.json({ ok: true, routines });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/mining-operations/accounts/:accountName/pilots", requireAuth, async (req, res, next) => {
+  try {
+    const accountName = String(req.params.accountName || "").trim();
+    const account = accountName ? await store.getAccount(accountName) : null;
+    if (!account || account.banned) {
+      res.status(404).json({ ok: false, error: "ACCOUNT_NOT_FOUND", message: "That account is unavailable." });
+      return;
+    }
+    const characters = await store.listCharactersForAccount(account.accountID);
+    res.json({ ok: true, pilots: characters.map((row) => ({
+      accountName,
+      characterID: Number(row.characterID),
+      characterName: String(row.characterName || `Pilot ${row.characterID}`),
+    })) });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/mining-operations", requireAuth, (req, res, next) => {
+  try {
+    const existingID = req.body && req.body.operationID;
+    if (existingID) {
+      const runtime = miningOperations.runtimeFor(existingID);
+      if (runtime && !["DRAFT", "STOPPED"].includes(runtime.state)) {
+        res.status(409).json({ ok: false, error: "MINING_OPERATION_ACTIVE", message: "Stop the operation before editing it." });
+        return;
+      }
+    }
+    const input = req.body || {};
+    validateResourcePolicy(input, input.policies?.resourcePolicy?.mode === "PREFER_LIST" ? staticData.listMiningResources() : []);
+    const definition = miningOperationStore.save({ ...input, area: canonicalOperationArea(input.area) });
+    res.json({ ok: true, definition, ...operationPayload() });
+  } catch (error) {
+    sendMiningOperationError(res, error, next);
+  }
+});
+
+app.post("/api/mining-operations/:operationID/delete", requireAuth, (req, res, next) => {
+  try {
+    const outcome = miningOperations.remove(req.params.operationID);
+    if (!outcome.ok) {
+      res.status(MINING_OPERATION_STATUS[outcome.code] || 404).json(outcome);
+      return;
+    }
+    res.json({ ok: true, ...operationPayload() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+function prepareMiningOperationLaunch(definition) {
+  try {
+    normalizePolicies(definition.policies, staticData.getStation, staticData.getSolarSystem);
+    validateResourcePolicy(definition, definition.policies?.resourcePolicy?.mode === "PREFER_LIST" ? staticData.listMiningResources() : []);
+  }
+  catch (error) { return { ok: false, code: "MINING_OPERATION_INVALID", message: error.message }; }
+  const selectedExecutable = definition.area.targetClasses.filter((kind) => EXECUTABLE_TARGET_CLASSES.includes(kind));
+  if (selectedExecutable.length === 0 || selectedExecutable.length !== definition.area.targetClasses.length) return { ok: false, code: "NO_EXECUTABLE_TARGET_CLASS",
+    message: `The selected target classes are modeled but not executable yet: ${definition.area.targetClasses.join(", ")}.` };
+  const scripts = new Map();
+  const audits = new Map();
+  for (const member of definition.members) {
+    if (member.role === "DEFENDER") continue;
+    const mode = member.routineMode || (member.automationID ? "CUSTOM" : "STANDARD");
+    let script;
+    if (mode === "STANDARD") {
+      if (!standardProfileFor(definition, member)) return { ok: false, code: "STANDARD_OPERATION_PROFILE_UNAVAILABLE",
+        message: `${member.characterName}: No Standard profile exists for this target class, unload policy, and role. Choose a compatible Custom routine.` };
+      const destination = definition.unloadDestination;
+      const station = destination && staticData.getStation(destination.stationID);
+      if (!station || station.stationName !== destination.stationName ||
+          staticData.getSolarSystemName(Number(station.solarSystemID)) !== destination.systemName ||
+          !Number.isSafeInteger(destination.corporationDivision) || destination.corporationDivision < 1 || destination.corporationDivision > 7) {
+        return { ok: false, code: "STANDARD_UNLOAD_DESTINATION_REQUIRED",
+          message: "Standard mining operations need an explicit known unload station and corporation division 1–7. Edit the operation destination before Start." };
+      }
+      script = buildStandardProfile(definition, member);
+    } else {
+      script = botScripts.get(member.automationID);
+    }
+    if (!script) return { ok: false, code: "INCOMPATIBLE_OPERATION_ROUTINE",
+      message: `${member.characterName}: The referenced operation routine is unavailable.` };
+    scripts.set(member.characterID, script);
+    audits.set(member.characterID, auditMiningScript(script.doc));
+  }
+  const minerAudits = definition.members.filter((member) => member.role === "MINER")
+    .map((member) => audits.get(member.characterID)).filter(Boolean);
+  const commonClasses = selectedExecutable.filter((kind) => minerAudits.length > 0 &&
+    minerAudits.every((audit) => audit.targetClasses.includes(kind)));
+  if (commonClasses.length === 0) return { ok: false, code: "INCOMPATIBLE_OPERATION_ROUTINE",
+    message: "The member routines do not share an executable operation target class." };
+  for (const member of definition.members) {
+    if (member.role === "DEFENDER") continue;
+    const reason = operationRoutineCompatibility(definition, member.role, audits.get(member.characterID), commonClasses);
+    if (reason) return { ok: false, code: "INCOMPATIBLE_OPERATION_ROUTINE", message: `${member.characterName}: ${reason}` };
+  }
+  const planHash = createHash("sha256").update(JSON.stringify({ definition, scripts: [...scripts] })).digest("hex");
+  const warnings = definition.members.filter((member) => member.role === "DEFENDER")
+    .map((member) => `${member.characterName}: DEFENDER execution is not supported; Start will be DEGRADED.`);
+  if (definition.policies?.parking.mode !== undefined && definition.policies.parking.mode !== "STAY_IN_PLACE") {
+    warnings.push(`On manual Stop: ${definition.policies.parking.mode} at ${definition.policies.parking.destination.stationName}. Parking uses the remaining run grant; stop before it expires. Cans left in space are not collected as part of Stop.`);
+  }
+  return { ok: true, scripts, audits, commonClasses, planHash, warnings };
+}
+
+app.get("/api/mining-operations/:operationID/launch-plan", requireAuth, (req, res, next) => {
+  try {
+    const definition = miningOperations.definition(req.params.operationID);
+    if (!definition) { res.status(404).json({ ok: false, error: "MINING_OPERATION_NOT_FOUND" }); return; }
+    const plan = prepareMiningOperationLaunch(definition);
+    if (!plan.ok) { res.status(409).json({ ok: false, error: plan.code, message: plan.message }); return; }
+    res.json({ ok: true, planHash: plan.planHash, warnings: plan.warnings,
+      members: definition.members.filter((member) => member.role !== "DEFENDER").map((member) => ({
+      characterID: member.characterID, routineMode: member.routineMode || (member.automationID ? "CUSTOM" : "STANDARD"),
+      script: plan.scripts.get(member.characterID),
+    })) });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, res, next) => {
+  try {
+    const definition = miningOperations.definition(req.params.operationID);
+    if (!definition) {
+      res.status(404).json({ ok: false, error: "MINING_OPERATION_NOT_FOUND", message: "That Mining Operation no longer exists." });
+      return;
+    }
+    try { canonicalOperationArea(definition.area); } catch (error) {
+      res.status(409).json({ ok: false, error: "MINING_OPERATION_INVALID", message: error.message });
+      return;
+    }
+    const plan = prepareMiningOperationLaunch(definition);
+    if (!plan.ok) { res.status(409).json({ ok: false, error: plan.code, message: plan.message }); return; }
+    if ((definition.members.some((member) => member.role !== "DEFENDER" &&
+        (member.routineMode || (member.automationID ? "CUSTOM" : "STANDARD")) === "STANDARD") ||
+        (definition.policies?.parking.mode && definition.policies.parking.mode !== "STAY_IN_PLACE")) &&
+        req.body?.planHash !== plan.planHash) {
+      res.status(409).json({ ok: false, error: "OPERATION_LAUNCH_PLAN_STALE",
+        message: "The operation profile or destination changed since preflight. Review and Start again." });
+      return;
+    }
+    const { scripts, audits, commonClasses } = plan;
+    const begin = miningOperations.begin(definition.operationID, commonClasses);
+    if (!begin.ok) {
+      res.status(MINING_OPERATION_STATUS[begin.code] || 409).json(begin);
+      return;
+    }
+    const grants = req.body && typeof req.body.grants === "object" ? req.body.grants : {};
+    const results = [];
+    for (const member of definition.members) {
+      const script = scripts.get(member.characterID);
+      const audit = audits.get(member.characterID);
+      let failure = null;
+      if (member.role === "DEFENDER") failure = "DEFENDER execution is not supported yet; no escort routine was started.";
+      else if (!script || !audit) failure = "The referenced saved automation no longer exists.";
+      else failure = operationRoutineCompatibility(definition, member.role, audit, commonClasses);
+      if (failure) {
+        miningOperations.memberFailed(definition.operationID, member.characterID, { code: "MEMBER_NOT_EXECUTABLE", message: failure });
+        results.push({ characterID: member.characterID, ok: false, error: "MEMBER_NOT_EXECUTABLE", message: failure });
+        continue;
+      }
+      const account = await store.getAccount(member.accountName);
+      const character = account && !account.banned
+        ? await store.getCharacterForAccount(account.accountID, member.characterID)
+        : null;
+      if (!account || account.banned || !character) {
+        failure = "The pilot is not owned by the saved account, or that account is unavailable.";
+        miningOperations.memberFailed(definition.operationID, member.characterID, { code: "CHARACTER_NOT_FOUND", message: failure });
+        results.push({ characterID: member.characterID, ok: false, error: "CHARACTER_NOT_FOUND", message: failure });
+        continue;
+      }
+      let callerSessionID = null;
+      let callerHeld = null;
+      const ownHeld = bridgeSessions.get(req.webSessionID);
+      if (ownHeld && Number(ownHeld.characterID) === member.characterID) {
+        callerSessionID = req.webSessionID;
+        callerHeld = ownHeld;
+      }
+      if (hasPendingRecovery(callerHeld, member.characterID)) {
+        failure = "This pilot's lost-drone recovery must finish before server handoff.";
+        miningOperations.memberFailed(definition.operationID, member.characterID, { code: "DRONE_RECOVERY_PENDING", message: failure });
+        results.push({ characterID: member.characterID, ok: false, error: "DRONE_RECOVERY_PENDING", message: failure });
+        continue;
+      }
+      if (characterOperations.has(member.characterID) || (callerSessionID !== null && sessionOperations.has(callerSessionID))) {
+        failure = "This pilot is changing sessions. Try this member again shortly.";
+        miningOperations.memberFailed(definition.operationID, member.characterID, { code: "CHARACTER_IN_USE", message: failure });
+        results.push({ characterID: member.characterID, ok: false, error: "CHARACTER_IN_USE", message: failure });
+        continue;
+      }
+      const reservation = Symbol("mining-operation-handoff");
+      characterOperations.set(member.characterID, reservation);
+      if (callerSessionID !== null) sessionOperations.set(callerSessionID, reservation);
+      let released = false;
+      let outcome;
+      try {
+        outcome = await botHost.start({
+          account,
+          characterID: member.characterID,
+          kind: "script",
+          scriptID: script.scriptID,
+          scriptName: script.name,
+          scriptRev: script.rev,
+          doc: script.doc,
+          grant: grants[String(member.characterID)],
+          callerSessionID,
+          operationID: definition.operationID,
+          operationRole: member.role,
+          operationControllerAccountID: Number(req.account.accountID),
+          beforeStart: callerSessionID === null ? null : async () => {
+            const held = bridgeSessions.get(callerSessionID);
+            if (held && Number(held.characterID) === member.characterID) {
+              await releaseHeldBridgeSession(callerSessionID, { confirmed: true });
+              released = true;
+            }
+          },
+        });
+        if (
+          !outcome.ok &&
+          released &&
+          callerSessionID !== null &&
+          !bridgeSessions.has(callerSessionID) &&
+          botHost.claimedBy(member.characterID) === null &&
+          Number(callerHeld?.accountID) === Number(account.accountID)
+        ) {
+          try {
+            await selectHeldCharacter(callerSessionID, account, member.characterID);
+          } catch (error) {
+            errorLogger(error);
+            outcome.message = `${outcome.message || "This member could not start."} Bring this pilot online again; its browser session could not be restored.`;
+          }
+        }
+      } finally {
+        if (characterOperations.get(member.characterID) === reservation) characterOperations.delete(member.characterID);
+        if (callerSessionID !== null && sessionOperations.get(callerSessionID) === reservation) sessionOperations.delete(callerSessionID);
+      }
+      if (!outcome.ok) {
+        miningOperations.memberFailed(definition.operationID, member.characterID, { code: outcome.code, message: outcome.message || outcome.code });
+        results.push({ characterID: member.characterID, ok: false, error: outcome.code, message: outcome.message });
+      } else {
+        miningOperations.memberStarted(definition.operationID, member.characterID, outcome.bot.botID);
+        results.push({ characterID: member.characterID, ok: true, bot: outcome.bot });
+      }
+    }
+    miningOperations.finishLaunch(definition.operationID);
+    res.json({ ok: true, results, ...operationPayload() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+const miningOperationStopper = createMiningOperationStopper({ operations: miningOperations, botHost });
+app.post("/api/mining-operations/:operationID/extend", requireAuth, async (req, res, next) => {
+  try {
+    const extension = await extendMiningOperation({ operations: miningOperations, botHost, operationID: req.params.operationID,
+      controllerAccountID: Number(req.account.accountID), minutes: req.body?.minutes });
+    // Partial per-member results are not a transport failure; never auto-retry a write.
+    res.json({ ok: true, extension, ...operationPayload() });
+  } catch (error) { next(error); }
+});
+app.post("/api/mining-operations/:operationID/stop", requireAuth, async (req, res, next) => {
+  try {
+    const definition = miningOperations.definition(req.params.operationID);
+    if (!definition) {
+      res.status(404).json({ ok: false, error: "MINING_OPERATION_NOT_FOUND" });
+      return;
+    }
+    if (miningOperations.runtimeFor(definition.operationID)?.state === "ASSEMBLING") {
+      res.status(409).json({ ok: false, error: "OPERATION_START_IN_PROGRESS", message: "Pilot acquisition is still finishing. Retry Stop when assembly completes." });
+      return;
+    }
+    const policy = normalizePolicies(definition.policies, staticData.getStation, staticData.getSolarSystem);
+    const pending = miningOperationStopper.stop({ ...definition, policies: policy });
+    if (policy.parking.mode !== "STAY_IN_PLACE") {
+      void pending.catch(errorLogger);
+      res.status(202).json({ ok: true, ...operationPayload() });
+      return;
+    }
+    const failures = await pending;
+    res.status(failures.length > 0 ? 409 : 200).json({ ok: failures.length === 0, failures, ...operationPayload() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+function requireMiningOperationClaim(req, res) {
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) return null;
+  const association = botHost.operationForClaim(held.characterID, req.get(botHostModule.BOT_HEADER));
+  if (!association) {
+    res.status(409).json({ ok: false, error: "MINING_OPERATION_CLAIM_REQUIRED" });
+    return null;
+  }
+  return { held, association };
+}
+
+app.get("/api/mining-operations/assignment/current", requireAuth, (req, res, next) => {
+  try {
+    const held = requireHeldBridgeSession(req, res);
+    if (!held) return;
+    const secret = req.get(botHostModule.BOT_HEADER);
+    if (!botHost.authorizesClaim(held.characterID, secret)) {
+      res.status(409).json({ ok: false, error: "BOT_CLAIM_REQUIRED" });
+      return;
+    }
+    // Ordinary hosted scripts probe once and receive null. Operation runners
+    // carry the same private host capability plus their stable association.
+    const association = botHost.operationForClaim(held.characterID, secret);
+    const assignment = association
+      ? miningOperations.assignment(association.operationID, held.characterID)
+      : null;
+    res.json({ ok: true, assignment });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/mining-operations/target/reserve", requireAuth, (req, res, next) => {
+  try {
+    const claim = requireMiningOperationClaim(req, res);
+    if (!claim) return;
+    const candidates = Array.isArray(req.body?.candidates) ? req.body.candidates : [req.body || {}];
+    if (candidates.some(candidate => !candidate || Number(candidate.systemID) !== Number(claim.held.solarSystemID))) {
+      return res.status(409).json({ ok: false, error: "SITE_SYSTEM_AUTHORITY_MISMATCH", message: "Target selection requires the pilot's current-system observation." });
+    }
+    miningOperations.reconcileBots(botHost.listAll());
+    const outcome = miningOperations.reserveCandidates(claim.association.operationID, claim.held.characterID, candidates);
+    res.json({ ok: true, ...outcome });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/mining-operations/target/activate", requireAuth, (req, res, next) => {
+  try {
+    const claim = requireMiningOperationClaim(req, res);
+    if (!claim) return;
+    const applied = miningOperations.activateTarget(claim.association.operationID, claim.held.characterID, String(req.body?.targetKey || ""));
+    res.json({ ok: true, applied });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/mining-operations/target/depleted", requireAuth, (req, res, next) => {
+  try {
+    const claim = requireMiningOperationClaim(req, res);
+    if (!claim) return;
+    const applied = miningOperations.depleteTarget(
+      claim.association.operationID,
+      claim.held.characterID,
+      String(req.body?.targetKey || ""),
+      req.body?.evidence || {},
+    );
+    res.json({ ok: true, applied });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/mining-operations/member/ready", requireAuth, (req, res, next) => {
+  try {
+    const claim = requireMiningOperationClaim(req, res);
+    if (!claim) return;
+    res.json({ ok: true, applied: miningOperations.markReady(claim.association.operationID, claim.held.characterID) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/mining-operations/member/drain-complete", requireAuth, (req, res, next) => {
+  try {
+    const claim = requireMiningOperationClaim(req, res);
+    if (!claim) return;
+    res.json({
+      ok: true,
+      applied: miningOperations.finishDrain(
+        claim.association.operationID,
+        claim.held.characterID,
+        String(req.body?.targetKey || ""),
+      ),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // ── Server-side bots (src/botHost.js) ───────────────────────────────────────
 // A bot the SERVER flies: it keeps running when the tab that started it goes
 // away. Start names a saved Bot Builder script, OR (kind: "companion") carries
@@ -19987,7 +20518,7 @@ const BOT_START_STATUS = {
 
 app.get("/api/bots", requireAuth, (req, res, next) => {
   try {
-    res.json({ ok: true, bots: botHost.list(req.account.accountID) });
+    res.json({ ok: true, bots: botHost.list(req.account.accountID), hostedRunPolicy: config.hostedRunPolicy });
   } catch (error) {
     next(error);
   }
@@ -20632,6 +21163,19 @@ function startServer(options = {}) {
   const host = options.host || config.host;
   const port = options.port === undefined ? config.port : Number(options.port);
   const server = http.createServer(appToStart);
+  // Host ownership, not a script observation or an open dashboard, keeps the
+  // shared target lease alive. A dead server stops this timer, so abandoned
+  // ownership still expires on the board's bounded lease.
+  const boardLeaseMs = appToStart.locals.miningTargetBoard?.leaseMs || 30_000;
+  const claimHeartbeat = setInterval(() => {
+    try {
+      appToStart.locals.miningOperations?.renewHostedClaims(appToStart.locals.botHost?.listAll() || []);
+    } catch (error) {
+      console.error(error);
+    }
+  }, Math.max(1_000, Math.min(10_000, Math.floor(boardLeaseMs / 3))));
+  claimHeartbeat.unref?.();
+  server.on("close", () => clearInterval(claimHeartbeat));
   server.listen(port, host, () => {
     const address = server.address();
     const activePort = address && typeof address === "object" ? address.port : port;

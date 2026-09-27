@@ -45,6 +45,20 @@ test("the server rejects a session ID changed without a valid signature", () => 
   assert.equal(webAuth.verifySessionToken(`${changedPayload}.${signature}`), null);
 });
 
+test("internal bot grant renewal preserves session identity and rejects expired/forged/over-limit credentials", t => {
+  const now = Date.now(); t.mock.method(Date, "now", () => now);
+  const token = webAuth.createBotSessionToken({ username: "pilot", accountID: 42 }, now + 60 * 60_000);
+  const before = webAuth.verifySessionToken(token);
+  const renewed = webAuth.extendBotSessionToken(token, now + 5 * 60 * 60_000);
+  assert.deepEqual(webAuth.verifySessionToken(renewed), { ...before, exp: now + (5 * 60 + 5) * 60_000 });
+  assert.throws(() => webAuth.extendBotSessionToken(`${token}x`, now + 5 * 60 * 60_000));
+  assert.throws(() => webAuth.extendBotSessionToken(token, now + (require("../src/config").hostedRunPolicy.maxRuntimeMinutes + 1) * 60_000));
+  Date.now.mock.mockImplementation(() => now + 66 * 60_000);
+  assert.equal(webAuth.verifySessionToken(token), null);
+  assert.ok(webAuth.verifySessionToken(renewed));
+  assert.throws(() => webAuth.extendBotSessionToken(token, now + 8 * 60 * 60_000));
+});
+
 
 test("bot credential covers 24 hours plus cleanup without extending browser TTL", (t) => {
   const now = Date.now();
@@ -61,4 +75,18 @@ test("bot credential covers 24 hours plus cleanup without extending browser TTL"
   assert.equal(webAuth.verifySessionToken(bot), null);
   assert.ok(webAuth.verifySessionToken(bot, { allowExpired: true }));
   assert.equal(webAuth.verifySessionToken(`${bot}tampered`, { allowExpired: true }), null);
+});
+
+test("hosted token supports seven days and renewal past 24h while preserving session identity", t => {
+  const origin = Date.now(); t.mock.method(Date, "now", () => origin);
+  const account = { username: "pilot", accountID: 42 };
+  const initial = webAuth.createBotSessionToken(account, origin + 24 * 3_600_000);
+  const first = webAuth.verifySessionToken(initial);
+  const extended = webAuth.extendBotSessionToken(initial, origin + 48 * 3_600_000);
+  assert.deepEqual(webAuth.verifySessionToken(extended), { ...first, exp: origin + 48 * 3_600_000 + 300_000 });
+  const week = webAuth.createBotSessionToken(account, origin + 168 * 3_600_000);
+  Date.now.mock.mockImplementation(() => origin + 168 * 3_600_000);
+  assert.ok(webAuth.verifySessionToken(week), "cleanup remains authenticated at expiry");
+  Date.now.mock.mockImplementation(() => origin + 168 * 3_600_000 + 301_000);
+  assert.equal(webAuth.verifySessionToken(week), null);
 });

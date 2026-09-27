@@ -53,8 +53,12 @@ import type { PropulsionModule } from "./propulsion.ts";
  * guess (see scanner/siteKind.ts).
  */
 export interface ScannedAnomaly {
+  readonly siteID?: number | null;
+  readonly instanceID?: number | null;
   readonly label: string;
   readonly kind: ExplorationSiteKind;
+  /** Raw scanner archetype: ore sites (27) and Ice sites (28) are distinct families. */
+  readonly archetypeID?: number | null;
   /**
    * Where the site sits in this solar system, in metres — the scanner row's own
    * `position`, not a guess. Optional, and `null` when the row carried none.
@@ -72,6 +76,49 @@ export interface DryBelt {
   readonly beltName: string;
   readonly all: boolean;
   readonly families: readonly number[];
+}
+
+export type MiningOperationRole = "MINER" | "HAULER" | "DEFENDER";
+export type MiningTargetType = "BELT" | "ORE_ANOMALY" | "ICE" | "GAS";
+
+export interface MiningOperationTarget {
+  readonly siteIdentity?: string;
+  readonly siteID?: number;
+  readonly instanceID?: number | null;
+  readonly position?: SpaceVector;
+  readonly targetKey: string;
+  readonly targetType: MiningTargetType;
+  readonly systemID: number;
+  readonly systemName: string | null;
+  readonly targetName: string;
+  readonly state: "AVAILABLE" | "RESERVED" | "ACTIVE" | "DRAINING" | "DEPLETED";
+  readonly claimedByOperationID: string | null;
+}
+
+/** Stored BFF coordination only. Reading this never reads the game world. */
+export interface MiningOperationAssignment {
+  readonly resourcePolicy?: import("./resourcePriority.ts").ResourcePolicy | null;
+  readonly travelAssist?: "DISABLED" | "AUTO";
+  readonly stopRequested?: boolean;
+  readonly operationID: string;
+  readonly operationName: string;
+  readonly role: MiningOperationRole;
+  readonly unloadPolicy: "HAULER_SERVICE" | "SELF_UNLOAD";
+  readonly area: {
+    readonly anchorSystemID: number;
+    readonly anchorSystemName: string | null;
+    readonly reach: "CURRENT_SYSTEM" | "CURRENT_AND_ADJACENT";
+    readonly targetClasses: readonly MiningTargetType[];
+  };
+  readonly state: string;
+  readonly currentTarget: MiningOperationTarget | null;
+  readonly logisticsTarget: MiningOperationTarget | null;
+  readonly rendezvous: {
+    readonly kind: "MINER_CLEARANCE" | "SELF_UNLOAD";
+    readonly required: readonly number[];
+    readonly ready: readonly number[];
+    readonly thisMemberReady: boolean;
+  } | null;
 }
 
 /**
@@ -140,6 +187,9 @@ export function pickAdvertisedFleet(
 }
 
 export interface ScriptObservation {
+  readonly miningSiteBookmarks?: Readonly<Record<string, number>>;
+  readonly iceMiningModuleIDs?: readonly number[] | null;
+  readonly oreMiningModuleIDs?: readonly number[] | null;
   readonly haulDivisions?: Readonly<Record<number, readonly import("../store/types.ts").InventoryItemRow[] | null>> | null;
   readonly miningDrones?: MiningDroneState | null;
   /** Transient contention, never a refusal or evidence that a can is empty. */
@@ -200,6 +250,13 @@ export interface ScriptObservation {
    * unreadable — treated as "nothing known", never as "all dry".
    */
   readonly dryBelts?: readonly DryBelt[] | null;
+  /** This hosted runner's BFF-side Mining Operation assignment, if any. */
+  readonly miningOperation?: MiningOperationAssignment | null;
+  /** A hosted operation may never fall back to standalone target selection. */
+  readonly miningOperationRequired?: boolean;
+  readonly miningOperationReadError?: string | null;
+  /** Run-local backoff after another operation won an atomic reservation. */
+  readonly unavailableMiningTargetKeys?: readonly string[];
   /** True when a PLAYER's ship on this grid has locked this ship. */
   readonly targetedByPlayer?: boolean | null;
   /** The lowest health, 0..1, among YOUR drones out in space; null with none out. */
@@ -644,6 +701,7 @@ export interface ScriptObservation {
    * answer — plenty of hulls fly without one.
    */
   readonly propulsionModules?: readonly PropulsionModule[];
+  readonly travelPropulsionModules?: readonly PropulsionModule[];
   /**
    * Whether a live WARP SCRAMBLER — not a disruptor — is on this ship, from the
    * same jam fold as `jammingSourceIDs` above
