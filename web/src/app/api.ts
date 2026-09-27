@@ -31,7 +31,7 @@ import {
   type RequestPriority,
 } from "./transport.ts";
 import type { JsonValue } from "../bridge/wire.ts";
-import type { MinerTrainingRead, StageFittingSelection, TrainingCharacter } from "../training/types.ts";
+import type { MinerTrainingRead, StageFittingSelection, TrainingCharacter, QueueReview, QueueApplyOutcome } from "../training/types.ts";
 import type {
   AgentRow,
   IndustryActivity,
@@ -4488,7 +4488,28 @@ export async function loadMinerTraining(
     throw new BridgeCallError("BRIDGE_BAD_RESPONSE", "Training qualification read is incomplete.", 502);
   }
   return { report, corporationID: data.corporationID as number,
+    queue: data.queue as unknown as MinerTrainingRead["queue"],
     fittings: data.fittings as unknown as MinerTrainingRead["fittings"] };
+}
+
+export async function reviewTrainingQueue(
+  request: { characterID: number; role: "MINER"; mode: "FAST" | "BALANCED" | "MASTERY";
+    stage: string | null; displayedTargets: readonly { typeID: number; level: number }[];
+    selections: Readonly<Record<string, StageFittingSelection>> }, options: ApiOptions,
+): Promise<QueueReview> {
+  const data = await postJson("/api/pilot-training/queue/review", request, options);
+  const review = data.review as unknown as QueueReview;
+  if (!review || !Array.isArray(review.additions) || !Array.isArray(review.blockers) || review.fresh?.report?.pilot?.characterID !== request.characterID)
+    throw new BridgeCallError("BRIDGE_BAD_RESPONSE", "Queue review is incomplete.", 502);
+  return review;
+}
+
+export async function applyTrainingQueue(reviewID: string, options: ApiOptions): Promise<QueueApplyOutcome> {
+  const data = await postJson("/api/pilot-training/queue/apply", { reviewID, confirm: true }, options);
+  const outcome = data.outcome as unknown as QueueApplyOutcome;
+  if (!outcome || !["APPLIED", "REFUSED", "APPLY_UNVERIFIED"].includes(outcome.status) || typeof outcome.verified !== "boolean")
+    throw new BridgeCallError("BRIDGE_BAD_RESPONSE", "Apply outcome is unreadable; refresh the queue before reviewing again.", 502);
+  return outcome;
 }
 
 // --- R28 Skills: the character sheet and the training queue -------------------

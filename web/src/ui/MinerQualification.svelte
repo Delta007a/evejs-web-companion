@@ -1,7 +1,7 @@
 <script lang="ts">
   import { formatDuration, romanLevel } from "../bridge/skills.ts";
   import { fittingsForHull } from "../training/fittingSelection.ts";
-  import { requirementCounts, type PlanMode } from "../training/factory.ts";
+  import { requirementCounts, skillTargetLabel, type PlanMode } from "../training/factory.ts";
   import type { MinerTrainingRead, RequirementRow, CorporationSavedFitting, StageFittingSelection } from "../training/types.ts";
   let { result, selections, mode, busy, onSelect, onAccept }: {
     result: MinerTrainingRead; selections: Readonly<Record<string, StageFittingSelection>>;
@@ -20,7 +20,7 @@
       <td data-label="Skill">{row.name}</td>
       <td data-label="Target">{romanLevel(row.level)}</td>
       <td data-label="Trained">{row.trainedLevel === null ? "Unknown" : romanLevel(row.trainedLevel) || "—"}</td>
-      <td data-label="Target status">{row.state}{row.queuePosition >= 0 ? ` · queue ${row.queuePosition + 1}` : ""}</td>
+      <td data-label="Target status">{skillTargetLabel(row.state)}{row.queuePosition >= 0 ? ` · queue ${row.queuePosition + 1}` : ""}</td>
     </tr>{/each}</tbody>
   </table></div>
 {/snippet}
@@ -28,7 +28,7 @@
 <section aria-label="Miner qualification">
   <h3>Miner stages · support policy v{report.policyVersion}</h3>
   <p class="note">Highest proven qualification: <strong>{report.currentStage ?? "None proven"}</strong>. Next stage: {report.nextStage ?? "All stages reached"}.</p>
-  <p class="note">MISSING means the target level is not yet trained or queued; a lower level may already be trained. Queued levels do not count as trained.</p>
+  <p class="note">NEEDS TRAINING means the target level is not yet trained or queued; a lower level may already be trained. Queued levels do not count as trained.</p>
   {#each report.stages as stage (stage.id)}
     {@const counts = requirementCounts(stage.hard)}
     {@const support = requirementCounts(stage.support)}
@@ -59,7 +59,7 @@
       {/if}
       <h4>Hard requirements</h4>
       {#if stage.fitting.status === "READY"}
-        <p>{counts.TRAINED} / {stage.hard.length} satisfied · Training {counts.TRAINING} · Queued {counts.QUEUED} · Missing {counts.MISSING} · Unknown {counts.UNKNOWN}</p>
+        <p>{counts.TRAINED} / {stage.hard.length} satisfied · Training {counts.TRAINING} · Queued {counts.QUEUED} · Needs training {counts.MISSING} · Unknown {counts.UNKNOWN}</p>
         {@render skillRows(stage.hard)}
       {:else}<p class="note">UNKNOWN — an accepted, readable stage fitting is required.</p>{/if}
       <details><summary>Support policy · {support.TRAINED} / {stage.support.length} targets trained</summary>
@@ -72,7 +72,7 @@
   <p class="note">{mode === "FAST" ? "Next-stage hard requirements only." : mode === "BALANCED" ? "Next-stage hard requirements plus selected support targets." : "Current-stage hard requirements and selected support/mastery targets, including intentional level V goals."}</p>
   <p>ETA: {preview.eta.kind === "READY" ? "Already trained" : preview.eta.kind === "SERVER_QUEUE" ? `${formatDuration(preview.eta.remainingMs)} · authoritative server queue` : `UNKNOWN · ${preview.eta.reason}`}</p>
   {#if preview.targets.length > 0}{@render skillRows(preview.targets)}{/if}
-  <p class="note">Preview only. No queue is applied and no equipment is issued.</p>
+  <p class="note">This preview does not change training. Review the append below before explicitly applying. Equipment is not issued.</p>
 </section>
 <style>
   details { margin: .75rem 0; padding: .75rem; border: 1px solid var(--border, #364252); border-radius: 6px; }

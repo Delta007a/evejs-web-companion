@@ -1,21 +1,25 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { loadKnownCharacters } from "../app/knownCharacters.ts";
-  import { loadTrainingCharacters, type ApiOptions } from "../app/api.ts";
+  import { loadTrainingCharacters, reviewTrainingQueue, applyTrainingQueue, type ApiOptions } from "../app/api.ts";
+  import { BridgeCallError } from "../bridge/callMethod.ts";
   import { readFactoryAccount, readFactoryPilot } from "../training/factoryClient.ts";
   import { panelErrorWords } from "../bridge/refusals.ts";
   import { formatDuration } from "../bridge/skills.ts";
   import { acceptStageFitting } from "../training/fittingSelection.ts";
   import { readSelections, saveSelections, readPilotPreferences, savePilotPreferences,
     readFactoryAccounts, rememberFactoryAccount, factoryStatus, factoryStatusLabels,
+    readLastQueueApply, rememberQueueApply, type LastQueueApply,
     type PilotPreferences, type PlanMode, type FactoryStatus } from "../training/factory.ts";
-  import type { TrainingCharacter, MinerTrainingRead, StageFittingSelection, CorporationSavedFitting } from "../training/types.ts";
+  import type { TrainingCharacter, MinerTrainingRead, StageFittingSelection, CorporationSavedFitting, QueueReview, QueueApplyOutcome, TrainingQueue } from "../training/types.ts";
   import MinerQualification from "./MinerQualification.svelte";
+  import TrainingQueueReview from "./TrainingQueueReview.svelte";
 
   interface PilotRow {
     key: string; account: string; pilot: TrainingCharacter; prefs: PilotPreferences;
     selections: Record<string, StageFittingSelection>; result: MinerTrainingRead | null;
     error: string; readAt: number | null;
+    review: QueueReview | null; queue: TrainingQueue | null; queueMessage: string; lastApply: LastQueueApply | null;
   }
   let rows = $state<PilotRow[]>([]);
   let accounts = $state<string[]>([]);
@@ -42,25 +46,26 @@
     let configError = "";
     try { prefs = readPilotPreferences(localStorage, account, pilot.characterID); selections = readSelections(localStorage, account, pilot.characterID); }
     catch { configError = "Browser configuration is unreadable; stored fitting selections have not been overwritten."; }
-    return { key: keyOf(account, pilot.characterID), account, pilot, prefs, selections, result: null, error: configError, readAt: null };
+    return { key: keyOf(account, pilot.characterID), account, pilot, prefs, selections, result: null, error: configError, readAt: null,
+      review: null, queue: null, queueMessage: "", lastApply: readLastQueueApply(localStorage, account, pilot.characterID) };
   }
   async function readPilot(row: PilotRow, ticket: number): Promise<void> {
     if (ticket !== generation) return;
-    update(row.key, { result: null, readAt: null });
+    update(row.key, { result: null, readAt: null, review: null, queue: null });
     if (!row.prefs.role || row.error) return;
     try {
       const options = credentials.get(row.account);
       if (!options) throw new Error("Account authentication is unavailable; refresh the roster.");
       const selections = readSelections(localStorage, row.account, row.pilot.characterID);
       const result = await readFactoryPilot(row.pilot.characterID, selections, options);
-      if (ticket === generation) update(row.key, { result, selections, error: "", readAt: Date.now() });
+      if (ticket === generation) update(row.key, { result, selections, queue: result.queue ?? null, error: "", readAt: Date.now() });
     } catch (cause) {
       if (ticket === generation) update(row.key, { result: null, error: panelErrorWords(cause), readAt: null });
     }
   }
   async function readAccount(account: string, ticket: number): Promise<void> {
     // Account and pilot reads are serialized; a refresh never competes with an edit.
-    rows = rows.map((row) => row.account === account ? { ...row, result: null, readAt: null } : row);
+    rows = rows.map((row) => row.account === account ? { ...row, result: null, readAt: null, review: null, queue: null } : row);
     try {
       const roster = await readFactoryAccount(account);
       if (ticket !== generation) return;
@@ -108,7 +113,7 @@
     if (busy) return;
     try {
       savePilotPreferences(localStorage, row.account, row.pilot.characterID, prefs);
-      update(row.key, { prefs });
+      update(row.key, { prefs, review: null, queueMessage: "" });
       if (prefs.role !== row.prefs.role) {
         busy = true;
         const ticket = ++generation;
@@ -130,12 +135,69 @@
         else delete selections[stageID];
       }
       saveSelections(localStorage, row.account, row.pilot.characterID, selections);
-      update(row.key, { selections, error: "" });
+      update(row.key, { selections, error: "", review: null, queueMessage: "" });
       busy = true;
       const ticket = ++generation;
       await readPilot({ ...row, selections, error: "" }, ticket);
       if (ticket === generation) busy = false;
     } catch (cause) { error = `Fitting configuration could not be saved: ${String(cause)}`; busy = false; }
+  }
+  const queueError = (cause: unknown) => cause instanceof BridgeCallError ? `${cause.code}: ${cause.message}` : String(cause);
+  async function reviewQueue(row: PilotRow): Promise<void> {
+    if (busy || !row.result || row.prefs.role !== "MINER") return;
+    const options = credentials.get(row.account);
+    if (!options) return;
+    busy = true;
+    const ticket = ++generation;
+    update(row.key, { review: null, queueMessage: "" });
+    try {
+      const preview = row.result.report.previews[row.prefs.mode];
+      const selections = readSelections(localStorage, row.account, row.pilot.characterID);
+      // Changing a local fit in another tab invalidates this displayed preview.
+      if (JSON.stringify(selections) !== JSON.stringify(row.selections)) throw new Error("PLAN_CHANGED: fitting configuration changed; refresh first.");
+      const review = await reviewTrainingQueue({ characterID: row.pilot.characterID, role: "MINER", mode: row.prefs.mode,
+        stage: preview.stage, displayedTargets: preview.targets.map(({ typeID, level }) => ({ typeID, level })), selections }, options);
+      if (ticket === generation) update(row.key, { review, result: review.fresh, queue: review.queue, readAt: Date.now() });
+    } catch (cause) {
+      if (ticket === generation) {
+        await readPilot({ ...row, error: "" }, ticket);
+        update(row.key, { queueMessage: queueError(cause) });
+      }
+    } finally { if (ticket === generation) busy = false; }
+  }
+  function recordApply(row: PilotRow, outcome: QueueApplyOutcome): void {
+    const { fresh: _fresh, queue: _queue, message: _message, ...record } = outcome;
+    update(row.key, { lastApply: record });
+    try { rememberQueueApply(localStorage, row.account, row.pilot.characterID, outcome); }
+    catch { update(row.key, { queueMessage: `${outcome.message} Local audit record could not be saved.` }); }
+  }
+  async function applyQueue(row: PilotRow): Promise<void> {
+    const reviewed = row.review;
+    const options = credentials.get(row.account);
+    if (busy || !reviewed?.canApply || !reviewed.reviewID || !options || row.prefs.role !== "MINER") return;
+    busy = true;
+    const ticket = ++generation;
+    // Disable repeat clicks immediately, even if transport fails.
+    update(row.key, { review: null, queueMessage: "Applying reviewed append…" });
+    try {
+      const selections = readSelections(localStorage, row.account, row.pilot.characterID);
+      if (row.prefs.mode !== reviewed.mode || JSON.stringify(selections) !== JSON.stringify(row.selections))
+        throw new Error("PLAN_CHANGED: local configuration changed; review again.");
+      const outcome = await applyTrainingQueue(reviewed.reviewID, options);
+      if (ticket !== generation) return;
+      update(row.key, { result: outcome.fresh, queue: outcome.queue, queueMessage: `${outcome.status}${outcome.code ? ` · ${outcome.code}` : ""}: ${outcome.message}`,
+        readAt: outcome.queue ? Date.now() : null });
+      recordApply(row, outcome);
+    } catch (cause) {
+      if (ticket !== generation) return;
+      const message = queueError(cause);
+      const refused = !(cause instanceof BridgeCallError) || (cause.status >= 400 && cause.status < 500);
+      recordApply(row, { status: refused ? "REFUSED" : "APPLY_UNVERIFIED", verified: false, mode: reviewed.mode,
+        stage: reviewed.stage || "Unknown", at: Date.now(), added: null, attemptedAdditions: reviewed.additions.length,
+        code: cause instanceof BridgeCallError ? cause.code : "PLAN_CHANGED", message, fresh: null, queue: null });
+      await readPilot({ ...row, error: "" }, ticket);
+      if (ticket === generation) update(row.key, { queueMessage: `${refused ? "REFUSED" : "APPLY_UNVERIFIED"}: ${message} No automatic retry. Review again.` });
+    } finally { if (ticket === generation) busy = false; }
   }
   onMount(() => {
     const ticket = generation;
@@ -160,7 +222,7 @@
 
 <main class="factory">
   <header class="factory-head">
-    <div><p class="eyebrow">EveJS Web · control plane</p><h1>Goblin Factory</h1><p>Read-only pilot training and Miner qualification</p></div>
+    <div><p class="eyebrow">EveJS Web · control plane</p><h1>Goblin Factory</h1><p>Miner qualification and reviewed training queue append</p></div>
     <nav><a href="/" target="_blank" rel="noopener">Pilot Hangar</a><button type="button" class="minor" disabled={busy || !ready} onclick={refresh}>{busy ? "Reading…" : "Refresh roster"}</button></nav>
   </header>
   <p class="note">Skill qualification does not establish equipment readiness. No pilot is selected or brought online by this page.</p>
@@ -208,12 +270,15 @@
         {#if preview?.eta.kind === "UNKNOWN"}<p class="note">{preview.eta.reason}</p>{/if}
         {#if report?.stages.some((stage) => stage.fitting.status !== "READY")}<p class="note">Stage fitting configuration needs attention; inspect stage details.</p>{/if}
         {#if row.readAt}<p class="note">Read at {new Date(row.readAt).toLocaleTimeString()} · refresh to update</p>{/if}
-        {#if row.result}
+        {#if row.result || row.queue || row.lastApply}
           <button class="minor" type="button" onclick={() => expanded = expanded === row.key ? null : row.key}>{expanded === row.key ? "Hide stages" : "Inspect stages and plan"}</button>
           {#if expanded === row.key}
-            <MinerQualification result={row.result} selections={row.selections} mode={row.prefs.mode} {busy}
+            {#if row.result}<MinerQualification result={row.result} selections={row.selections} mode={row.prefs.mode} {busy}
               onSelect={(stage, id) => void configureFit(row, stage, id)}
-              onAccept={(stage, fit) => void configureFit(row, stage, fit.fittingID, fit)} />
+              onAccept={(stage, fit) => void configureFit(row, stage, fit.fittingID, fit)} />{/if}
+            {#if row.prefs.role === "MINER"}<TrainingQueueReview result={row.result} queue={row.queue} review={row.review}
+              mode={row.prefs.mode} {busy} message={row.queueMessage} lastApply={row.lastApply}
+              onReview={() => void reviewQueue(row)} onApply={() => void applyQueue(row)} />{/if}
           {/if}
         {/if}
       </article>

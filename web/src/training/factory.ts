@@ -1,8 +1,27 @@
-import type { MinerReport, RequirementRow, StageFittingSelection } from "./types.ts";
+import type { MinerReport, RequirementRow, StageFittingSelection, QueueApplyOutcome } from "./types.ts";
 
 export type PlanMode = "FAST" | "BALANCED" | "MASTERY";
 export interface PilotPreferences { role: "MINER" | ""; mode: PlanMode }
 export interface FactoryStorage { getItem(key: string): string | null; setItem(key: string, value: string): void }
+export type LastQueueApply = Pick<QueueApplyOutcome, "mode" | "stage" | "status" | "at" | "added" | "attemptedAdditions" | "verified" | "code">;
+const applyKey = (account: string, id: number) => `goblin-factory:last-apply:v1:${account}:${id}`;
+export function rememberQueueApply(storage: FactoryStorage, account: string, id: number, outcome: QueueApplyOutcome): LastQueueApply {
+  const { mode, stage, status, at, added, attemptedAdditions, verified, code } = outcome;
+  const record = { mode, stage, status, at, added, attemptedAdditions, verified, code };
+  storage.setItem(applyKey(account, id), JSON.stringify(record));
+  return record;
+}
+export function readLastQueueApply(storage: FactoryStorage, account: string, id: number): LastQueueApply | null {
+  try {
+    const value = JSON.parse(storage.getItem(applyKey(account, id)) || "null");
+    return value && ["FAST", "BALANCED", "MASTERY"].includes(value.mode) && typeof value.stage === "string" &&
+      ["APPLIED", "REFUSED", "APPLY_UNVERIFIED"].includes(value.status) && typeof value.verified === "boolean" &&
+      Number.isFinite(value.at) ? value : null;
+  } catch { return null; }
+}
+export function skillTargetLabel(state: RequirementRow["state"]): string {
+  return state === "MISSING" ? "NEEDS TRAINING" : state;
+}
 export const factoryAccountsKey = "goblin-factory:accounts:v1";
 export function fittingConfigKey(account: string, characterID: number): string {
   // Compatibility contract: exactly the key and bare stage-map used by c15a514.

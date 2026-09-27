@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { fittingConfigKey, readSelections, saveSelections, readPilotPreferences, savePilotPreferences,
-  readFactoryAccounts, rememberFactoryAccount, factoryStatus, requirementCounts } from "./factory.ts";
-import type { MinerReport, RequirementRow } from "./types.ts";
+  readFactoryAccounts, rememberFactoryAccount, factoryStatus, requirementCounts, skillTargetLabel,
+  readLastQueueApply, rememberQueueApply } from "./factory.ts";
+import type { MinerReport, RequirementRow, QueueApplyOutcome } from "./types.ts";
 import { isGoblinFactoryPath } from "../app/pageRoute.ts";
 
 function storage() {
@@ -65,4 +66,20 @@ test("standalone route only matches its own direct path", () => {
   assert.equal(isGoblinFactoryPath("/goblin-factory/"), true);
   assert.equal(isGoblinFactoryPath("/"), false);
   assert.equal(isGoblinFactoryPath("/goblin-factory-other"), false);
+});
+
+test("NEEDS TRAINING is display-only and UNKNOWN remains distinct", () => {
+  assert.equal(skillTargetLabel("MISSING"), "NEEDS TRAINING");
+  for (const state of ["UNKNOWN", "TRAINED", "TRAINING", "QUEUED"] as const) assert.equal(skillTargetLabel(state), state);
+});
+test("last-apply persistence retains only compact audit metadata, never credentials or review handles", () => {
+  const local = storage();
+  const outcome = { mode: "FAST", stage: "PROCURER", status: "APPLIED", at: 1_800_000_000_000,
+    added: 3, attemptedAdditions: 3, verified: true, code: null, fresh: { token: "not-for-storage" },
+    reviewID: "not-for-storage", queue: { entries: [] }, message: "Verified" } as unknown as QueueApplyOutcome;
+  const record = rememberQueueApply(local, "BMiner9", 9, outcome);
+  assert.deepEqual(readLastQueueApply(local, "BMiner9", 9), record);
+  assert.equal(JSON.stringify(record).includes("not-for-storage"), false);
+  assert.equal(readLastQueueApply(local, "Other", 9), null);
+  assert.deepEqual(readSelections(local, "BMiner9", 9), {});
 });

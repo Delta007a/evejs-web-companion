@@ -201,12 +201,12 @@ function buildMinerReport(data, sheet, identity = {}, stageFittings = {}) {
   const previews = {};
   for (const mode of ["FAST", "BALANCED", "MASTERY"]) {
     if (mode !== "MASTERY" && !next) {
-      previews[mode] = { stage: null, targets: [], eta: { kind: "READY", remainingMs: 0 } };
+      previews[mode] = { stage: null, requirements: [], targets: [], eta: { kind: "READY", remainingMs: 0 } };
       continue;
     }
     const base = mode === "MASTERY" ? current : next;
     if (base.fitting.status !== "READY") {
-      previews[mode] = { stage: base.id, targets: [], eta: { kind: "UNKNOWN", reason: "Stage fitting is not accepted and readable." } };
+      previews[mode] = { stage: base.id, requirements: [], targets: [], eta: { kind: "UNKNOWN", reason: "Stage fitting is not accepted and readable." } };
       continue;
     }
     const targets = mode === "FAST"
@@ -219,6 +219,7 @@ function buildMinerReport(data, sheet, identity = {}, stageFittings = {}) {
     const all = requirements(targets, sheet, rows, data);
     previews[mode] = {
       stage: base.id,
+      requirements: all,
       targets: all.filter((row) => row.state !== "TRAINED"),
       eta: etaFor(targets, sheet, rows),
     };
@@ -236,4 +237,4 @@ function buildMinerReport(data, sheet, identity = {}, stageFittings = {}) {
   };
 }
 
-module.exports = { STAGES, SUPPORT_POLICY_VERSION, mergeTargets, dogmaEdges, prerequisiteClosure, closeSkillTargets, targetState, qualification, etaFor, buildMinerReport };
+module.exports = { STAGES, SUPPORT_POLICY_VERSION, mergeTargets, dogmaEdges, prerequisiteClosure, closeSkillTargets, readSkillState, targetState, qualification, etaFor, buildMinerReport };

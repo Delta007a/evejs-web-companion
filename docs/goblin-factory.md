@@ -1,4 +1,4 @@
-# Goblin Factory (read-only)
+# Goblin Factory
 
 ## Entry and authority
 
@@ -25,6 +25,9 @@ are hints only; failed refreshes clear previous qualification results.
   `corpFittingMgr.GetFittings` and gateway `/skills`. Membership is checked again
   after the fitting read. No broad `/snapshot`, selected bridge session, session
   claim, or gameplay-control acquisition is needed.
+- `POST /api/pilot-training/queue/review`: read-only, authoritative append review.
+- `POST /api/pilot-training/queue/apply`: explicit, confirmed, one-shot application
+  of an account-bound review. It cannot accept a browser-authored replacement queue.
 
 Training endpoints use the same auth verification with session/cookie cleanup
 disabled: expired or rejected discovery credentials cannot release a held cockpit.
@@ -51,6 +54,9 @@ New local preferences:
 - `goblin-factory:pilot:v1:<account>:<characterID>`: explicit role (`MINER` or
   unassigned) and preview mode (`FAST`, `BALANCED`, `MASTERY`).
 - `goblin-factory:accounts:v1`: accounts explicitly added on this page.
+- `goblin-factory:last-apply:v1:<account>:<characterID>`: compact last-attempt
+  mode/stage, timestamp, status, added count and verification result. No tokens,
+  review handles, full skill sheets or queues are persisted in this audit record.
 
 Existing fitting selections do not automatically assign a role. Select MINER once
 for each pilot. Account prefixes never assign roles. Malformed local configuration
@@ -73,14 +79,16 @@ unreadable fittings cannot qualify a stage. Support policy remains independent.
 The highest independently READY stage is displayed, even if an earlier stage's
 fitting is unavailable. Each stage retains its own status; this does not qualify
 the earlier stage. FAST/BALANCED target the next stage, MASTERY the current stage.
-No queue writes or automatic progression occur.
+Only an explicit reviewed Apply changes the queue. There is no automatic progression.
 
-Target rows distinguish trained level from target level. `MISSING` means the
+Target rows distinguish trained level from target level. Internal `MISSING` is
+displayed as **NEEDS TRAINING** and means the
 target level is neither trained nor queued; a lower level may already be trained.
 Unreadable skill input remains UNKNOWN. The historical Mining Drone Operation I
 observation cannot be conclusively explained from source: no deterministic ID or
 normalization defect was found. Tests protect trained-I versus target-II semantics,
-but do not claim to reproduce that historical pilot's snapshot.
+but do not claim to reproduce that historical pilot's snapshot. The later BMiner9
+observation is consistent with an absent skill appearing only in Support/Mastery.
 
 ETA continues to consume effective server queue completion timestamps, including
 configured runtime speed. Uncovered arbitrary plans remain UNKNOWN; there is no
@@ -109,12 +117,99 @@ shown separately; an active queue need not cover the selected plan.
    acceptance changes local configuration only. Review any naturally changed saved
    fitting after refresh; do not mutate gameplay data merely to run this check.
 7. In browser Network tools, confirm Factory interaction uses only its login,
-   roster and training endpoints. No select, snapshot, bot-host or queue-write
-   requests should originate from the Factory tab.
+   roster and training endpoints. No select, snapshot or bot-host requests should
+   originate from the Factory tab. Queue Apply occurs only after its explicit button.
 8. If another cockpit is already open, verify its selected pilot and account stay
    unchanged while Factory reads other accounts. No gameplay launch is needed.
 
-Before future queue writes, separately verify live sheet normalization for the
-historical pilot, queue prerequisite/injection validation, effective runtime ETA,
-account training-slot limits, concurrent bot/browser ownership, and authoritative
-readback/error handling. None of those write paths are enabled by this change.
+## Reviewed queue append
+
+Authority in the inspected EveJS 0.12.9 Beta runtime:
+
+- `server/src/_secondary/express/evejsWebGateway.js`: account-owned GET `/skills`,
+  GET `/character-status`, POST `/skill-queue` under `/_evejs-web/v1`.
+- `evejsWebGatewayRuntime.js`: `buildSkillSheet`, `getCharacterControlStatus`,
+  `normalizeSkillQueueCommandPayload`, `submitSkillQueueSaveCommand`.
+- `server/src/services/online/characterCommandRuntime.js`: strict envelope,
+  per-character command lane, offline authorization and expected-state-version check.
+- `server/src/services/skills/training/skillQueueRuntime.js`: `validateQueueEntries`,
+  `saveQueue`, `getQueueSnapshot` and `getSkillRecordForProjection`.
+
+Two Luna 6 high-reasoning agents audited authority/concurrency and ordering/injection
+read-only. Root checked source independently and resolved two misleading phrases
+in the authority audit: `/character-status` exposes flat fields, not a nested
+`control` object; validation requires each consecutive level, not a jump to a
+multi-level target. No runtime source was changed or executed during the audit.
+
+### Merge and confirmation
+
+The runtime queue is ordered `{typeID, toLevel}` rows. Its validator requires
+exactly the next level based on trained levels plus preceding queued rows.
+Trained I with queued II and target III appends only III. Partial SP never counts
+as a completed level. Factory previews are alphabetical display rows; the append
+planner separately walks authoritative dogma prerequisites in dependency-first
+order and expands consecutive missing levels. The existing queue remains an exact
+prefix, including unrelated skills. No deletion, reordering or partial plan save.
+
+Review shows the existing queue, ALREADY_TRAINED / ALREADY_QUEUED / WILL_APPEND /
+BLOCKED / UNKNOWN coverage, exact additions and activation behavior. A nonempty
+paused queue stays paused; an empty queue starts training, explicitly shown before
+Apply. The current stage and mode are pinned: a Pioneer MASTERY review cannot
+silently become Procurer. Current accepted fitting, skill and queue authority are
+required. Missing injected skills return SKILLBOOK_REQUIRED (runtime equivalent:
+QueueSkillNotUploaded); nothing purchases or injects a book.
+
+Capacity comes from the skill sheet's `queue.maxEntries` (currently 150). Complete
+overflow blocks before submission. Clone restrictions, the 10-year duration limit,
+Alpha SP caps and account training slots remain authoritative save-time validation;
+the current read API does not expose enough data for full preflight of those rules.
+They refuse the complete save rather than applying a partial plan. Preserving the
+head and active state avoids the normal pre-validation active-skill rebase path.
+
+### Concurrency and verification
+
+The BFF keeps at most 100 review records, expiring after five minutes, tied to the
+authenticated account and exact character. Refresh/F5/mode/fit changes discard
+the browser review; no Apply is replayed. Applying consumes the handle immediately.
+
+Both review and Apply read control/version, live fitting+skills/queue, then control/
+version again. Apply compares the reviewed version, trained levels, complete queue
+and training instants, and the selected plan/fitting fingerprint. Any drift refuses
+with QUEUE_CHANGED / PLAN_CHANGED / REVIEW_REQUIRED. It never recomputes and saves
+a new unreviewed delta. The outgoing command has server-owned IDs, type
+`offline.skill_queue.save`, `expectedStateVersion`, and `{entries, activate}`.
+The gateway checks ownership and rechecks version/offline control inside its lane.
+Online retail/browser/bot-controlled pilots are refused, never released or claimed.
+
+**Authority limitation:** this is a command/control revision, not an atomic queue
+CAS. Direct administrative `saveQueue` calls and natural completion do not advance
+it. Fresh queue/level comparison detects changes before submission; runtime
+validation rejects obsolete completed rows and control transitions protect normal
+retail edits. An unversioned administrative edit in the final read-to-write interval
+cannot be excluded without a runtime enhancement. Avoid those administrative edits
+during Apply. No claim of universal atomic queue concurrency is made.
+
+After POST, the BFF always rereads `/skills`, even after a failed acknowledgement.
+It verifies the complete merged queue and active state, allowing only a leading
+prefix proven trained by natural completion; an unchanged active head must retain
+its start instant. The fresh queue is returned even if fitting/report refresh fails.
+HTTP 200 alone cannot produce success. Mismatched/unreadable confirmation and
+ambiguous transport errors are APPLY_UNVERIFIED. No rollback or automatic retry.
+Runtime refusals retain their codes. A subsequent fresh review produces Nothing
+to add when the plan is already covered. ETA uses the existing effective server
+queue timestamps, including configured x50 behavior, without a copied rate formula.
+
+### Short BMiner9 QA (operator only)
+
+1. Open `/goblin-factory`, find BMiner9, select MINER. Confirm the expected baseline:
+   PIONEER proven, next PROCURER, Procurer NOT_READY. Keep this pilot offline.
+2. Expand its current queue and record its entries/order. Choose FAST; press
+   **Review FAST append → PROCURER**. Check injected-skill blockers and exact delta.
+3. Only if the review is acceptable, press **Apply FAST plan → PROCURER**. Confirm
+   APPLIED / Verified yes and that old entries remain the unchanged prefix.
+4. F5. Confirm the queue persists, targets are QUEUED/TRAINING as appropriate,
+   accepted fits remain, and last-apply metadata persists. Review FAST again:
+   already-covered targets should say Nothing to add, with no further submission.
+5. Test BALANCED only after FAST is proven. Leave MASTERY's deliberate level-V
+   targets for a later conscious test. If a book is missing, stop at the refusal;
+   buying/injecting it is outside this feature.

@@ -56,6 +56,7 @@ export interface CorporationSavedFitting {
 }
 
 export interface MinerTrainingRead {
+  readonly queue?: TrainingQueue | null;
   readonly report: MinerReport;
   readonly corporationID: number;
   readonly fittings: readonly CorporationSavedFitting[];
@@ -67,6 +68,7 @@ export type PlanEta =
   | { readonly kind: "UNKNOWN"; readonly reason: string };
 
 export interface PlanPreview {
+  readonly requirements?: readonly RequirementRow[];
   readonly stage: string | null;
   readonly targets: readonly RequirementRow[];
   readonly eta: PlanEta;
@@ -89,4 +91,40 @@ export interface TrainingCharacter {
   readonly name: string;
   readonly corporationID?: number | null;
   readonly corporationName?: string | null;
+}
+
+export interface QueueItem { readonly typeID: number; readonly toLevel: number; readonly name?: string }
+export interface TrainingQueue {
+  readonly active: boolean;
+  readonly maxEntries: number;
+  readonly entries: readonly (QueueItem & { readonly startTimeMs?: number | null; readonly endTimeMs?: number | null })[];
+}
+export interface QueueReview {
+  readonly mode: "FAST" | "BALANCED" | "MASTERY";
+  readonly stage: string | null;
+  readonly reviewID: string | null;
+  readonly expiresAt: number;
+  readonly canApply: boolean;
+  readonly status: "REVIEW_READY" | "BLOCKED" | "NOTHING_TO_ADD";
+  readonly activate: boolean;
+  readonly maxEntries: number | null;
+  readonly existing: readonly QueueItem[];
+  readonly additions: readonly QueueItem[];
+  readonly requirements: readonly (RequirementRow & { readonly reviewState: "ALREADY_TRAINED" | "ALREADY_QUEUED" | "WILL_APPEND" | "BLOCKED" | "UNKNOWN" })[];
+  readonly blockers: readonly { readonly code: string; readonly message: string; readonly typeID: number | null }[];
+  readonly queue: TrainingQueue | null;
+  readonly fresh: MinerTrainingRead;
+}
+export interface QueueApplyOutcome {
+  readonly status: "APPLIED" | "REFUSED" | "APPLY_UNVERIFIED";
+  readonly verified: boolean;
+  readonly mode: "FAST" | "BALANCED" | "MASTERY";
+  readonly stage: string;
+  readonly at: number;
+  readonly added: number | null;
+  readonly attemptedAdditions: number;
+  readonly code: string | null;
+  readonly message: string;
+  readonly fresh: MinerTrainingRead | null;
+  readonly queue: TrainingQueue | null;
 }

@@ -13,8 +13,8 @@ const eveStore = require("./eveStore");
 const eveGatewayClient = require("./eveGatewayClient");
 const webAuth = require("./webAuth");
 const staticDataModule = require("./staticData");
-const pilotTraining = require("./pilotTraining");
-const pilotTrainingFittings = require("./pilotTrainingFittings");
+const { readMinerPilot } = require("./pilotTrainingRead");
+const { createTrainingQueueService } = require("./pilotTrainingQueue");
 const config = require("./config");
 const botScriptStoreModule = require("./botScriptStore");
 const botHostModule = require("./botHost");
@@ -61,6 +61,7 @@ const store = options.eveStore || eveStore;
 const gateway = options.eveGatewayClient || eveGatewayClient;
 const auth = options.webAuth || webAuth;
 const staticData = options.staticData || staticDataModule;
+const trainingQueues = createTrainingQueueService({ store, gateway, data: staticData });
 // The player Bot Builder library — web-app data in data/bot-scripts.json, keyed
 // PLATFORM-WIDE (every account sees every saved bot). Never eve.js's store; this
 // is our own JSON file.
@@ -18399,17 +18400,6 @@ app.get("/api/pilot-training/miner", requireTrainingAuth, async (req, res, next)
     return;
   }
   try {
-    const library = await pilotTrainingFittings.readAccountCorpFittings({
-      store, gateway, accountID: req.account.accountID, characterID, data: staticData,
-    });
-    if (library.status === "NOT_OWNED") {
-      res.status(404).json({ ok: false, error: "CHARACTER_NOT_FOUND" });
-      return;
-    }
-    if (library.status !== "READY") {
-      res.status(503).json({ ok: false, error: "CORPORATION_FITTINGS_UNAVAILABLE" });
-      return;
-    }
     let selections = {};
     if (req.query.selections !== undefined) {
       try {
@@ -18422,34 +18412,22 @@ app.get("/api/pilot-training/miner", requireTrainingAuth, async (req, res, next)
         return;
       }
     }
-    const stageFittings = pilotTrainingFittings.resolveStageFittings(
-      pilotTraining.STAGES, library.fittings, selections, library.corporationID,
-    );
-    const sheet = await gateway.getSkills(req.account.accountID, characterID);
-    if (!sheet) {
-      res.status(503).json({ ok: false, error: "SKILL_STATE_UNAVAILABLE" });
-      return;
-    }
-    let report;
-    try {
-      report = pilotTraining.buildMinerReport(staticData, sheet, {
-        characterID, name: library.character.characterName, account: req.account.username,
-      }, stageFittings);
-    } catch (error) {
-      res.status(503).json({ ok: false, error: "STATIC_SKILL_DATA_UNAVAILABLE", message: error.message });
-      return;
-    }
-    res.json({ ok: true, report, corporationID: library.corporationID,
-      fittings: library.fittings.map((fitting) => ({
-        fittingID: fitting.fittingID, ownerID: fitting.ownerID || library.corporationID,
-        shipTypeID: fitting.shipTypeID || null, name: fitting.name || "Invalid fitting",
-        savedDate: fitting.savedDate || null, fingerprint: fitting.fingerprint || null,
-        items: fitting.items || [], invalid: fitting.invalid === true,
-        reason: fitting.reason || null,
-      })) });
+    const { read } = await readMinerPilot({ store, gateway, data: staticData, account: req.account, characterID, selections });
+    res.json({ ok: true, ...read });
   } catch (error) {
     next(error);
   }
+});
+
+// A review is read-only. Apply accepts only its account-bound, one-shot review;
+// browser-supplied queue entries or account IDs are never dispatched.
+app.post("/api/pilot-training/queue/review", requireTrainingAuth, async (req, res, next) => {
+  try { res.json({ ok: true, review: await trainingQueues.review(req.account, req.body || {}) }); }
+  catch (error) { next(error); }
+});
+app.post("/api/pilot-training/queue/apply", requireTrainingAuth, async (req, res, next) => {
+  try { res.json({ ok: true, outcome: await trainingQueues.apply(req.account, req.body || {}) }); }
+  catch (error) { next(error); }
 });
 
 app.get("/api/bridge/skills", requireAuth, async (req, res, next) => {

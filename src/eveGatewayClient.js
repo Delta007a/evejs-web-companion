@@ -327,6 +327,16 @@ async function getSkills(accountID, characterID) {
   return result.skills || null;
 }
 
+// Offline companion commands: no selected bridge session or control claim.
+async function getCharacterStatus(accountID, characterID) {
+  return getJson("/character-status", { accountID, characterID }, { timeoutMs: OWNER_CALL_TIMEOUT_MS });
+}
+
+async function saveOfflineSkillQueue(accountID, characterID, command) {
+  // Exactly once. A timeout is ambiguous and must be verified, never retried blindly.
+  return postJson("/skill-queue", { accountID, characterID, command }, { timeoutMs: OWNER_CALL_TIMEOUT_MS });
+}
+
 // Bridge reads can be heavy on a cold gateway: map.GetStationInfo marshals the
 // whole station table and lazily loads a multi-MB world store on first touch,
 // and GetCharacterSelectionData computes per-character skill totals. They ride
@@ -793,4 +803,6 @@ module.exports = {
   getGatewayHealth,
   // R28: the skill sheet + queue, resolved server-side (see getSkills above).
   getSkills,
+  getCharacterStatus,
+  saveOfflineSkillQueue,
 };

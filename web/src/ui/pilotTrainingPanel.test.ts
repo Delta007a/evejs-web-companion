@@ -44,7 +44,7 @@ test("stage details render review identity, skill distinctions and only the sele
   const html = render(MinerQualification, { props: { result, selections, mode: "MASTERY", busy: false,
     onSelect() {}, onAccept() {} } }).body;
   for (const text of ["REVIEW_REQUIRED", "old-fingerprint", "new-fingerprint", "old-date", "new-date",
-    "Accept current fitting", "Mining Drone Operation", "MISSING", "MASTERY preview", "Equipment: UNKNOWN", "98000001 / 7"]) assert.ok(html.includes(text), text);
+    "Accept current fitting", "Mining Drone Operation", "NEEDS TRAINING", "MASTERY preview", "Equipment: UNKNOWN", "98000001 / 7"]) assert.ok(html.includes(text), text);
   assert.doesNotMatch(html, /Wrong hull|FAST preview|BALANCED preview/);
 });
 

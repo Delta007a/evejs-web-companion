@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFactoryAccount, readFactoryPilot } from "./factoryClient.ts";
 import { setSessionToken, getSessionToken, setSessionTokenStorage } from "../app/sessionToken.ts";
+import { reviewTrainingQueue, applyTrainingQueue } from "../app/api.ts";
 
 test("roster and qualification use isolated account tokens and only control-plane routes", async () => {
   setSessionTokenStorage(null);
@@ -34,6 +35,24 @@ test("roster and qualification use isolated account tokens and only control-plan
     assert.equal(getSessionToken(), "cockpit-token");
     assert.deepEqual(calls.map((call) => call.method), ["POST", "GET", "POST", "GET", "GET", "GET"]);
   } finally { setSessionToken(null); }
+});
+
+test("review is separate from explicit confirmed Apply and keeps the account token", async () => {
+  const calls: { path: string; body: unknown }[] = [];
+  const transport: typeof fetch = async (input, init) => {
+    const path = String(input);
+    assert.equal(new Headers(init?.headers).get("authorization"), "Bearer owner");
+    calls.push({ path, body: JSON.parse(String(init?.body)) });
+    return path.endsWith("/review") ? Response.json({ ok: true, review: { additions: [], blockers: [],
+      reviewID: "review-one", fresh: { report: { pilot: { characterID: 9 } } } } })
+      : Response.json({ ok: true, outcome: { status: "APPLIED", verified: true } });
+  };
+  const options = { token: "owner", fetch: transport };
+  await reviewTrainingQueue({ role: "MINER", characterID: 9, mode: "FAST", stage: "PROCURER", displayedTargets: [], selections: {} }, options);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.path, "/api/pilot-training/queue/review");
+  await applyTrainingQueue("review-one", options);
+  assert.deepEqual(calls[1], { path: "/api/pilot-training/queue/apply", body: { reviewID: "review-one", confirm: true } });
 });
 
 test("mismatched account identity and failed qualification reads reject instead of returning stale data", async () => {
