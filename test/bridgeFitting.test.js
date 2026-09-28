@@ -338,6 +338,18 @@ test("a fitting read with no active ship answers cleanly rather than failing", a
         session: { ...SELECT_SESSION_ECHO, shipID: null },
       };
     },
+    async readFlightStatus() {
+      return {
+        flight: {
+          docked: true,
+          inSpace: false,
+          stationID: STATION_ID,
+          solarSystemID: 30000142,
+          shipID: null,
+        },
+        notifications: [],
+      };
+    },
   });
   const { baseUrl } = await startTestServer({ gateway });
   await selectOnServer(baseUrl);

@@ -150,6 +150,7 @@ export type FeedEvent =
     }
   // Docked station-panel reads on the live session.
   | { readonly type: "station/bits"; readonly bits: StationServiceBits }
+  | { readonly type: "station/structure-services"; readonly serviceIDs: readonly number[] | null }
   | { readonly type: "station/guests"; readonly guests: readonly StationGuest[] }
   // map.GetStationInfo answered with its retail CachedMethodCallResult
   // envelope (the rowset itself rides the retail object cache).

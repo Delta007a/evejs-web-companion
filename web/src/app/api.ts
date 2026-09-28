@@ -1964,6 +1964,13 @@ export interface MiningOperationDefinition {
     readonly stationName: string;
     readonly systemName?: string;
     readonly corporationDivision: number;
+  } | {
+    readonly kind: "structure";
+    readonly id: number;
+    readonly name: string;
+    readonly solarSystemID: number;
+    readonly solarSystemName: string | null;
+    readonly corporationDivision: number;
   } | null;
   readonly members: readonly MiningOperationMemberDefinition[];
   readonly createdAt?: string;
@@ -3234,11 +3241,13 @@ export async function unloadMiningHolds(
   itemIDs: readonly number[],
   options: ApiOptions = {},
   division: number | null = null,
+  strictCorp = false,
 ): Promise<UnloadResult> {
   const body: Record<string, JsonValue> = { itemIDs: [...itemIDs] };
   if (division !== null) {
     body.division = division;
   }
+  if (strictCorp) body.strictCorp = true;
   const data = await postJson("/api/bridge/ship/ore-hold/unload", body, options);
   return {
     requested: readIDArray(data.requested) ?? [],
@@ -3458,6 +3467,17 @@ export async function resolveAccessibleStructure(id: number, options: ApiOptions
   }
   return { kind: "structure", id, name: row.name, solarSystemID,
     solarSystemName: typeof row.solarSystemName === "string" ? row.solarSystemName : null };
+}
+
+/** Service IDs are current, access-scoped authority; a failed read must not
+ * be interpreted as a structure with no services. */
+export async function readAccessibleStructureServices(id: number, options: ApiOptions = {}, characterID?: number): Promise<readonly number[]> {
+  const data = await getJson(`/api/dockable-structures/${id}/services${characterID ? `?characterID=${characterID}` : ""}`, options);
+  if (asNumberOrNull(data.structureID) !== id || !Array.isArray(data.serviceIDs) ||
+      data.serviceIDs.some((value) => !Number.isSafeInteger(value) || value <= 0)) {
+    throw new Error("Structure service authority is unreadable.");
+  }
+  return data.serviceIDs as number[];
 }
 
 export async function listDockableAccessPilots(options: ApiOptions = {}): Promise<readonly { characterID: number; characterName: string }[]> {

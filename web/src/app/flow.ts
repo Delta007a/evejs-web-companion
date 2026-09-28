@@ -1954,9 +1954,29 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   async function refreshStationPanel(): Promise<void> {
-    // Station services and the static station catalog do not describe a player
-    // structure. Inventory has its own docked-location read below.
-    if (store.station.get().online?.structureID) return;
+    const structureID = store.station.get().online?.structureID;
+    if (structureID) {
+      try {
+        const serviceIDs = await api.readAccessibleStructureServices(structureID, callOptions);
+        // A relocation during the read must never install the old location's
+        // capabilities on the newly selected docked context.
+        if (store.station.get().online?.structureID === structureID) {
+          store.apply({ type: "station/structure-services", serviceIDs });
+          store.apply({ type: "station/read-error", message: null });
+        }
+      } catch (error) {
+        if (isSessionLost(error)) {
+          stopLiveStream();
+          store.apply({ type: "character/offline" });
+          throw error;
+        }
+        if (store.station.get().online?.structureID === structureID) {
+          store.apply({ type: "station/structure-services", serviceIDs: null });
+          store.apply({ type: "station/read-error", message: `Structure services are unreadable: ${errorWords(error)}` });
+        }
+      }
+      return;
+    }
     // Retail issues these when the docked UI loads; the page issues them after
     // select succeeds (push forwarding is a later goal, G6). The three reads
     // are INDEPENDENT: a slow or failed map.GetStationInfo (the heavy
@@ -4075,7 +4095,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     store.apply({ type: "station/relocated", stationID: kind === "station" ? locationID : null,
       structureID: kind === "structure" ? locationID : null, solarSystemID, station });
 
-    if (kind === "station") await refreshStationPanel();
+    await refreshStationPanel();
     if (kind === "station" && store.agents.get().loaded) {
       await loadAgents();
     }
@@ -10143,7 +10163,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           if (macro === "haul-all" || macro === "route-hauler") {
             try {
               const corp = await api.loadCorpHangar(callOptions);
-              if (corp.available && corp.stationID === status.stationID) {
+              if (corp.available && corp.stationID === (status.structureID ?? status.stationID)) {
                 haulDivisions = Object.fromEntries(corp.divisions.map(d => [d.division,
                   d.error !== null || d.list === null ? null : decodeInventoryRows(d.list, d.volumes)]));
               }
@@ -10544,6 +10564,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
                 action.itemIDs,
                 callOptions,
                 action.division ?? null,
+                action.strictCorp === true,
               );
               const moved = result.moved ?? null;
               if (moved !== null && moved.length === 0) {
@@ -11553,7 +11574,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       // R10: the session is live, so open the push channel before the docked
       // reads — anything the reads trigger is then already being observed.
       startLiveStream();
-      if (!result.character.structureID) await refreshStationPanel();
+      await refreshStationPanel();
       void retryDroneRecovery();
     },
 

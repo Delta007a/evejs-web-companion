@@ -193,6 +193,9 @@ test("dockable search and Training Home expose only access-scoped structure iden
     if (method === "GetMyDockableStructures" || method === "CheckMyDockingAccessToStructures") {
       return { result: { type: "list", items: ids }, notifications: [] };
     }
+    if (method === "GetMyAccessibleStructureServices") {
+      return { result: { type: "list", items: allowed && args[0] === owned ? [1, 2, 3, 8] : [] }, notifications: [] };
+    }
     if (method === "GetStructureInfo") {
       assert.equal(args[0], owned, "unlisted foreign structure must not reach identity authority");
       return { result: { type: "object", name: "util.KeyVal", args: { type: "dict", entries: [
@@ -208,6 +211,8 @@ test("dockable search and Training Home expose only access-scoped structure iden
   assert.deepEqual(found.payload.matches, [{ id: owned, kind: "structure", name: "My Astrahus",
     solarSystemID: SESSION_SYSTEM_ID, solarSystemName: "Jita" }]);
   assert.deepEqual(gateway.calls.call.find(call => call.method === "GetMyDockableStructures").args, [0]);
+  const services = await apiRequest(baseUrl, `/api/dockable-structures/${owned}/services`);
+  assert.deepEqual(services.payload.serviceIDs, [1, 2, 3, 8]);
   const home = await apiRequest(baseUrl, `/api/pilot-training/home?locationID=${owned}`);
   assert.equal(home.response.status, 200);
   assert.deepEqual(home.payload.home, { locationID: owned, name: "My Astrahus", systemID: SESSION_SYSTEM_ID,
@@ -216,6 +221,8 @@ test("dockable search and Training Home expose only access-scoped structure iden
   const denied = await apiRequest(baseUrl, `/api/dockable-structures/${owned}`);
   assert.equal(denied.response.status, 409);
   assert.equal(denied.payload.error, "STRUCTURE_DOCK_ACCESS_DENIED");
+  const lostServices = await apiRequest(baseUrl, `/api/dockable-structures/${owned}/services`);
+  assert.deepEqual(lostServices.payload.serviceIDs, [], "lost access exposes no service state");
   const foreignRead = await apiRequest(baseUrl, `/api/dockable-structures/${foreign}`);
   assert.equal(foreignRead.response.status, 409);
   assert.ok(gateway.calls.call.every(call => !["GetStructures", "GetMyCharacterStructures"].includes(call.method)));

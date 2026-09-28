@@ -932,7 +932,9 @@ test("generic travel and personal delivery distinguish structure arrival from NP
   const delivery: MacroStep = { ...step, macro: "deliver-ore" };
   assert.equal(deliver(delivery, obs({ flightStatus: flight({ docked: true, stationID: null, structureID: id }), holds: [] }), {}, {}).outcome.kind, "done");
   const corporate: MacroStep = { ...delivery, args: { ...delivery.args, into: { kind: "corpDivision", division: 1, name: null } } };
-  assert.equal(deliver(corporate, obs({ flightStatus: flight({ docked: true, stationID: null, structureID: id }) }), {}, {}).outcome.kind, "blocked");
+  const withOre: MiningHold[] = [{ key: "ore", label: "Ore Hold", items: [{ itemID: 8, typeID: 1230, groupID: 462, categoryID: 25, quantity: 1 }], capacity: null, present: true, error: null }];
+  assert.deepEqual(deliver(corporate, obs({ flightStatus: flight({ docked: true, stationID: null, structureID: id }), holds: withOre }), {}, {}).action,
+    { kind: "unloadOre", itemIDs: [8], division: 1, strictCorp: true });
 });
 
 // ── travel-to-system ─────────────────────────────────────────────────────────

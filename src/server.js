@@ -1393,7 +1393,7 @@ app.get("/api/bridge/inventory", requireAuth, async (req, res, next) => {
 
     res.json({
       ok: true,
-      stationID: held.stationID,
+      stationID: held.dockedLocationID,
       activeShipID: shipID,
       hangar: {
         list: settledValue(hangarList),
@@ -2465,6 +2465,26 @@ function decodeInventoryRows(result) {
   return rows;
 }
 
+function decodeInventoryRowsStrict(result) {
+  let listValue = result;
+  if (listValue?.type === "objectex1" && Array.isArray(listValue.header)) {
+    if (listValue.header[0]?.value !== "__builtin__.set" || !Array.isArray(listValue.header[1])) {
+      throw Object.assign(new Error("Inventory authority returned an unreadable set."), { code: "INVENTORY_UNREADABLE", statusCode: 503 });
+    }
+    listValue = listValue.header[1][0] ?? null;
+  } else if (listValue?.type === "object" && Array.isArray(listValue.args)) {
+    listValue = listValue.args[0] ?? null;
+  }
+  if (listValue?.type !== "list" || !Array.isArray(listValue.items) ||
+      listValue.items.some((item) => {
+        const fields = item?.type === "packedrow" ? item.fields : item;
+        return !fields || typeof fields !== "object" || !Number.isSafeInteger(Number(fields.itemID)) || Number(fields.itemID) <= 0;
+      })) {
+    throw Object.assign(new Error("Inventory authority returned unreadable rows."), { code: "INVENTORY_UNREADABLE", statusCode: 503 });
+  }
+  return decodeInventoryRows(result);
+}
+
 // Decode officeManager.GetMyCorporationsOffices (a CRowset: objectex2 whose
 // `list` holds packedrows).
 function decodeOfficeRows(result) {
@@ -2516,6 +2536,11 @@ function decodeDivisionNames(result) {
  * from the LISTED ROW's own locationID instead of assuming.
  */
 async function readCorpOffice(held, webSessionID) {
+  if (held.structureID) {
+    const services = await heldTopLevelCall(held, webSessionID, "structureDirectory",
+      "GetMyAccessibleStructureServices", [held.structureID], null);
+    if (!structureIDsFromList(services.result).includes(3)) return 0;
+  }
   const offices = await readCorpOffices(held, webSessionID);
   const here = offices.find((office) => office.stationID === held.dockedLocationID);
   return here ? here.officeID : 0;
@@ -3102,7 +3127,7 @@ app.get("/api/bridge/inventory/corp", requireAuth, async (req, res, next) => {
     res.json({
       ok: true,
       available: true,
-      stationID: held.stationID,
+      stationID: held.dockedLocationID,
       divisions: ordinals.map((division, index) => {
         const settled = settledLists[index];
         return {
@@ -3356,7 +3381,7 @@ app.get("/api/bridge/fitting", requireAuth, async (req, res, next) => {
     res.json({
       ok: true,
       activeShipID: shipID,
-      stationID: held.stationID,
+      stationID: held.dockedLocationID,
       slots: settledValue(slots),
       shipInfo: settledValue(shipInfo),
       online: settledValue(online),
@@ -3699,7 +3724,7 @@ app.get("/api/bridge/industry", requireAuth, async (req, res, next) => {
     res.json({
       ok: true,
       ownerID,
-      stationID: held.stationID,
+      stationID: held.dockedLocationID,
       solarSystemID: held.solarSystemID ?? null,
       blueprints: { result: settledValue(blueprints), error: settledCode(blueprints) },
       jobs: { result: settledValue(jobs), error: settledCode(jobs) },
@@ -4264,7 +4289,7 @@ app.get("/api/bridge/market", requireAuth, async (req, res, next) => {
       ok: true,
       typeID: typeID > 0 ? typeID : null,
       characterID: held.characterID,
-      stationID: held.stationID,
+      stationID: held.dockedLocationID,
       solarSystemID: held.solarSystemID ?? null,
       book: { result: valueOf(book), error: codeOf(book) },
       ownOrders: { result: valueOf(ownOrders), error: codeOf(ownOrders) },
@@ -4526,7 +4551,7 @@ app.post("/api/bridge/market/buy", requireAuth, async (req, res, next) => {
       "marketProxy",
       "PlaceBuyOrder",
       [
-        held.stationID,
+        inventoryLocationID(held),
         typeID,
         price,
         quantity,
@@ -4633,7 +4658,7 @@ app.post("/api/bridge/market/sell", requireAuth, async (req, res, next) => {
       "marketProxy",
       "PlaceMultiSellOrder",
       [
-        [{ itemID, typeID, stationID: held.stationID, price, quantity }],
+        [{ itemID, typeID, stationID: inventoryLocationID(held), price, quantity }],
         false,
         durationDays,
         // Same reasoning as the buy route: a rate we cannot know is not asserted.
@@ -4779,7 +4804,7 @@ app.post("/api/bridge/market/modify", requireAuth, async (req, res, next) => {
         // Everything from here down is re-derived server-side. Sent for shape
         // fidelity only — see the note above.
         Boolean(body.bid),
-        held.stationID,
+        inventoryLocationID(held),
         held.solarSystemID || 0,
         roundMarketPrice(body.oldPrice),
         Number(body.range) || MARKET_RANGE_STATION,
@@ -14045,7 +14070,7 @@ app.get("/api/bridge/contract-items", requireAuth, async (req, res, next) => {
   if (!held) {
     return;
   }
-  const stationID = Number(held.stationID) || 0;
+  const stationID = Number(held.dockedLocationID) || 0;
   const locationID = nonNegativeIntQuery(req.query.locationID, stationID);
   const containerID = nonNegativeIntQuery(req.query.containerID, 0);
   const itemID = nonNegativeIntQuery(req.query.itemID, 0);
@@ -14292,6 +14317,39 @@ app.get("/api/bridge/structures", requireAuth, async (req, res, next) => {
   }
 });
 
+// Rent the session corporation's office at the structure where this pilot is
+// docked. The runtime checks the pilot's corporation role, structure access,
+// office service and wallet settlement. Never accept an arbitrary destination
+// ID from the browser, and reread the office before reporting success.
+app.post("/api/bridge/corp-office/rent-at-structure", requireAuth, async (req, res, next) => {
+  if (!requireWriteConfirmation(req, res, "Rent a corporation office at this structure and pay its rental cost?")) return;
+  const held = requireHeldBridgeSession(req, res);
+  if (!held) return;
+  try {
+    const flight = await readHeldFlight(held, req.webSessionID);
+    if (!held.structureID || !flight.flight?.docked || Number(flight.flight.structureID) !== held.structureID) {
+      res.status(409).json({ ok: false, error: "NOT_DOCKED_IN_STRUCTURE" });
+      return;
+    }
+    const services = await heldTopLevelCall(held, req.webSessionID, "structureDirectory",
+      "GetMyAccessibleStructureServices", [held.structureID], null);
+    if (!structureIDsFromList(services.result).includes(3)) {
+      res.status(409).json({ ok: false, error: "STRUCTURE_OFFICE_SERVICE_UNAVAILABLE" });
+      return;
+    }
+    let officeID = await readCorpOffice(held, req.webSessionID);
+    if (!officeID) {
+      await heldTopLevelCall(held, req.webSessionID, "officeManager", "RentOffice", [], null);
+      officeID = await readCorpOffice(held, req.webSessionID);
+    }
+    if (!officeID) {
+      res.status(409).json({ ok: false, error: "CORP_OFFICE_RENT_UNCONFIRMED" });
+      return;
+    }
+    res.json({ ok: true, structureID: held.structureID, officeID });
+  } catch (error) { next(error); }
+});
+
 // A dockable structure search is deliberately narrower than the structure
 // directory: only IDs returned by the character-scoped access authority may
 // reach the name resolver. The explicit zero asks the WC runtime extension for
@@ -14387,6 +14445,20 @@ app.get("/api/dockable-structures/:id", requireAuth, async (req, res, next) => {
     }
     res.json({ ok: true, location: { kind: "structure", id, name: record.name, solarSystemID: record.solarSystemID,
       solarSystemName: staticData.getSolarSystemName(record.solarSystemID) } });
+  } catch (error) { next(error); }
+});
+
+// Return only services this pilot can currently use at an accessible
+// structure. The runtime read is access-scoped and contains no operational
+// structure fields. An unreadable response is an error, never an empty set.
+app.get("/api/dockable-structures/:id/services", requireAuth, async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!isPlayerStructureID(id)) {
+      res.status(400).json({ ok: false, error: "INVALID_STRUCTURE" }); return;
+    }
+    const outcome = await dockableAccessCall(req, "GetMyAccessibleStructureServices", [id], Number(req.query.characterID || 0));
+    res.json({ ok: true, structureID: id, serviceIDs: structureIDsFromList(outcome.result) });
   } catch (error) { next(error); }
 });
 
@@ -17182,7 +17254,7 @@ app.get("/api/bridge/ship/ore-hold", requireAuth, async (req, res, next) => {
               : null,
       };
     });
-    res.json({ ok: true, activeShipID: shipID, stationID: held.stationID, holds });
+    res.json({ ok: true, activeShipID: shipID, stationID: held.dockedLocationID, holds });
   } catch (error) {
     next(error);
   }
@@ -17229,6 +17301,11 @@ app.post("/api/bridge/ship/ore-hold/unload", requireAuth, async (req, res, next)
   // personal-hangar unload the script never asked for.
   const wantsDivision = body.division !== undefined && body.division !== null;
   const division = wantsDivision ? Number(body.division) : 0;
+  const strictCorp = body.strictCorp === true;
+  if (strictCorp && !wantsDivision) {
+    res.status(400).json({ ok: false, error: "STRICT_CORP_DIVISION_REQUIRED" });
+    return;
+  }
   if (wantsDivision && !isValidDivision(division)) {
     res.status(400).json({
       ok: false,
@@ -17258,6 +17335,86 @@ app.post("/api/bridge/ship/ore-hold/unload", requireAuth, async (req, res, next)
     const shipID = held.activeShipID;
     if (!shipID) {
       res.status(409).json({ ok: false, error: "NO_ACTIVE_SHIP", message: "No active ship." });
+      return;
+    }
+
+    if (strictCorp) {
+      // Operation-owned structure delivery has a stricter contract than the
+      // generic deliver-ore fallback. Verify the exact division, not merely
+      // that the ship hold became empty, and never retry into personal hangar.
+      if (held.structureID) {
+        const services = await heldTopLevelCall(held, req.webSessionID, "structureDirectory",
+          "GetMyAccessibleStructureServices", [held.structureID], null);
+        if (!structureIDsFromList(services.result).includes(3)) {
+          res.status(409).json({ ok: false, error: "STRUCTURE_OFFICE_SERVICE_UNAVAILABLE" });
+          return;
+        }
+      }
+      const officeID = await readCorpOffice(held, req.webSessionID);
+      if (!officeID) {
+        res.status(409).json({ ok: false, error: "NO_CORP_OFFICE" });
+        return;
+      }
+      const shipSpec = cargoBindSpec(held, shipID);
+      const officeSpec = corpOfficeBindSpec(officeID);
+      const flag = corpDivisionFlag(division);
+      const readFreight = async () => {
+        const rows = [];
+        for (const hold of MINING_HOLDS) {
+          const listed = await boundCall(held, req.webSessionID, shipSpec, "List", [hold.flag], null);
+          rows.push(...decodeInventoryRowsStrict(listed.result));
+        }
+        return rows;
+      };
+      const readDivision = async () => decodeInventoryRowsStrict(
+        (await boundCall(held, req.webSessionID, officeSpec, "List", [flag], null)).result);
+      const beforeFreight = await readFreight();
+      const beforeByID = new Map(beforeFreight.map((row) => [row.itemID, row]));
+      if (requested.some((itemID) => !beforeByID.has(itemID))) {
+        res.status(409).json({ ok: false, error: "STRICT_CORP_SOURCE_CHANGED" });
+        return;
+      }
+      const beforeDivision = await readDivision();
+      const quantityByType = (rows) => {
+        const quantities = new Map();
+        for (const row of rows) quantities.set(row.typeID, (quantities.get(row.typeID) || 0) + row.quantity);
+        return quantities;
+      };
+      const divisionBefore = quantityByType(beforeDivision);
+      const notifications = [];
+      let refusal = null;
+      for (const itemID of requested) {
+        try {
+          const outcome = await boundCall(held, req.webSessionID, officeSpec, "Add", [itemID, shipID], { flag });
+          notifications.push(...outcome.notifications);
+        } catch (error) {
+          refusal = refusal ?? error;
+        }
+      }
+      // Both reads must succeed. An unreadable division or hold is UNKNOWN,
+      // never a clean corporate delivery even if Add returned 200.
+      const [afterFreight, afterDivision] = await Promise.all([readFreight(), readDivision()]);
+      const afterByID = new Map(afterFreight.map((row) => [row.itemID, row]));
+      const divisionAfter = quantityByType(afterDivision);
+      const movedByType = new Map();
+      for (const itemID of requested) {
+        const source = beforeByID.get(itemID);
+        const remaining = afterByID.get(itemID)?.quantity || 0;
+        if (remaining > 0 || source.quantity <= 0) {
+          res.status(409).json({ ok: false, error: "STRICT_CORP_DELIVERY_PARTIAL", message: "Freight remains aboard; reconcile before retry." });
+          return;
+        }
+        movedByType.set(source.typeID, (movedByType.get(source.typeID) || 0) + source.quantity);
+      }
+      const verified = [...movedByType].every(([typeID, quantity]) =>
+        (divisionAfter.get(typeID) || 0) - (divisionBefore.get(typeID) || 0) >= quantity);
+      if (!verified) {
+        res.status(409).json({ ok: false, error: "STRICT_CORP_DELIVERY_UNCONFIRMED",
+          message: "The requested corporation division did not confirm the freight; reconcile inventory before retry." });
+        return;
+      }
+      res.json({ ok: true, requested, moved: requested, remaining: [], corpDivision: division,
+        movedToCorp: requested, fellBack: null, notifications, dispatchRefusal: refusal?.message || null });
       return;
     }
     const hangarSpec = hangarBindSpec(held);
@@ -17665,10 +17822,10 @@ app.post("/api/bridge/mining/compress", requireAuth, async (req, res, next) => {
 // rather than reusing a stale OID.
 function reprocessingBindSpec(held) {
   return {
-    key: `reprocessing:${held.stationID}`,
+    key: `reprocessing:${inventoryLocationID(held)}`,
     service: "reprocessingSvc",
     method: "MachoBindObject",
-    args: [held.stationID],
+    args: [inventoryLocationID(held)],
     kwargs: null,
   };
 }
@@ -17773,7 +17930,7 @@ app.get("/api/bridge/reprocessing/quote", requireAuth, async (req, res, next) =>
       res.status(409).json({
         ok: false,
         error: "NOT_DOCKED",
-        message: "Dock at a station to use its refinery.",
+        message: "Dock at a location with reprocessing service.",
       });
       return;
     }
@@ -17788,7 +17945,7 @@ app.get("/api/bridge/reprocessing/quote", requireAuth, async (req, res, next) =>
     const decoded = decodeReprocessingQuotes(outcome.result);
     res.json({
       ok: true,
-      stationID: held.stationID,
+      stationID: held.dockedLocationID,
       taxRate: decoded.taxRate,
       quotes: decoded.quotes,
       notifications: outcome.notifications,
@@ -17835,7 +17992,7 @@ app.post("/api/bridge/reprocessing/reprocess", requireAuth, async (req, res, nex
       res.status(409).json({
         ok: false,
         error: "NOT_DOCKED",
-        message: "Dock at a station to use its refinery.",
+        message: "Dock at a location with reprocessing service.",
       });
       return;
     }
@@ -17848,7 +18005,7 @@ app.post("/api/bridge/reprocessing/reprocess", requireAuth, async (req, res, nex
       req.webSessionID,
       spec,
       "Reprocess",
-      [itemIDs, held.stationID, held.characterID || 0, null, null],
+      [itemIDs, inventoryLocationID(held), held.characterID || 0, null, null],
       null,
     );
     // A 200 is not proof: re-read the hangar and report which stacks are
@@ -18128,7 +18285,7 @@ app.get(["/api/bridge/drones", "/api/bridge/script/observation"], requireAuth, a
         return;
       }
       const association = botHost.operationForClaim?.(held.characterID, req.get(botHostModule.BOT_HEADER));
-      if (association) miningOperations.observeMemberLocation(association.operationID, held.characterID, space, !held.stationID, observationStartedAt);
+      if (association) miningOperations.observeMemberLocation(association.operationID, held.characterID, space, !held.dockedLocationID, observationStartedAt);
     }
     const settledCode = (settled) =>
       settled.status === "rejected"
@@ -20490,12 +20647,15 @@ function prepareMiningOperationLaunch(definition) {
       if (!standardProfileFor(definition, member)) return { ok: false, code: "STANDARD_OPERATION_PROFILE_UNAVAILABLE",
         message: `${member.characterName}: No Standard profile exists for this target class, unload policy, and role. Choose a compatible Custom routine.` };
       const destination = definition.unloadDestination;
-      const station = destination && staticData.getStation(destination.stationID);
-      if (!station || station.stationName !== destination.stationName ||
-          staticData.getSolarSystemName(Number(station.solarSystemID)) !== destination.systemName ||
+      const station = destination?.kind === "structure" ? null : destination && staticData.getStation(destination.stationID);
+      const validStructure = destination?.kind === "structure" && isPlayerStructureID(destination.id) &&
+        Boolean(destination.name) && staticData.getSolarSystemName(destination.solarSystemID) === destination.solarSystemName;
+      const validStation = station && station.stationName === destination.stationName &&
+        staticData.getSolarSystemName(Number(station.solarSystemID)) === destination.systemName;
+      if ((!validStation && !validStructure) ||
           !Number.isSafeInteger(destination.corporationDivision) || destination.corporationDivision < 1 || destination.corporationDivision > 7) {
         return { ok: false, code: "STANDARD_UNLOAD_DESTINATION_REQUIRED",
-          message: "Standard mining operations need an explicit known unload station and corporation division 1–7. Edit the operation destination before Start." };
+          message: "Standard mining operations need a resolved unload destination and corporation division 1–7. Edit the operation destination before Start." };
       }
       script = buildStandardProfile(definition, member);
     } else {
@@ -20585,6 +20745,61 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
         if (!structureIDsFromList(checked.result).includes(parkingStructure.id)) {
           res.status(409).json({ ok: false, error: "PARKING_STRUCTURE_ACCESS_DENIED",
             message: `${member.characterName}: docking access to the parking structure is unavailable. No member was started.` });
+          return;
+        }
+        if (definition.policies.parking.mode === "RETURN_HOME_UNLOAD_DOCK" &&
+            definition.policies.parking.corporationDivision !== null) {
+          const context = { userid: account.accountID, characterID: character.characterID,
+            corporationID: character.corporationID || 0, corpid: character.corporationID || 0,
+            allianceID: character.allianceID || 0 };
+          try {
+            const [services, offices] = await Promise.all([
+              gateway.callMethod("structureDirectory", "GetMyAccessibleStructureServices", [parkingStructure.id], null, context),
+              gateway.callMethod("officeManager", "GetMyCorporationsOffices", [], null, context),
+            ]);
+            if (!structureIDsFromList(services.result).includes(3) ||
+                !decodeOfficeRows(offices.result).some((office) => office.stationID === parkingStructure.id)) {
+              res.status(409).json({ ok: false, error: "PARKING_STRUCTURE_CORP_HANGAR_UNAVAILABLE",
+                message: `${member.characterName}: parking structure lacks an accessible corporation office. No member was started.` });
+              return;
+            }
+          } catch {
+            res.status(409).json({ ok: false, error: "PARKING_STRUCTURE_CORP_PREFLIGHT_UNREADABLE",
+              message: `${member.characterName}: corporation hangar authority is unreadable. No member was started.` });
+            return;
+          }
+        }
+      }
+    }
+    const deliveryStructure = definition.unloadDestination?.kind === "structure"
+      ? definition.unloadDestination : null;
+    if (deliveryStructure) {
+      for (const member of definition.members.filter((row) => row.role !== "DEFENDER" && row.routineMode === "STANDARD")) {
+        const account = await store.getAccount(member.accountName);
+        const character = account && !account.banned
+          ? await store.getCharacterForAccount(account.accountID, member.characterID) : null;
+        if (!character) {
+          res.status(409).json({ ok: false, error: "DELIVERY_STRUCTURE_PILOT_UNAVAILABLE",
+            message: `${member.characterName}: account-owned pilot is unavailable for structure delivery preflight.` });
+          return;
+        }
+        const context = { userid: account.accountID, characterID: character.characterID,
+          corporationID: character.corporationID || 0, corpid: character.corporationID || 0,
+          allianceID: character.allianceID || 0 };
+        try {
+          const [services, offices] = await Promise.all([
+            gateway.callMethod("structureDirectory", "GetMyAccessibleStructureServices", [deliveryStructure.id], null, context),
+            gateway.callMethod("officeManager", "GetMyCorporationsOffices", [], null, context),
+          ]);
+          if (!structureIDsFromList(services.result).includes(3) ||
+              !decodeOfficeRows(offices.result).some((office) => office.stationID === deliveryStructure.id)) {
+            res.status(409).json({ ok: false, error: "DELIVERY_STRUCTURE_CORP_HANGAR_UNAVAILABLE",
+              message: `${member.characterName}: the destination structure has no accessible office service and corporation office. No member was started.` });
+            return;
+          }
+        } catch (error) {
+          res.status(409).json({ ok: false, error: "DELIVERY_STRUCTURE_PREFLIGHT_UNREADABLE",
+            message: `${member.characterName}: structure service or corporation office authority is unreadable. No member was started.` });
           return;
         }
       }

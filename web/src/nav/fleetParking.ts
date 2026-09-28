@@ -26,9 +26,6 @@ export function parkingScript(policy: FleetParkingPolicy): BotScript {
       !location || !Number.isSafeInteger(location.id) || location.id <= 0) {
     throw new Error("Parking requires an explicit dockable destination; starting station is not a fallback.");
   }
-  if (location.kind === "structure" && policy.mode === "RETURN_HOME_UNLOAD_DOCK" && policy.corporationDivision !== null) {
-    throw new Error("Corporation-division parking at a player structure is not verified.");
-  }
   const home = { entity: location.kind, id: location.id, name: location.name, systemName: location.solarSystemName ?? "" };
   return { format: "evejs-bot-script", version: 1, name: "Fleet Parking", notes: "Finite operation stop, not a mining routine.",
     home, interrupts: [], program: [{ id: "park", kind: "macro",

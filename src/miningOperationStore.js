@@ -50,19 +50,33 @@ function normalizeDefinition(value, existing = null, now = () => new Date().toIS
   if (!UNLOAD.has(unloadPolicy)) throw fail("MINING_OPERATION_INVALID", "Choose an unload policy.");
   let unloadDestination = null;
   if (value.unloadDestination != null) {
-    const stationID = Number(value.unloadDestination.stationID);
     const division = Number(value.unloadDestination.corporationDivision);
-    const station = Number.isSafeInteger(stationID) && stationID > 0 ? resolveStation(stationID) : null;
-    if (!station || !station.stationName || !Number.isSafeInteger(division) || division < 1 || division > 7) {
+    if (!Number.isSafeInteger(division) || division < 1 || division > 7) {
       throw fail("MINING_OPERATION_INVALID", "Choose a known unload station and corporation division 1–7.");
     }
-    const stationSystem = resolveSystem(Number(station.solarSystemID));
-    if (!stationSystem?.solarSystemName) throw fail("MINING_OPERATION_INVALID", "The unload station has no known solar system.");
-    if (value.unloadDestination.stationName && cleanText(value.unloadDestination.stationName, 160) !== station.stationName) {
-      throw fail("MINING_OPERATION_INVALID", "Unload station name and ID do not match.");
+    if (value.unloadDestination.kind === "structure") {
+      const { id, name, solarSystemID, solarSystemName } = value.unloadDestination;
+      const system = Number.isSafeInteger(solarSystemID) ? resolveSystem(solarSystemID) : null;
+      if (!Number.isSafeInteger(id) || id < 1_000_000_000_000 || !cleanText(name, 160) ||
+          !system?.solarSystemName || solarSystemName !== system.solarSystemName) {
+        throw fail("MINING_OPERATION_INVALID", "Choose a resolved player structure and corporation division 1–7.");
+      }
+      unloadDestination = { kind: "structure", id, name: cleanText(name, 160),
+        solarSystemID, solarSystemName: system.solarSystemName, corporationDivision: division };
+    } else {
+      const stationID = Number(value.unloadDestination.stationID);
+      const station = Number.isSafeInteger(stationID) && stationID > 0 ? resolveStation(stationID) : null;
+      if (!station || !station.stationName) {
+        throw fail("MINING_OPERATION_INVALID", "Choose a known unload station and corporation division 1–7.");
+      }
+      const stationSystem = resolveSystem(Number(station.solarSystemID));
+      if (!stationSystem?.solarSystemName) throw fail("MINING_OPERATION_INVALID", "The unload station has no known solar system.");
+      if (value.unloadDestination.stationName && cleanText(value.unloadDestination.stationName, 160) !== station.stationName) {
+        throw fail("MINING_OPERATION_INVALID", "Unload station name and ID do not match.");
+      }
+      unloadDestination = { stationID, stationName: station.stationName,
+        systemName: stationSystem.solarSystemName, corporationDivision: division };
     }
-    unloadDestination = { stationID, stationName: station.stationName,
-      systemName: stationSystem.solarSystemName, corporationDivision: division };
   }
   if (!Array.isArray(value.members) || value.members.length === 0) {
     throw fail("MINING_OPERATION_INVALID", "Add at least one pilot.");

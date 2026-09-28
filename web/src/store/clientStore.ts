@@ -133,6 +133,8 @@ export interface StationSlice {
   readonly stationInfoCached: boolean | null;
   /** Non-null when the last docked-read refresh had a (non-fatal) failure. */
   readonly readError: string | null;
+  /** null means unreadable/not yet read; [] is authoritative no services. */
+  readonly structureServiceIDs: readonly number[] | null;
 }
 
 /** Which feed adapter is attached and its connectivity — not the transport itself. */
@@ -206,6 +208,7 @@ const INITIAL_STATION: StationSlice = Object.freeze({
   guests: Object.freeze([]) as readonly StationGuest[],
   stationInfoCached: null,
   readError: null,
+  structureServiceIDs: null,
 });
 
 const EMPTY_CONTAINER: InventoryContainerState = Object.freeze({
@@ -1097,11 +1100,15 @@ export function createClientStore(): ClientStore {
           guests: [],
           stationInfoCached: null,
           readError: null,
+          structureServiceIDs: null,
         });
         break;
       }
       case "station/bits":
         station.set({ ...station.get(), bits: event.bits });
+        break;
+      case "station/structure-services":
+        station.set({ ...station.get(), structureServiceIDs: event.serviceIDs });
         break;
       case "station/guests":
         station.set({ ...station.get(), guests: [...event.guests] });

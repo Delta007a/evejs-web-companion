@@ -17,6 +17,7 @@
     loadMiningOperations,
     resolveDestination,
     resolveAccessibleStructure,
+    readAccessibleStructureServices,
     saveMiningOperation,
     startMiningOperation,
     stopMiningOperation,
@@ -69,8 +70,9 @@
   let unloadStationID = $state(0);
   let unloadStationName = $state("");
   let unloadStationSystemName = $state("");
+  let unloadStructure = $state<{ kind: "structure"; id: number; name: string; solarSystemID: number; solarSystemName: string | null } | null>(null);
   let unloadDivision = $state(1);
-  let stationMatches = $state<readonly { id: number; name: string; systemName: string }[]>([]);
+  let stationMatches = $state<readonly { id: number; name: string; systemName: string; kind: "station" | "structure"; solarSystemID?: number }[]>([]);
   let destinationError = $state<string | null>(null);
   let stationLookupSerial = 0;
   type Parking = NonNullable<MiningOperationDefinition["policies"]>["parking"];
@@ -216,24 +218,51 @@
     const serial = ++stationLookupSerial;
     unloadStationName = value;
     unloadStationID = 0;
+    unloadStructure = null;
     unloadStationSystemName = "";
-    destinationError = "Choose a known unload station.";
+    destinationError = "Choose a known unload destination.";
     stationMatches = [];
     if (value.trim().length < 2) return;
     try {
       const result = await findMapLocations(value.trim(), "station", opts());
+      let structures: Awaited<ReturnType<typeof findAccessibleStructures>> = [];
+      if (dockableAccessPilotID) {
+        try { structures = await findAccessibleStructures(value.trim(), opts(), dockableAccessPilotID); }
+        catch { destinationError = "Structure search is unavailable; NPC stations remain available."; }
+      }
       if (serial !== stationLookupSerial) return;
-      stationMatches = result.matches.filter((row) => row.kind === "station")
-        .map((row) => ({ id: row.id, name: row.name, systemName: row.solarSystemName ?? "" }));
+      stationMatches = [
+        ...result.matches.filter((row) => row.kind === "station")
+          .map((row) => ({ id: row.id, name: row.name, systemName: row.solarSystemName ?? "", kind: "station" as const })),
+        ...structures.map((row) => ({ id: row.id, name: row.name, systemName: row.solarSystemName ?? "", kind: "structure" as const,
+          solarSystemID: row.solarSystemID ?? 0 })),
+      ];
       const exact = stationMatches.find((row) => row.name.toLocaleLowerCase() === value.trim().toLocaleLowerCase());
-      if (exact) chooseStation(exact);
-      else destinationError = stationMatches.length ? "Choose a matching station." : "No known station matches that name.";
+      if (exact) await chooseStation(exact);
+      else destinationError = stationMatches.length ? "Choose a matching destination." : "No known destination matches that name.";
     } catch (cause) { if (serial === stationLookupSerial) destinationError = words(cause); }
   }
 
-  function chooseStation(station: { id: number; name: string; systemName: string }): void {
-    ++stationLookupSerial;
-    unloadStationID = station.id;
+  async function chooseStation(station: { id: number; name: string; systemName: string; kind: "station" | "structure"; solarSystemID?: number }): Promise<void> {
+    const serial = ++stationLookupSerial;
+    if (station.kind === "structure") {
+      unloadStationID = 0;
+      unloadStructure = null;
+      if (!dockableAccessPilotID || !station.solarSystemID) {
+        destinationError = "Choose an account pilot to check this structure.";
+        return;
+      }
+      try {
+        const structure = await resolveAccessibleStructure(station.id, opts(), dockableAccessPilotID);
+        const services = await readAccessibleStructureServices(station.id, opts(), dockableAccessPilotID);
+        if (serial !== stationLookupSerial) return;
+        if (!services.includes(3)) throw new Error("Corporation office service is unavailable at this structure.");
+        unloadStructure = structure;
+      } catch (cause) { if (serial === stationLookupSerial) destinationError = words(cause); return; }
+    } else {
+      unloadStationID = station.id;
+      unloadStructure = null;
+    }
     unloadStationName = station.name;
     unloadStationSystemName = station.systemName;
     destinationError = null;
@@ -299,6 +328,7 @@
     resourceMode = "ANY_ELIGIBLE"; resourceIDs = []; resourceQuery = "";
     unloadPolicy = "HAULER_SERVICE";
     unloadStationID = 0;
+    unloadStructure = null;
     unloadStationName = "";
     unloadStationSystemName = "";
     unloadDivision = 1;
@@ -328,9 +358,10 @@
     resourceMode = definition.policies?.resourcePolicy?.mode ?? "ANY_ELIGIBLE";
     resourceIDs = [...definition.policies?.resourcePolicy?.typeIDs ?? []]; resourceQuery = "";
     unloadPolicy = definition.unloadPolicy;
-    unloadStationID = definition.unloadDestination?.stationID ?? 0;
-    unloadStationName = definition.unloadDestination?.stationName ?? "";
-    unloadStationSystemName = definition.unloadDestination?.systemName ?? "";
+    unloadStructure = definition.unloadDestination?.kind === "structure" ? definition.unloadDestination : null;
+    unloadStationID = definition.unloadDestination && !("kind" in definition.unloadDestination) ? definition.unloadDestination.stationID : 0;
+    unloadStationName = unloadStructure?.name ?? (definition.unloadDestination && !("kind" in definition.unloadDestination) ? definition.unloadDestination.stationName : "");
+    unloadStationSystemName = unloadStructure?.solarSystemName ?? (definition.unloadDestination && !("kind" in definition.unloadDestination) ? definition.unloadDestination.systemName ?? "" : "");
     unloadDivision = definition.unloadDestination?.corporationDivision ?? 1;
     destinationError = null;
     members = definition.members.map((member) => ({ ...member, routineMode: modeOf(member) }));
@@ -375,9 +406,6 @@
     if (disconnected) return;
     if (!anchorValid) { error = anchorError ?? "Choose a known solar system."; return; }
     if (stopMode !== "STAY_IN_PLACE" && (!parkingStation || parkingError)) { error = parkingError || "Choose a parking destination."; return; }
-    if (stopMode === "RETURN_HOME_UNLOAD_DOCK" && parkingStation && "kind" in parkingStation && parkingStation.kind === "structure" && parkingDivision !== null) {
-      error = "Corporation-division parking at a player structure is not verified. Choose personal hangar or an NPC station."; return;
-    }
     busy = "save";
     error = null;
     try {
@@ -393,9 +421,11 @@
         targetPolicy: "ANY_ELIGIBLE",
         policies: { version: 1, resourcePolicy: { mode: resourceMode, source: "MANUAL", typeIDs: resourceMode === "PREFER_LIST" ? resourceIDs : [] }, travelAssist: { mode: travelAssist ? "AUTO" : "DISABLED" }, parking: { mode: stopMode, destination: stopMode === "STAY_IN_PLACE" ? null : parkingStation, corporationDivision: parkingDivision } },
         unloadPolicy,
-        unloadDestination: unloadStationID > 0 && destinationError === null
-          ? { stationID: unloadStationID, stationName: unloadStationName, systemName: unloadStationSystemName, corporationDivision: unloadDivision }
-          : null,
+        unloadDestination: destinationError === null && unloadStructure
+          ? { ...unloadStructure, corporationDivision: unloadDivision }
+          : unloadStationID > 0 && destinationError === null
+            ? { stationID: unloadStationID, stationName: unloadStationName, systemName: unloadStationSystemName, corporationDivision: unloadDivision }
+            : null,
         members,
       }, opts());
       editing = false;
@@ -521,12 +551,16 @@
       </fieldset>
         <div class="destination">
           <h4>{unloadPolicy === "SELF_UNLOAD" ? "Miner delivery destination" : "Hauler delivery destination"}</h4>
-          <p class="muted">Standard profiles require a known station and corporation division, even when pilots start in space.</p>
-          <label>Unload station <input value={unloadStationName} oninput={(event) => void searchStation(event.currentTarget.value)} placeholder="Search stations" autocomplete="off" /></label>
-          {#if stationMatches.length > 0}<div class="system-matches" role="listbox" aria-label="Matching stations">
-            {#each stationMatches as station (station.id)}<button type="button" role="option" aria-selected="false" onclick={() => chooseStation(station)}>{station.name} · {station.systemName}</button>{/each}
+          <p class="muted">Standard profiles require a dockable destination with a corporation office and division. Structure delivery is strict: no personal-hangar fallback.</p>
+          <label>Check structure access as pilot <select bind:value={dockableAccessPilotID} onchange={() => { ++stationLookupSerial; ++parkingLookupSerial; stationMatches = []; parkingMatches = []; unloadStructure = null; destinationError = unloadStationID > 0 ? null : "Choose a delivery destination."; }}>
+            <option value={0}>NPC station search only</option>
+            {#each dockableAccessPilots as pilot}<option value={pilot.characterID}>{pilot.characterName}</option>{/each}
+          </select></label>
+          <label>Unload destination <input value={unloadStationName} oninput={(event) => void searchStation(event.currentTarget.value)} placeholder="Search station or accessible structure" autocomplete="off" /></label>
+          {#if stationMatches.length > 0}<div class="system-matches" role="listbox" aria-label="Matching delivery destinations">
+            {#each stationMatches as station (station.id)}<button type="button" role="option" aria-selected="false" onclick={() => void chooseStation(station)}>{station.name} · {station.systemName} · {station.kind === "structure" ? "Upwell Structure" : "NPC Station"}</button>{/each}
           </div>{/if}
-          {#if unloadStationID > 0}<p class="muted">Station {unloadStationID} · {unloadStationSystemName}</p>{/if}
+          {#if unloadStationID > 0 || unloadStructure}<p class="muted">{unloadStructure ? "Structure" : "Station"} {unloadStructure?.id ?? unloadStationID} · {unloadStationSystemName}</p>{/if}
           {#if destinationError}<p class="error" role="status">{destinationError}</p>{/if}
           <label>Corporation division <select bind:value={unloadDivision}>{#each [1, 2, 3, 4, 5, 6, 7] as division}<option value={division}>Division {division}</option>{/each}</select></label>
         </div>
@@ -535,22 +569,18 @@
         <legend>On manual Stop / Fleet Parking</legend>
         <label>Policy <select bind:value={stopMode}>{#each Object.entries(stopLabels) as [mode, label]}<option value={mode}>{label}</option>{/each}</select></label>
         {#if stopMode !== "STAY_IN_PLACE"}
-          <label>Check structure access as pilot <select bind:value={dockableAccessPilotID} onchange={() => { ++parkingLookupSerial; parkingMatches = []; parkingStation = null; parkingQuery = ""; }}>
-            <option value={0}>NPC station search only</option>
-            {#each dockableAccessPilots as pilot}<option value={pilot.characterID}>{pilot.characterName}</option>{/each}
-          </select></label>
           <label>Parking destination <input required value={parkingQuery} oninput={(event) => void searchParking(event.currentTarget.value)} placeholder="Search station or accessible structure" autocomplete="off" /></label>
           {#if parkingMatches.length > 0}<div class="system-matches" role="listbox" aria-label="Matching parking stations">
             {#each parkingMatches as station (parkingID(station))}<button type="button" role="option" aria-selected="false" onclick={() => chooseParking(station)}>{parkingName(station)} · {parkingSystemName(station)} · {"kind" in station && station.kind === "structure" ? "Upwell Structure" : "NPC Station"}</button>{/each}
           </div>{/if}
-          {#if unloadStationID > 0 && !destinationError}<button type="button" onclick={() => chooseParking({ stationID: unloadStationID, stationName: unloadStationName, systemName: unloadStationSystemName })}>Use delivery station as parking station</button>{/if}
+          {#if (unloadStationID > 0 || unloadStructure) && !destinationError}<button type="button" onclick={() => chooseParking(unloadStructure ?? { stationID: unloadStationID, stationName: unloadStationName, systemName: unloadStationSystemName })}>Use delivery destination as parking destination</button>{/if}
           {#if parkingStation}<p class="muted">{parkingName(parkingStation)} · {parkingSystemName(parkingStation)} · {"kind" in parkingStation && parkingStation.kind === "structure" ? "Upwell Structure" : "NPC Station"}</p>{/if}
           {#if parkingError}<p class="error" role="status">{parkingError}</p>{/if}
           {#if parkingWarning}<p class="note" role="status">{parkingWarning}</p>{/if}
           {#if stopMode === "RETURN_HOME_UNLOAD_DOCK"}
             <label>Freight destination <select bind:value={parkingDivision}><option value={null}>Personal hangar</option>{#each [1, 2, 3, 4, 5, 6, 7] as division}<option value={division}>Corporation Division {division}</option>{/each}</select></label>
             <p class="note">Uses existing ore-delivery freight rules: mining holds, or cargo fallback on ships without mining holds. Not an empty-every-bay action.</p>
-            {#if parkingStation && "kind" in parkingStation && parkingStation.kind === "structure"}<p class="note">Player structures support personal-hangar parking unload here. Corporation-division parking requires a verified division authority and remains unavailable.</p>{/if}
+            {#if parkingStation && "kind" in parkingStation && parkingStation.kind === "structure" && parkingDivision !== null}<p class="note">Corporation-division parking is strict at structures. An unavailable office or unconfirmed transfer blocks clean parking.</p>{/if}
           {/if}
           <p class="note">Stop early enough to park within the remaining run grant. Timed expiry keeps existing graceful cleanup; it does not schedule a return trip. Cans in space may be left behind. An unavailable member reports failure; healthy members can still park.</p>
         {:else}<p class="note">Existing graceful Stop: recall drones and release control without deliberately moving or docking.</p>{/if}
@@ -645,8 +675,8 @@
       <p><strong>Area:</strong> {row.definition.area.anchorSystemName ?? "Unknown system"} · {row.definition.area.reach === "CURRENT_SYSTEM" ? "current system" : "adjacent mode (anchor-only execution in v0.1)"}</p>
       <p><strong>Target class / unload:</strong> {row.definition.area.targetClasses.join(", ")} · {row.definition.unloadPolicy === "HAULER_SERVICE" ? "Hauler service" : "Self unload"}</p>
       <p><strong>Standard resources:</strong> {row.definition.policies?.resourcePolicy?.mode === "PREFER_LIST" ? row.definition.policies.resourcePolicy.typeIDs.map(id => catalog.find(resource => resource.typeID === id)?.name ?? `Type ${id}`).join(" → ") + " → any eligible" : "Any eligible"}</p>
-      <p><strong>On Stop:</strong> {stopLabels[row.definition.policies?.parking.mode ?? "STAY_IN_PLACE"]}{row.definition.policies?.parking.destination ? ` · ${row.definition.policies.parking.destination.stationName}` : ""}</p>
-      <p><strong>Delivery:</strong> {row.definition.unloadDestination ? `${row.definition.unloadDestination.stationName} · Corporation Division ${row.definition.unloadDestination.corporationDivision}` : row.definition.members.some((member) => modeOf(member) === "STANDARD") ? "Not configured — Standard Start blocked" : "Configured in custom routine"}</p>
+      <p><strong>On Stop:</strong> {stopLabels[row.definition.policies?.parking.mode ?? "STAY_IN_PLACE"]}{row.definition.policies?.parking.destination ? ` · ${"kind" in row.definition.policies.parking.destination ? row.definition.policies.parking.destination.name : row.definition.policies.parking.destination.stationName}` : ""}</p>
+      <p><strong>Delivery:</strong> {row.definition.unloadDestination ? `${"kind" in row.definition.unloadDestination ? row.definition.unloadDestination.name : row.definition.unloadDestination.stationName} · Corporation Division ${row.definition.unloadDestination.corporationDivision}` : row.definition.members.some((member) => modeOf(member) === "STANDARD") ? "Not configured — Standard Start blocked" : "Configured in custom routine"}</p>
       {#if ["DRAFT", "STOPPED"].includes(row.runtime.state)}<p class={readiness[row.definition.operationID]?.message ? "notice" : "muted"}><strong>Start readiness:</strong> {readiness[row.definition.operationID]?.message ?? "Routine preflight ready; pilot ownership and run grant are checked at Start."}</p>{/if}
       <p><strong>Current target:</strong> {row.runtime.currentTarget?.targetName ?? (["STOPPING", "PARKING", "PARKING_FAILED", "STOPPED"].includes(row.runtime.state) ? "Released / no current target" : "Waiting for selection")} {row.runtime.currentTarget ? `· ${row.runtime.currentTarget.state}` : ""}</p>
       <p><strong>Current system:</strong> {row.runtime.currentTarget?.systemName ?? (row.runtime.currentTarget ? String(row.runtime.currentTarget.systemID) : "No current mining target")}</p>

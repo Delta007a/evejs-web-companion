@@ -23,13 +23,13 @@ Tokeiito's Pilot Groups, ore-site mining and planetary industry implementations 
 
 ## Dockable destinations
 
-Generic WC travel, dock and personal-hangar ore delivery can target an NPC station or an access-checked player structure. The shared destination picker searches names and keeps station and structure identities distinct. Structure access is checked again before routing and docking; arrival requires the corresponding `stationID` or `structureID` in authoritative flight status. Existing station script and MCC parking references retain their saved format.
+Generic WC travel, dock, fitting and personal inventory can use an accessible NPC station or player structure. The shared picker searches names and keeps station and structure IDs distinct. Structure access is rechecked before routing and docking; completion requires the corresponding `stationID` or `structureID` in authoritative flight status. Old saved station scripts and MCC configurations retain their format. Agent and mission station slots remain NPC-only.
 
-MCC Fleet Parking can return to a structure for dock-only or personal-hangar unload. Start preflights structure access for all executable members before starting any, and each hosted member checks again before its automation begins. Standard MCC Hauler Service and Self-Unload delivery still require an NPC station and corporation division: the existing corporation unload authority can fall back to a personal hangar, so structure corporation delivery is blocked rather than claiming a strict division delivery succeeded. Pilot Training Home may record an accessible structure as a future provisioning base; saving it does not relocate a pilot. Station-only agent, mission and service workflows remain station-only.
+The structure capability read is access-scoped and reports online docking, fitting, office, repair, reprocessing, market and industry services. A service ID is a prerequisite, not proof of a usable office, market daemon or industry activity. Personal hangar and fitting transfers use the real structure location ID. Corporation use also requires a rented office and division rights. Strict MCC corporate delivery re-reads the requested division and the ship holds after transfer; a personal-hangar fallback cannot count as successful corporate delivery. MCC Hauler Service and Self-Unload may therefore use a structure only after member preflight proves access, online office service and the corporation's office. Fleet Parking supports structure dock-only, personal unload and division unload separately from the delivery destination.
 
-Standalone MCC and Pilot Training pickers check access for an explicitly chosen pilot owned by the authenticated account without selecting or taking control of that pilot. The actual hosted member or browser pilot rechecks access before live work. An unavailable structure read leaves NPC station search usable with a warning. Repair watches still require an NPC-station Home because structure repair service is not verified.
+Standalone MCC and Pilot Training pickers check access for an explicitly chosen account-owned pilot without taking control of it. The actual hosted member or browser pilot rechecks access before live work. An unavailable structure read leaves NPC search usable with a warning. Pilot Training Home may record an accessible structure for future provisioning; saving Home does not move the pilot. Repair watches still require an NPC-station Home because that particular workflow is not structure-capable.
 
-All-system access-scoped structure search requires the small [runtime patch](../runtime-patches/dockable-structure-search.patch) on the audited mutable EveJS 0.12.9 runtime. It changes only explicit `GetMyDockableStructures(0)` to return dockable IDs across systems. Omitted arguments retain the current-system read. It does not expose operational structure data or modify the immutable clean reference. No runtime was restarted for this source change; gameplay docking and structure unload remain to be verified.
+All-system access-scoped search uses the [dockable-search runtime patch](../runtime-patches/dockable-structure-search.patch). The additional [structure-service runtime patch](../runtime-patches/accessible-structure-services.patch) exposes only services accessible to the selected pilot and allows the ordinary, scoped office-rental authority through the gateway. Apply these only to the audited mutable EveJS runtime; the clean reference is unchanged. In isolated live QA at the Test01-owned Nonni Astrahus, Test02 reached the structure by normal route, docked with the correct `structureID`, moved a small stack through personal and corporation hangars in both directions, fitted and unfitted a test module, and obtained repair and reprocessing quotes. MCC Stop parked a pilot there for dock-only, strict division unload, and personal unload; each unload emptied the ship's ore hold and put the small test stack in the requested hangar. The industry facility read resolved the structure, but no job was started. The world market daemon refused order reads despite its structure service being online, so market trading is not claimed as live-verified. Pilot Training Home resolved the structure with `CONFIG_ONLY` semantics; browser storage reload was covered mechanically, not exercised in live UI.
 
 ## Drone lifecycle and recovery since the previous public gameplay point
 
@@ -57,9 +57,10 @@ configured non-CEO authority, Full access (except CEO), direct Buy Skill, exact-
 SELF/configured-wallet funding and separately reviewed append-only queues.
 
 Migration retains stable contract targets and accepted fitting identity. Safe Hangar
-Release and temporary-session ownership coexist with hosted bots. NPC home settings
-record training/provisioning intent without implementing relocation or equipment
-provisioning. MINER support policies survive; unsupported support modes stay disabled.
+Release and temporary-session ownership coexist with hosted bots. NPC-station or
+access-checked structure Home records training/provisioning intent without moving
+the pilot or provisioning equipment. MINER support policies survive; unsupported
+support modes stay disabled.
 See the [Training guide](pilot-training.md) for workflow, permissions and failure behavior.
 
 ## Mining Command Center

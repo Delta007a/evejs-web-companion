@@ -40,11 +40,11 @@ test("parking station is canonical, explicit and separate from delivery or start
   assert.deepEqual(normalize().parking, { mode: "STAY_IN_PLACE", destination: null, corporationDivision: null });
 });
 
-test("parking accepts a resolved structure for docking or personal unload, never implicit corporate fallback", () => {
+test("parking accepts a resolved structure and preserves an explicit corporation division", () => {
   const structure = { kind: "structure", id: 1030000000001, name: "My Astrahus", solarSystemID: 30000142, solarSystemName: "Jita" };
   assert.deepEqual(normalize({ parking: { mode: "RETURN_HOME_DOCK", destination: structure } }).parking.destination, structure);
   assert.deepEqual(normalize({ parking: { mode: "RETURN_HOME_UNLOAD_DOCK", destination: structure } }).parking.destination, structure);
-  assert.throws(() => normalize({ parking: { mode: "RETURN_HOME_UNLOAD_DOCK", destination: structure, corporationDivision: 1 } }), /Corporation-division/);
+  assert.equal(normalize({ parking: { mode: "RETURN_HOME_UNLOAD_DOCK", destination: structure, corporationDivision: 1 } }).parking.corporationDivision, 1);
   assert.throws(() => normalize({ parking: { mode: "RETURN_HOME_DOCK", destination: { ...structure, solarSystemName: "Wrong" } } }), /known solar system/);
   assert.throws(() => normalize({ parking: { mode: "RETURN_HOME_DOCK", destination: { ...structure, id: 5 } } }), /player structure/);
 });

@@ -66,10 +66,15 @@ function buildMiningServiceDocument(definition, member) {
   const profile = standardProfileFor(definition, member);
   if (!profile) return null;
   const destination = definition.unloadDestination;
-  if (!Number.isSafeInteger(destination?.stationID) || destination.stationID <= 0 ||
-      !Number.isSafeInteger(destination?.corporationDivision) || destination.corporationDivision < 1 || destination.corporationDivision > 7 ||
-      !destination.stationName || !destination.systemName) return null;
-  const station = { entity: "station", id: destination.stationID, name: destination.stationName, systemName: destination.systemName };
+  if (!Number.isSafeInteger(destination?.corporationDivision) || destination.corporationDivision < 1 || destination.corporationDivision > 7) return null;
+  const station = destination.kind === "structure"
+    ? Number.isSafeInteger(destination.id) && destination.id >= 1_000_000_000_000 && destination.name && destination.solarSystemName
+      ? { entity: "structure", id: destination.id, name: destination.name, systemName: destination.solarSystemName }
+      : null
+    : Number.isSafeInteger(destination.stationID) && destination.stationID > 0 && destination.stationName && destination.systemName
+      ? { entity: "station", id: destination.stationID, name: destination.stationName, systemName: destination.systemName }
+      : null;
+  if (!station) return null;
   const belt = { kind: "belt", belt: { mode: "nearest" } };
   const delivery = { id: "deliver", kind: "macro", macro: "deliver-ore", args: {
     station: { kind: "station", ref: station },

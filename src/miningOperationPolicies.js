@@ -45,9 +45,6 @@ function normalizePolicies(input, resolveStation, resolveSystem) {
   }
   const division = parking.corporationDivision ?? null;
   if (division !== null && (!Number.isSafeInteger(division) || division < 1 || division > 7)) throw invalid("Parking unload division must be 1–7, or personal hangar.");
-  if (destination?.kind === "structure" && parking.mode === "RETURN_HOME_UNLOAD_DOCK" && division !== null) {
-    throw invalid("Corporation-division delivery at a player structure is not verified; choose personal-hangar parking or an NPC station.");
-  }
   return { version: 1,
     resourcePolicy: normalizeResourcePolicy(value.resourcePolicy),
     parking: { mode: parking.mode, destination, corporationDivision: division },

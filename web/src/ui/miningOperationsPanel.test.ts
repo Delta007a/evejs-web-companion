@@ -46,11 +46,12 @@ test("MCC duration and extension controls consume server policy, not a local 24h
   assert.doesNotMatch(source, /readSpaceSnapshot/);
 });
 
-test("Fleet Parking uses an explicit station and defaults old definitions to Stay", () => {
+test("Fleet Parking uses an explicit dockable destination and defaults old definitions to Stay", () => {
   const source = readFileSync(new URL("./MiningOperations.svelte", import.meta.url), "utf8");
   assert.match(source, /On manual Stop \/ Fleet Parking/);
   assert.match(source, /definition\.policies\?\.parking.mode \?\? "STAY_IN_PLACE"/);
-  assert.match(source, /Use delivery station as parking station/);
+  assert.match(source, /Use delivery destination as parking destination/);
+  assert.match(source, /parking\.destination\.name : row\.definition\.policies\.parking\.destination\.stationName/);
   assert.match(source, /resolved\.stationID === Number\(value\)/);
   assert.match(source, /stopMode !== "STAY_IN_PLACE" && \(!parkingStation \|\| parkingError\)/);
   assert.match(source, /Retry parking/);

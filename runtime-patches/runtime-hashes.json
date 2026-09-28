@@ -2,10 +2,26 @@
   {
     "file": "server/src/_secondary/express/evejsWebGatewayRuntime.js",
     "originalSHA256": "418ACEEFC0A049497FAF8B01054C8471A653F7210A64FA666B9DC35F5742FE12",
-    "newSHA256": "89235AC2A4D9BBF3E6F4D9332A13CFF6105EB93D3E30BF8DA0AF68B8375DC3C1",
+    "newSHA256": "640834B30D4061EEECF7A5C4A468F2E90DCB286BF4300BD9998CD6A73C136742",
     "cleanReferenceSHA256": "418ACEEFC0A049497FAF8B01054C8471A653F7210A64FA666B9DC35F5742FE12",
     "preExistingDifferenceFromClean": false,
-    "previousFeatureSHA256": "5C5BDC55F4ED65560245333605767FBECC7C4B24035058A265FBA738EF6739AA"
+    "previousFeatureSHA256": "89235AC2A4D9BBF3E6F4D9332A13CFF6105EB93D3E30BF8DA0AF68B8375DC3C1"
+  },
+  {
+    "file": "server/src/services/structure/structureDirectoryService.js",
+    "originalSHA256": "843AE5B31C39F274885B6322B820F116E232BA8C3DBB05D4993B5B6A2BBCFA03",
+    "newSHA256": "5AD3F29BADC4FE14B1E86188ECE16CA7CFE3B8D13F54AD5E10D0A8A4BE28B8BC",
+    "cleanReferenceSHA256": "2B9F24731397DF582CA0240644754985FF84188690C9AEBA9A8A54D194EB2C73",
+    "preExistingDifferenceFromClean": true,
+    "note": "Adds access-scoped online structure service IDs to the existing all-system dockable search patch."
+  },
+  {
+    "file": "server/contracts/evejs-web-bridge-contract.json",
+    "originalSHA256": "2BD2DBF365DC37E7B58F79BD5B563D6D73556ED7182C27605769E9D4819AD17C",
+    "newSHA256": "D6511884988EDD6958C113FAE03D1F55283CF952E28ED1B9A9EDC98F118EEC2E",
+    "cleanReferenceSHA256": "2BD2DBF365DC37E7B58F79BD5B563D6D73556ED7182C27605769E9D4819AD17C",
+    "preExistingDifferenceFromClean": false,
+    "note": "Allows the access-scoped service read and scoped office rental bridge pair."
   },
   {
     "file": "server/src/_secondary/express/evejsWebGateway.js",

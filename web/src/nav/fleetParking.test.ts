@@ -75,7 +75,11 @@ test("player-structure parking uses the same finite route and proves structureID
   const u = harness({ structure: true });
   await runFleetParking(u.deps, unload, Date.now() + 60_000, () => {});
   assert.deepEqual(u.actions.map(action => action.kind), ["startRoute", "unloadOre"]);
-  assert.throws(() => parkingScript({ ...unload, corporationDivision: 1 }), /Corporation-division/);
+  const strict = parkingScript({ ...unload, corporationDivision: 1 });
+  assert.equal(decodeScriptValue(strict).ok, true);
+  const corp = harness({ structure: true });
+  await runFleetParking(corp.deps, { ...unload, corporationDivision: 1 }, Date.now() + 60_000, () => {});
+  assert.deepEqual(corp.actions.at(-1), { kind: "unloadOre", itemIDs: [10], division: 1, strictCorp: true });
 });
 
 test("return, dock, unload only existing freight, confirm empty freight, remain docked", async () => {

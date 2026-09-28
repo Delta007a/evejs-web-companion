@@ -3,7 +3,7 @@
 These artifacts target the audited **EveJS 0.12.9** layout with runtime source under
 `server/src`. The integration was verified against a mutable 0.12.9 gameplay copy,
 not arbitrary newer EveJS releases. Do not infer compatibility from a version label
-alone: check the five files in the [hash manifest](../runtime-patches/runtime-hashes.json).
+alone: check the applicable files in the [hash manifest](../runtime-patches/runtime-hashes.json).
 
 Patch your **mutable gameplay copy**, never an immutable clean upstream reference.
 Preserve local mods, loader wiring and configuration. Back up the affected files and
@@ -31,7 +31,7 @@ semantics on a different/custom base.
 
 ## Choose the matching installation state
 
-**Already current:** if all five files match the current accepted content, do not
+**Already current:** if all five Training files match the current accepted content, do not
 apply either patch again. The integration environment was already in this state;
 publication did not redeploy its runtime.
 
@@ -76,7 +76,7 @@ They are not substitutes for checking the original/previous patch base.
 
 | File under `server/src/` | Current content, canonical LF SHA-256 |
 | --- | --- |
-| `_secondary/express/evejsWebGatewayRuntime.js` | `0DEFF97F52E4C32A667D165D5183C68B13417755F22DF58B0085130C303F265F` |
+| `_secondary/express/evejsWebGatewayRuntime.js` | `3297E071E137F41554C5DB7414E5B01CDD89C2FE6416186D3092A650EF11572B` |
 | `_secondary/express/evejsWebGateway.js` | `20808953E06FB49ECA4A5046EFD6686A3C1A6B5AE7CCE8B6A0CF67634186D31D` |
 | `edge/gateway/gatewayRuntimeProtocol.js` | `987E1B06634DA05A1A278BC56D07EE1859B84DA5D758F20759970C144E86C307` |
 | `services/character/charService.js` | `44EBA767318FCC560015395FAA5BCD97B628714C81DF8012DAB58D96C39FBD9A` |
@@ -100,7 +100,7 @@ your normal setup. The WC setup scripts do not automatically install these Train
 patches. Preserve your private `.env`, browser preferences and runtime data outside
 version control. Do not publish tokens with bug reports.
 
-## Shared dockable-destination search
+## Shared dockable destinations and services
 
 The [dockable-structure-search patch](../runtime-patches/dockable-structure-search.patch)
 is separate from the Training patches above. It changes only
@@ -111,6 +111,14 @@ search. The audited clean file SHA-256 is
 `2B9F24731397DF582CA0240644754985FF84188690C9AEBA9A8A54D194EB2C73`;
 the patched mutable gameplay file SHA-256 is
 `843AE5B31C39F274885B6322B820F116E232BA8C3DBB05D4993B5B6A2BBCFA03`.
-Check the exact base or review custom differences before applying it to a mutable
-runtime copy. This task did not restart EveJS; installation and gameplay docking
-verification remain separate from source verification.
+The [accessible-structure-services patch](../runtime-patches/accessible-structure-services.patch)
+builds on that exact patched state. It adds an access-scoped read of currently
+online structure services, and gateway permission for that read and the normal
+`officeManager.RentOffice` authority. It does not publish owner-only operational
+structure records to other pilots. Apply it only after verifying the intermediate
+bytes in the [hash manifest](../runtime-patches/runtime-hashes.json), or review
+custom differences first. Its three final runtime files and hashes are listed
+there. Restart only through the normal launcher/mod-loader so the changed
+gateway allowlist is actually loaded. The isolated Nonni QA fixture exercised
+the loaded service read and office rental, as well as structure docking,
+personal/corporation inventory, fitting and repair/reprocessing quotes.

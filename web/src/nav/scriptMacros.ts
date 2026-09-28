@@ -1620,14 +1620,9 @@ const deliverOre: MacroDecider = (step, obs, mem, board) => {
   const target = stationTarget(step, obs, board);
   const targetKind: DockableKind = step.args["station"]?.kind === "station" && step.args["station"].ref.entity === "structure" ? "structure" : "station";
   if (target === null) {
-    return tick(WAIT, "No station picked to unload at.", "Hauling", {
+    return tick(WAIT, "No dockable destination picked to unload at.", "Hauling", {
       kind: "blocked",
-      reason: "This step needs a station to unload at.",
-    });
-  }
-  if (targetKind === "structure" && step.args["into"]?.kind === "corpDivision") {
-    return tick(WAIT, "Corporation delivery at a player structure is not verified.", "Delivery blocked", {
-      kind: "blocked", reason: "Choose a personal hangar at this structure or a verified NPC station for corporation delivery.",
+      reason: "This step needs a dockable destination to unload at.",
     });
   }
   const operation = obs.miningOperation ?? null;
@@ -1667,7 +1662,7 @@ const deliverOre: MacroDecider = (step, obs, mem, board) => {
       return tick(
         division === null
           ? { kind: "unloadOre", itemIDs: items }
-          : { kind: "unloadOre", itemIDs: items, division },
+          : { kind: "unloadOre", itemIDs: items, division, ...(targetKind === "structure" ? { strictCorp: true } : {}) },
         division === null
           ? "Unloading the ore into the hangar."
           : "Unloading the ore into the corporation hangar.",

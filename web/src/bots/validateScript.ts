@@ -256,11 +256,6 @@ function validateStep(step: MacroStep, problems: ScriptProblem[]): void {
       problems.push(blocking(step.id, "Distribution missions are available at levels 1 to 4."));
     }
   }
-  if (step.macro === "deliver-ore" && step.args.station?.kind === "station" &&
-      step.args.station.ref.entity === "structure" && step.args.into?.kind === "corpDivision") {
-    problems.push(blocking(step.id, "Corporation-division delivery at a player structure is not verified. Use its personal hangar or an NPC station."));
-  }
-
   if (step.macro === "haul-all" || step.macro === "route-hauler") {
     const returning = step.args["returnCargo"];
     if (!haulingLeg(step) || (returning?.kind === "toggle" && returning.enabled && !haulingLeg(step, true))) {

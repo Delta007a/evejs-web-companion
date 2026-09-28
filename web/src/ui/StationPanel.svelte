@@ -83,6 +83,7 @@
     type SortOrder,
   } from "./inventoryModel.ts";
   import { repairQuoteTotal, type RepairQuoteRow } from "../bridge/repairQuotes.ts";
+  import { structureHasCapability } from "../nav/dockableLocation.ts";
   import { isSessionLost } from "../app/flow.ts";
   import { panelErrorWords } from "../bridge/refusals.ts";
   import { resolvedName, nameKey, type NameKind, type NameRef } from "../store/names.ts";
@@ -847,8 +848,8 @@
     if (container) {
       list.push({ id: "container", label: containerName(), badge: `${container.rows.length}` });
     }
-    if (isDocked && !$station.online?.structureID) {
-      list.push({ id: "services", label: "Station services", badge: "" });
+    if (isDocked) {
+      list.push({ id: "services", label: $station.online?.structureID ? "Structure services" : "Station services", badge: "" });
     }
     return list;
   });
@@ -1634,6 +1635,29 @@
               </tbody>
             </table>
           </div>
+        {/if}
+      </div>
+    </section>
+    {:else if isDocked}
+    <section class="stn-view stn-services" id="stn-view-services" role="tabpanel" aria-labelledby="stn-tab-services" hidden={view !== "services"}>
+      <div class="stn-services-col">
+        <h3 class="stn-section">Structure services</h3>
+        {#if $station.structureServiceIDs === null}
+          <p class="stn-note">{$station.readError ?? "Checking current structure services…"}</p>
+        {:else}
+          <p class="stn-note">Personal hangar: {structureHasCapability($station.structureServiceIDs, "personalInventory") ? "available" : "unavailable"}</p>
+          <p class="stn-note">Corporation office service: {structureHasCapability($station.structureServiceIDs, "corporationHangar") ? "available; your corporation also needs an office and division access" : "unavailable"}</p>
+          <p class="stn-note">Fitting: {structureHasCapability($station.structureServiceIDs, "fitting") ? "available" : "unavailable"}</p>
+          <p class="stn-note">Reprocessing: {structureHasCapability($station.structureServiceIDs, "reprocessing") ? "available" : "unavailable"}</p>
+          <p class="stn-note">Market service: {structureHasCapability($station.structureServiceIDs, "market") ? "online; orders still depend on the market authority" : "unavailable"}</p>
+          <p class="stn-note">Industry service: {structureHasCapability($station.structureServiceIDs, "industry") ? "online; activities require an available facility" : "unavailable"}</p>
+          {#if structureHasCapability($station.structureServiceIDs, "repair")}
+            <button type="button" class="stn-btn stn-btn-wide" disabled={busy} onclick={() => run(askRepairQuote)}>Repair ship</button>
+            {#if repairQuote !== null && repairQuote.length > 0}
+              <p class="stn-note">{repairQuote.length} damaged item(s) · {repairTotal === null ? "price unavailable" : formatIsk(repairTotal.toFixed(2))}</p>
+              <button type="button" class="stn-btn stn-btn-go" disabled={busy} onclick={() => run(() => payRepairQuote(repairQuote ?? []))}>Repair and pay</button>
+            {:else if repairNote}<p class="stn-note">{repairNote}</p>{/if}
+          {:else}<p class="stn-note">Repair service unavailable at this structure.</p>{/if}
         {/if}
       </div>
     </section>

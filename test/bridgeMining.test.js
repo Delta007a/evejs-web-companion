@@ -55,6 +55,7 @@ const FLAG_HANGAR = 4;
 const FLAG_CORP_DIVISION_1 = 115;
 const FLAG_CORP_DIVISION_7 = 121;
 const OFFICE_ID = 7000001;
+const QA_STRUCTURE_ID = 1030000000000;
 
 const ORIGINAL_FETCH = global.fetch;
 const activeServers = new Set();
@@ -108,6 +109,8 @@ function fakeGateway(overrides = {}) {
   const calls = { call: [], bind: [], boundCall: [], flightStatus: [] };
   const state = {
     docked: true,
+    structureID: null,
+    structureServices: [1, 2, 3],
     // itemID -> the flag it currently sits under. The whole point of the
     // verification re-reads is that this MOVES.
     placement: new Map([
@@ -139,14 +142,15 @@ function fakeGateway(overrides = {}) {
     // for. Scoped to the CORP flags so the hangar fallback still works, which
     // is the whole behaviour under test.
     refuseCorpAdd: null,
+    unreadableDivision: false,
   };
   function flightSnapshot() {
     return {
       inSpace: !state.docked,
       docked: state.docked,
       solarSystemID: ORIGIN_SYSTEM_ID,
-      stationID: state.docked ? ORIGIN_STATION_ID : null,
-      structureID: null,
+      stationID: state.docked && !state.structureID ? ORIGIN_STATION_ID : null,
+      structureID: state.docked ? state.structureID : null,
       shipID: SHIP_ID,
       shipMode: state.docked ? null : "STOP",
       shipSpeedFraction: 0,
@@ -185,8 +189,8 @@ function fakeGateway(overrides = {}) {
           userid: 4,
           characterID: 7,
           characterName: "Test Pilot",
-          stationID: ORIGIN_STATION_ID,
-          structureID: null,
+          stationID: state.structureID ? null : ORIGIN_STATION_ID,
+          structureID: state.structureID,
           solarSystemID: ORIGIN_SYSTEM_ID,
           corporationID: 98000000,
           shipID: SHIP_ID,
@@ -219,6 +223,13 @@ function fakeGateway(overrides = {}) {
           notifications: [],
         };
       }
+      if (service === "officeManager" && method === "RentOffice") {
+        state.offices.push({ officeID: OFFICE_ID, stationID: state.structureID });
+        return { service, method, result: true, notifications: [] };
+      }
+      if (service === "structureDirectory" && method === "GetMyAccessibleStructureServices") {
+        return { service, method, result: { type: "list", items: state.structureServices }, notifications: [] };
+      }
       if (service === "miningScanMgr" && method === "perform_scan") {
         return { service, method, result: state.scan, notifications: [] };
       }
@@ -246,6 +257,9 @@ function fakeGateway(overrides = {}) {
       }
       const inert = state.inert.has(method);
       if (service === "invbroker" && method === "List") {
+        if (state.unreadableDivision && Number(args[0]) === FLAG_CORP_DIVISION_1) {
+          return { service, method, result: null, notifications: [] };
+        }
         return { service, method, result: listFor(Number(args[0])), notifications: [] };
       }
       if (service === "invbroker" && method === "GetCapacity") {
@@ -370,8 +384,9 @@ async function apiRequest(baseUrl, path, options = {}) {
   return { response, payload: await response.json() };
 }
 
-async function docked(overrides) {
+async function docked(overrides, { structureID = null } = {}) {
   const gateway = fakeGateway(overrides);
+  gateway.state.structureID = structureID;
   const { baseUrl } = await startTestServer({ gateway });
   await apiRequest(baseUrl, "/api/bridge/select", { method: "POST", body: { characterID: 7 } });
   // Board the fixture ship so the ore-hold read has a ship to bind.
@@ -608,6 +623,60 @@ test("a corporation delivery binds the OFFICE and Adds under the division flag",
   );
 });
 
+test("strict structure delivery verifies the exact corporation division without personal fallback", async () => {
+  const { gateway, baseUrl } = await docked(null, { structureID: QA_STRUCTURE_ID });
+  gateway.state.offices = [{ officeID: OFFICE_ID, stationID: QA_STRUCTURE_ID }];
+  const { response, payload } = await apiRequest(baseUrl, "/api/bridge/ship/ore-hold/unload", {
+    method: "POST", body: { itemIDs: [ORE_STACK_ID], division: 1, strictCorp: true },
+  });
+  assert.equal(response.status, 200, JSON.stringify(payload));
+  assert.deepEqual(payload.movedToCorp, [ORE_STACK_ID]);
+  assert.equal(payload.fellBack, null);
+  assert.equal(gateway.state.placement.get(ORE_STACK_ID), FLAG_CORP_DIVISION_1);
+  assert.deepEqual(boundOf(gateway, "invbroker", "Add").map(call => call.kwargs.flag), [FLAG_CORP_DIVISION_1]);
+});
+
+test("structure office rental is held-location scoped and confirmed by an office reread", async () => {
+  const { gateway, baseUrl } = await docked(null, { structureID: QA_STRUCTURE_ID });
+  const rented = await apiRequest(baseUrl, "/api/bridge/corp-office/rent-at-structure", {
+    method: "POST", body: { confirm: true },
+  });
+  assert.equal(rented.response.status, 200, JSON.stringify(rented.payload));
+  assert.equal(rented.payload.officeID, OFFICE_ID);
+  const repeated = await apiRequest(baseUrl, "/api/bridge/corp-office/rent-at-structure", {
+    method: "POST", body: { confirm: true },
+  });
+  assert.equal(repeated.response.status, 200);
+  assert.equal(gateway.calls.call.filter(call => call.method === "RentOffice").length, 1, "no duplicate rental");
+});
+
+test("strict structure delivery refuses missing office, missing service and failed deposit without fallback", async () => {
+  for (const blocked of ["office", "service", "deposit"]) {
+    const { gateway, baseUrl } = await docked(null, { structureID: QA_STRUCTURE_ID });
+    if (blocked !== "office") gateway.state.offices = [{ officeID: OFFICE_ID, stationID: QA_STRUCTURE_ID }];
+    if (blocked === "service") gateway.state.structureServices = [1, 2];
+    if (blocked === "deposit") gateway.state.refuseCorpAdd = "CrpAccessDenied";
+    const { response, payload } = await apiRequest(baseUrl, "/api/bridge/ship/ore-hold/unload", {
+      method: "POST", body: { itemIDs: [ORE_STACK_ID], division: 1, strictCorp: true },
+    });
+    assert.equal(response.status, 409, `${blocked}: ${JSON.stringify(payload)}`);
+    assert.equal(gateway.state.placement.get(ORE_STACK_ID), FLAG_ORE_HOLD);
+    assert.ok(boundOf(gateway, "invbroker", "Add").every(call => call.kwargs.flag !== FLAG_HANGAR));
+  }
+});
+
+test("strict structure delivery blocks unreadable division authority before any transfer", async () => {
+  const { gateway, baseUrl } = await docked(null, { structureID: QA_STRUCTURE_ID });
+  gateway.state.offices = [{ officeID: OFFICE_ID, stationID: QA_STRUCTURE_ID }];
+  gateway.state.unreadableDivision = true;
+  const { response, payload } = await apiRequest(baseUrl, "/api/bridge/ship/ore-hold/unload", {
+    method: "POST", body: { itemIDs: [ORE_STACK_ID], division: 1, strictCorp: true },
+  });
+  assert.equal(response.status, 503, JSON.stringify(payload));
+  assert.equal(payload.error, "INVENTORY_UNREADABLE");
+  assert.equal(boundOf(gateway, "invbroker", "Add").length, 0);
+});
+
 test("a division the pilot has no role for lands the ore in their OWN hangar", async () => {
   const { gateway, baseUrl } = await docked();
   gateway.state.offices = [{ officeID: OFFICE_ID, stationID: ORIGIN_STATION_ID }];
@@ -777,6 +846,22 @@ test("the quote binds the STATION's refinery and reports the ISK tax separately"
     { typeID: 35, quantity: 200 },
   ]);
   assert.equal(payload.quotes[0].iskCost, 1234.5, "the station's own ISK cost for this stack");
+});
+
+test("structure refinery uses the docked structure identity for quote and verified reprocess", async () => {
+  const { gateway, baseUrl } = await docked(null, { structureID: QA_STRUCTURE_ID });
+  gateway.state.structureServices.push(4);
+  const quote = await apiRequest(baseUrl, `/api/bridge/reprocessing/quote?itemIDs=${ORE_STACK_ID}`);
+  assert.equal(quote.response.status, 200, JSON.stringify(quote.payload));
+  assert.equal(quote.payload.stationID, QA_STRUCTURE_ID);
+  assert.deepEqual(gateway.calls.bind.find((call) => call.service === "reprocessingSvc").args, [QA_STRUCTURE_ID]);
+  gateway.state.placement.set(ORE_STACK_ID, FLAG_HANGAR);
+  const reprocessed = await apiRequest(baseUrl, "/api/bridge/reprocessing/reprocess", {
+    method: "POST", body: { itemIDs: [ORE_STACK_ID], confirm: true },
+  });
+  assert.equal(reprocessed.response.status, 200, JSON.stringify(reprocessed.payload));
+  assert.deepEqual(reprocessed.payload.processed, [ORE_STACK_ID]);
+  assert.equal(boundOf(gateway, "reprocessingSvc", "Reprocess")[0].args[1], QA_STRUCTURE_ID);
 });
 
 test("a quote is a PURE READ — it never reaches Reprocess", async () => {

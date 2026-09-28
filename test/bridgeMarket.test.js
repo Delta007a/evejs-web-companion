@@ -239,6 +239,7 @@ function ownOrder(overrides = {}) {
 function fakeGateway(options = {}) {
   const calls = { topLevel: [] };
   const failures = new Set(options.failures || []);
+  const dockedStructureID = Number(options.structureID) || null;
 
   return {
     calls,
@@ -253,8 +254,8 @@ function fakeGateway(options = {}) {
           userid: 4,
           characterID: CHARACTER_ID,
           characterName: "Test Pilot",
-          stationID: STATION_ID,
-          structureID: null,
+          stationID: dockedStructureID ? null : STATION_ID,
+          structureID: dockedStructureID,
           solarSystemID: SOLAR_SYSTEM_ID,
           corporationID: 98000000,
           shipID: ACTIVE_SHIP_ID,
@@ -269,7 +270,8 @@ function fakeGateway(options = {}) {
         flight: {
           docked: true,
           inSpace: false,
-          stationID: STATION_ID,
+          stationID: dockedStructureID ? null : STATION_ID,
+          structureID: dockedStructureID,
           solarSystemID: SOLAR_SYSTEM_ID,
           shipID: ACTIVE_SHIP_ID,
         },
@@ -626,7 +628,7 @@ function fakeWriteGateway(options = {}) {
     orders: options.orders === undefined ? [] : options.orders.slice(),
   };
   const calls = { topLevel: [] };
-  const base = fakeGateway();
+  const base = fakeGateway(options);
 
   return {
     calls,
@@ -762,6 +764,26 @@ test("PlaceBuyOrder is sent with its NINE arguments in order, and NO kwargs", as
     null,
   ]);
   assert.equal(call.kwargs, null, "the market surface has no kwargs anywhere");
+});
+
+test("market orders docked in a structure use its location ID, not a null NPC station ID", async () => {
+  const structureID = 1030000000000;
+  const gateway = fakeWriteGateway({ structureID });
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const read = await apiRequest(baseUrl, "/api/bridge/market");
+  assert.equal(read.response.status, 200);
+  assert.equal(read.payload.stationID, structureID);
+  const buy = await postMarket(baseUrl, "/api/bridge/market/buy", {
+    typeID: TYPE_ID, price: 10, quantity: 1, durationDays: 30, confirm: true,
+  });
+  assert.equal(buy.response.status, 200, JSON.stringify(buy.payload));
+  assert.equal(gateway.calls.topLevel.find((call) => call.method === "PlaceBuyOrder").args[0], structureID);
+  const sell = await postMarket(baseUrl, "/api/bridge/market/sell", {
+    itemID: 500, typeID: TYPE_ID, price: 10, quantity: 1, durationDays: 30, confirm: true,
+  });
+  assert.equal(sell.response.status, 200, JSON.stringify(sell.payload));
+  assert.equal(gateway.calls.topLevel.find((call) => call.method === "PlaceMultiSellOrder").args[0][0].stationID, structureID);
 });
 
 test("a price is ROUNDED to 2dp before dispatch — what is confirmed is what is sent", async () => {

@@ -28,13 +28,14 @@ it is not a dedicated operation Defender/escort implementation.
   miner settlement and final partial loads. Haulers drain the old target, verify
   grid and freight completion, deliver, then catch up to the current target.
 - **Self-Unload:** miners settle modules and drones at the threshold, travel to an
-  explicit station/division, unload and confirm the relevant holds are empty before
+  explicit station or accessible structure with a corporation office, unload to
+  the chosen division and confirm both the relevant holds and division before
   returning to the authoritative operation target. No service hauler is required.
 - **Fleet Parking:** choose Stay or an available return/dock policy. The parking
   destination is configured separately from delivery and can be an NPC station or
-  accessible player structure. Structure dock-only and personal-hangar unload are
-  supported; corporation-division structure parking unload is blocked until strict
-  division authority can be verified. Start checks all executable members before
+  accessible player structure. Structure dock-only, personal-hangar unload and
+  strict corporation-division unload are supported where the selected pilot has
+  docking and office access. Start checks all executable members before
   starting any; each member rechecks docking access before its hosted run starts
   and again before live routing/docking. Stop retains graceful
   settlement and reports blocked/failed members rather than pretending they parked.
@@ -45,9 +46,14 @@ it is not a dedicated operation Defender/escort implementation.
 Set delivery destinations explicitly. Unrelated cargo must remain separate from the
 operation's mining freight. Existing shared BFF container leases coordinate haulers;
 MCC does not introduce a separate operation-owned container scope.
-Standard Hauler Service and Self-Unload delivery continue to require an NPC station
-and corporation division; a dockable structure alone does not prove corporation
-hangar rights or strict delivery there.
+On a hull with a specialised mining hold, delivery uses that hold; general cargo
+is left aboard even when it contains ore, so ship supplies are not swept ashore.
+Standard Hauler Service and Self-Unload delivery accept an NPC station or accessible
+structure with an online office service and a rented office for the member's
+corporation. A dockable structure alone does not prove division access. The strict
+structure transfer checks the exact chosen division and ship holds after the move;
+if either read is unavailable or a fallback landed in the personal hangar, delivery
+does not report success. Keep delivery and parking destinations separate.
 
 ## Travel Assist and hosted runs
 

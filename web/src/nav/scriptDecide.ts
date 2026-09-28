@@ -118,16 +118,17 @@ export type ScriptAction =
   | { readonly kind: "engageDrones"; readonly droneIDs: readonly number[]; readonly targetID: number }
   | { readonly kind: "recallDrones"; readonly droneIDs: readonly number[] }
   /**
-   * Put the freight ashore at the station the ship is docked at.
+   * Put the freight ashore at the docked station or structure.
    *
    * `division` aims it at a CORPORATION hangar division instead of the pilot's
    * own hangar. It is OPTIONAL because the personal hangar is what every
    * emitter but one means, and because it is a REQUEST rather than a
    * destination: the office may not be there, the pilot may not hold the role,
-   * and the bridge then lands the load in the pilot's own hangar and reports
-   * which happened. A block that named a division still finishes its lap.
+   * and the generic bridge may land the load in the pilot's own hangar and
+   * report which happened. `strictCorp` forbids that fallback: a structure
+   * route naming an exact division must verify it or remain blocked.
    */
-  | { readonly kind: "unloadOre"; readonly itemIDs: readonly number[]; readonly division?: number }
+  | { readonly kind: "unloadOre"; readonly itemIDs: readonly number[]; readonly division?: number; readonly strictCorp?: boolean }
   // ── Mission actions (the distribution blocks). Each is one proven mission-bot
   //    operation: a labeled button press in the agent conversation, a handoff to
   //    the shared autopilot, or a package move confirmed by re-read next tick.
