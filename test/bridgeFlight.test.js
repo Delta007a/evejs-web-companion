@@ -76,15 +76,16 @@ function fakeGateway(overrides = {}) {
     inSpace: false,
     solarSystemID: ORIGIN_SYSTEM_ID,
     stationID: ORIGIN_STATION_ID,
+    structureID: null,
     shipMode: null,
   };
   function flightSnapshot() {
     return {
       inSpace: state.inSpace,
-      docked: !state.inSpace && state.stationID !== null,
+      docked: !state.inSpace && (state.stationID !== null || state.structureID !== null),
       solarSystemID: state.solarSystemID,
       stationID: state.inSpace ? null : state.stationID,
-      structureID: null,
+      structureID: state.inSpace ? null : state.structureID,
       shipID: SHIP_ID,
       shipMode: state.inSpace ? state.shipMode : null,
       shipSpeedFraction: state.inSpace && state.shipMode === "WARP" ? 1 : 0,
@@ -152,7 +153,8 @@ function fakeGateway(overrides = {}) {
         state.shipMode = "STOP";
       } else if (method === "CmdDock") {
         state.inSpace = false;
-        state.stationID = Number(args[0]);
+        state.stationID = Number(args[0]) >= 1_000_000_000_000 ? null : Number(args[0]);
+        state.structureID = Number(args[0]) >= 1_000_000_000_000 ? Number(args[0]) : null;
         state.shipMode = null;
       }
       return { service, method, result: null, notifications: [] };
@@ -778,6 +780,29 @@ test("POST /api/bridge/flight/dock dispatches CmdDock and returns docked", async
   assert.deepEqual(dock.args, [DEST_STATION_ID, SHIP_ID]);
   assert.equal(payload.flight.docked, true);
   assert.equal(payload.flight.stationID, DEST_STATION_ID);
+});
+
+test("structure dock rechecks access before CmdDock and confirms structureID", async () => {
+  const gateway = fakeGateway();
+  gateway.state.inSpace = true;
+  gateway.state.shipMode = "STOP";
+  const callMethod = gateway.callMethod.bind(gateway);
+  let allowed = false;
+  gateway.callMethod = async (...args) => args[1] === "CheckMyDockingAccessToStructures"
+    ? { result: { type: "list", items: allowed ? [STRUCTURE_GATE_ID] : [] }, notifications: [] }
+    : callMethod(...args);
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const denied = await apiRequest(baseUrl, "/api/bridge/flight/dock", { method: "POST", body: { stationID: STRUCTURE_GATE_ID } });
+  assert.equal(denied.response.status, 409);
+  assert.equal(denied.payload.error, "STRUCTURE_DOCK_ACCESS_DENIED");
+  assert.equal(gateway.calls.boundCall.filter(call => call.method === "CmdDock").length, 0);
+  allowed = true;
+  const accepted = await apiRequest(baseUrl, "/api/bridge/flight/dock", { method: "POST", body: { stationID: STRUCTURE_GATE_ID } });
+  assert.equal(accepted.response.status, 200);
+  assert.equal(accepted.payload.flight.structureID, STRUCTURE_GATE_ID);
+  assert.equal(accepted.payload.flight.stationID, null);
+  assert.equal(gateway.calls.boundCall.filter(call => call.method === "CmdDock").length, 1);
 });
 
 test("a movement refusal passes through as the handler's own CALL_REFUSED message", async () => {

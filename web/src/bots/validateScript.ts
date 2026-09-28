@@ -92,6 +92,9 @@ export function validateScript(script: BotScript): readonly ScriptProblem[] {
   ) {
     problems.push(blocking("home", "Pick where the bot docks when a watch tells it to."));
   }
+  if (script.home.entity === "structure" && script.interrupts.some((row) => row.respond === "dock-and-repair")) {
+    problems.push(blocking("home", "Repair watches require an NPC station; structure repair service is not verified."));
+  }
   if (script.program.length === 0) {
     problems.push(blocking("program", "Add at least one step for the bot to do."));
   }
@@ -252,6 +255,10 @@ function validateStep(step: MacroStep, problems: ScriptProblem[]): void {
     if (level?.kind === "count" && (!Number.isInteger(level.value) || level.value < 1 || level.value > 4)) {
       problems.push(blocking(step.id, "Distribution missions are available at levels 1 to 4."));
     }
+  }
+  if (step.macro === "deliver-ore" && step.args.station?.kind === "station" &&
+      step.args.station.ref.entity === "structure" && step.args.into?.kind === "corpDivision") {
+    problems.push(blocking(step.id, "Corporation-division delivery at a player structure is not verified. Use its personal hangar or an NPC station."));
   }
 
   if (step.macro === "haul-all" || step.macro === "route-hauler") {

@@ -31,12 +31,23 @@ it is not a dedicated operation Defender/escort implementation.
   explicit station/division, unload and confirm the relevant holds are empty before
   returning to the authoritative operation target. No service hauler is required.
 - **Fleet Parking:** choose Stay or an available return/dock policy. The parking
-  station is configured separately from the delivery station. Stop retains graceful
+  destination is configured separately from delivery and can be an NPC station or
+  accessible player structure. Structure dock-only and personal-hangar unload are
+  supported; corporation-division structure parking unload is blocked until strict
+  division authority can be verified. Start checks all executable members before
+  starting any; each member rechecks docking access before its hosted run starts
+  and again before live routing/docking. Stop retains graceful
   settlement and reports blocked/failed members rather than pretending they parked.
+  For structure search, choose an account-owned pilot in the Parking editor as the
+  access reference. This read does not select or control that pilot. A structure
+  read failure keeps NPC station results available and shows a warning.
 
 Set delivery destinations explicitly. Unrelated cargo must remain separate from the
 operation's mining freight. Existing shared BFF container leases coordinate haulers;
 MCC does not introduce a separate operation-owned container scope.
+Standard Hauler Service and Self-Unload delivery continue to require an NPC station
+and corporation division; a dockable structure alone does not prove corporation
+hangar rights or strict delivery there.
 
 ## Travel Assist and hosted runs
 

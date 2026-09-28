@@ -99,3 +99,18 @@ Update/install WC dependencies and run `npm run build:web` before starting WC th
 your normal setup. The WC setup scripts do not automatically install these Training
 patches. Preserve your private `.env`, browser preferences and runtime data outside
 version control. Do not publish tokens with bug reports.
+
+## Shared dockable-destination search
+
+The [dockable-structure-search patch](../runtime-patches/dockable-structure-search.patch)
+is separate from the Training patches above. It changes only
+`server/src/services/structure/structureDirectoryService.js`: explicit
+`GetMyDockableStructures(0)` requests access-filtered IDs across systems, while the
+omitted/current-system call stays unchanged. WC needs this for named destination
+search. The audited clean file SHA-256 is
+`2B9F24731397DF582CA0240644754985FF84188690C9AEBA9A8A54D194EB2C73`;
+the patched mutable gameplay file SHA-256 is
+`843AE5B31C39F274885B6322B820F116E232BA8C3DBB05D4993B5B6A2BBCFA03`.
+Check the exact base or review custom differences before applying it to a mutable
+runtime copy. This task did not restart EveJS; installation and gameplay docking
+verification remain separate from source verification.

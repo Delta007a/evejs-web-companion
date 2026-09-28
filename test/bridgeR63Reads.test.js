@@ -81,9 +81,10 @@ function fakeStore() {
     async getCharacterForAccount(accountID, characterID) {
       return Number(accountID) === ACCOUNT.accountID &&
         CHARACTERS.some((c) => c.characterID === Number(characterID))
-        ? { ...CHARACTERS[0] }
+        ? { ...CHARACTERS[0], corporationID: SESSION_CORP_ID, allianceID: 0 }
         : null;
     },
+    async listCharactersForAccount(accountID) { return accountID === ACCOUNT.accountID ? [...CHARACTERS] : []; },
     async releaseCharacterControl() {
       return { controlState: "offline" };
     },
@@ -91,7 +92,10 @@ function fakeStore() {
 }
 
 function fakeStaticData() {
-  return { getStation() { return null; }, getTypeName(id) { return `Type ${id}`; } };
+  return { getStation() { return null; }, getTypeName(id) { return `Type ${id}`; },
+    getSolarSystemName(id) { return id === SESSION_SYSTEM_ID ? "Jita" : null; },
+    findMapLocations() { return { matches: [{ id: SESSION_STATION_ID, kind: "station", name: "NPC Home", solarSystemID: SESSION_SYSTEM_ID,
+      solarSystemName: "Jita" }], capped: false }; } };
 }
 
 function fakeGateway(overrides = {}) {
@@ -177,6 +181,86 @@ test.afterEach(async () => {
     }));
   }
   await Promise.all(closing);
+});
+
+test("dockable search and Training Home expose only access-scoped structure identity; access loss fails closed", async () => {
+  const owned = 1030000000001, foreign = 1030000000002;
+  let allowed = true;
+  const gateway = fakeGateway();
+  gateway.callMethod = async (service, method, args, kwargs, sessionFields, bridgeSessionID) => {
+    gateway.calls.call.push({ service, method, args, kwargs, sessionFields, bridgeSessionID });
+    const ids = allowed ? [owned] : [];
+    if (method === "GetMyDockableStructures" || method === "CheckMyDockingAccessToStructures") {
+      return { result: { type: "list", items: ids }, notifications: [] };
+    }
+    if (method === "GetStructureInfo") {
+      assert.equal(args[0], owned, "unlisted foreign structure must not reach identity authority");
+      return { result: { type: "object", name: "util.KeyVal", args: { type: "dict", entries: [
+        ["itemName", "My Astrahus"], ["solarSystemID", SESSION_SYSTEM_ID], ["typeID", 35832],
+      ] } }, notifications: [] };
+    }
+    return { result: null, notifications: [] };
+  };
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const found = await apiRequest(baseUrl, "/api/dockable-structures/find?q=Astrahus");
+  assert.equal(found.response.status, 200);
+  assert.deepEqual(found.payload.matches, [{ id: owned, kind: "structure", name: "My Astrahus",
+    solarSystemID: SESSION_SYSTEM_ID, solarSystemName: "Jita" }]);
+  assert.deepEqual(gateway.calls.call.find(call => call.method === "GetMyDockableStructures").args, [0]);
+  const home = await apiRequest(baseUrl, `/api/pilot-training/home?locationID=${owned}`);
+  assert.equal(home.response.status, 200);
+  assert.deepEqual(home.payload.home, { locationID: owned, name: "My Astrahus", systemID: SESSION_SYSTEM_ID,
+    kind: "PLAYER_STRUCTURE", relocation: "CONFIG_ONLY", capability: "DOCKABLE_STRUCTURE" });
+  allowed = false;
+  const denied = await apiRequest(baseUrl, `/api/dockable-structures/${owned}`);
+  assert.equal(denied.response.status, 409);
+  assert.equal(denied.payload.error, "STRUCTURE_DOCK_ACCESS_DENIED");
+  const foreignRead = await apiRequest(baseUrl, `/api/dockable-structures/${foreign}`);
+  assert.equal(foreignRead.response.status, 409);
+  assert.ok(gateway.calls.call.every(call => !["GetStructures", "GetMyCharacterStructures"].includes(call.method)));
+});
+
+test("standalone MCC and Training search use an account-owned pilot without selecting or claiming it", async () => {
+  const owned = 1030000000001;
+  const gateway = fakeGateway();
+  gateway.callMethod = async (service, method, args, kwargs, sessionFields, bridgeSessionID) => {
+    gateway.calls.call.push({ service, method, args, kwargs, sessionFields, bridgeSessionID });
+    if (method === "GetMyDockableStructures" || method === "CheckMyDockingAccessToStructures")
+      return { result: { type: "list", items: [owned] }, notifications: [] };
+    if (method === "GetStructureInfo") return { result: { type: "object", name: "util.KeyVal", args: { type: "dict", entries: [
+      ["itemName", "My Astrahus"], ["solarSystemID", SESSION_SYSTEM_ID], ["typeID", 35832],
+    ] } }, notifications: [] };
+    return { result: null, notifications: [] };
+  };
+  const { baseUrl } = await startTestServer({ gateway });
+  const pilots = await apiRequest(baseUrl, "/api/dockable-structures/pilots");
+  assert.equal(pilots.response.status, 200);
+  assert.deepEqual(pilots.payload.pilots, [{ characterID: 7, characterName: "Test Pilot" }]);
+  const found = await apiRequest(baseUrl, "/api/dockable-structures/find?q=Astrahus&characterID=7");
+  assert.equal(found.response.status, 200);
+  assert.equal(found.payload.matches[0].id, owned);
+  const homeSearch = await apiRequest(baseUrl, "/api/pilot-training/homes?q=Astrahus&characterID=7");
+  assert.equal(homeSearch.response.status, 200);
+  assert.ok(homeSearch.payload.matches.some((row) => row.id === owned));
+  const home = await apiRequest(baseUrl, `/api/pilot-training/home?locationID=${owned}&characterID=7`);
+  assert.equal(home.response.status, 200);
+  assert.equal(home.payload.home.kind, "PLAYER_STRUCTURE");
+  assert.equal(gateway.calls.select.length, 0, "access preview never selects a pilot");
+  const scoped = gateway.calls.call.filter((call) => call.method === "GetMyDockableStructures");
+  assert.ok(scoped.every((call) => call.bridgeSessionID === undefined && call.sessionFields.characterID === 7 &&
+    call.sessionFields.corporationID === SESSION_CORP_ID));
+  const denied = await apiRequest(baseUrl, "/api/dockable-structures/find?q=Astrahus&characterID=8");
+  assert.equal(denied.response.status, 403);
+});
+
+test("Training NPC Home search survives unavailable structure authority", async () => {
+  const gateway = fakeGateway({ async callMethod() { throw new Error("Structure authority unavailable"); } });
+  const { baseUrl } = await startTestServer({ gateway });
+  const result = await apiRequest(baseUrl, "/api/pilot-training/homes?q=Home&characterID=7");
+  assert.equal(result.response.status, 200);
+  assert.deepEqual(result.payload.matches.map((row) => row.id), [SESSION_STATION_ID]);
+  assert.match(result.payload.structureWarning, /unavailable/);
 });
 
 // --- always-on reads --------------------------------------------------------

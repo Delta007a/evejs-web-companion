@@ -228,6 +228,7 @@
   const someWatchDocks = $derived(
     watches.some((w) => w.respond === "dock-and-pause" || w.respond === "dock-and-repair"),
   );
+  const repairWatchDocks = $derived(watches.some((w) => w.respond === "dock-and-repair"));
   const hasSubBot = $derived(planHasSubBot(steps));
 
   const builtDoc = $derived<BotScript>(buildScript());
@@ -1139,8 +1140,8 @@
     {#if someWatchDocks}
       <div class="controls">
         <label>
-          Home station — where a watch docks
-          <StationPicker {flow} value={home} current={currentStation} onPick={(ref) => (home = ref)} />
+          Home destination — where a watch docks
+          <StationPicker {flow} value={home} current={currentStation} scope={repairWatchDocks ? "station" : "dockable"} onPick={(ref) => (home = ref)} />
         </label>
       </div>
       {@render problemNotes("home")}

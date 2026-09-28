@@ -921,6 +921,20 @@ test("travel-to-station: rides the shared autopilot (multi-system) and is done o
   assert.ok(staleFailure.action.kind === "startRoute", "a failure on ANOTHER destination is ignored");
 });
 
+test("generic travel and personal delivery distinguish structure arrival from NPC station arrival", () => {
+  const id = 1030000000001;
+  const step: MacroStep = { id: "structure", kind: "macro", macro: "travel-to-station",
+    args: { station: { kind: "station", ref: { entity: "structure", id, name: "My Astrahus", systemName: "Jita" } } } };
+  const travel = SCRIPT_MACROS["travel-to-station"]!;
+  assert.equal(travel(step, obs({ snapshot: snapshot([]) }), {}, {}).action.kind, "startRoute");
+  assert.notEqual(travel(step, obs({ flightStatus: flight({ docked: true, stationID: id, structureID: null }) }), {}, {}).outcome.kind, "done");
+  assert.equal(travel(step, obs({ flightStatus: flight({ docked: true, stationID: null, structureID: id }) }), {}, {}).outcome.kind, "done");
+  const delivery: MacroStep = { ...step, macro: "deliver-ore" };
+  assert.equal(deliver(delivery, obs({ flightStatus: flight({ docked: true, stationID: null, structureID: id }), holds: [] }), {}, {}).outcome.kind, "done");
+  const corporate: MacroStep = { ...delivery, args: { ...delivery.args, into: { kind: "corpDivision", division: 1, name: null } } };
+  assert.equal(deliver(corporate, obs({ flightStatus: flight({ docked: true, stationID: null, structureID: id }) }), {}, {}).outcome.kind, "blocked");
+});
+
 // ── travel-to-system ─────────────────────────────────────────────────────────
 //
 // The block exists because set-destination does NOT wait, and a bot whose next

@@ -42,7 +42,18 @@
     if (!options) throw new Error("Authenticate an account first.");
     return options;
   }
-  async function searchHomes(query: string) { return searchTrainingHomes(query, settingsOptions()); }
+  let homeAccessPilot = $state("");
+  const homeAccessPilots = $derived(rows.filter((row) => credentials.has(row.account)).map((row) => ({
+    key: row.key, label: `${row.account} · ${row.pilot.name}`,
+  })));
+  function homeAccess() {
+    const row = rows.find((candidate) => candidate.key === homeAccessPilot && credentials.has(candidate.account));
+    return row ? { characterID: row.pilot.characterID, options: credentials.get(row.account)! } : null;
+  }
+  async function searchHomes(query: string) {
+    const access = homeAccess();
+    return searchTrainingHomes(query, access?.options ?? settingsOptions(), access?.characterID);
+  }
   let onboardingReview = $state<{ rowKey: string; value: Record<string, any>; settingsHash: string } | null>(null);
   let onboardingMessage = $state("");
   function saveSettings(value: TrainingSettings) {
@@ -51,9 +62,10 @@
     catch (cause) { error = String(cause); }
   }
   async function resolveHome(id: number) {
-    const options = credentials.values().next().value;
+    const access = homeAccess();
+    const options = access?.options ?? credentials.values().next().value;
     if (!options) throw new Error("Authenticate an existing account first.");
-    return resolveTrainingHome(id, options);
+    return resolveTrainingHome(id, options, access?.characterID);
   }
   function authorityForSettings() {
     const officer = rows.find((r) => r.key === settings.onboarding.authorityKey);
@@ -377,7 +389,7 @@
   </div>
   {#if accountPanel === "NEW"}<NewTrainee externalBusy={busy} onContinue={newAccountReady} onBusy={(value) => busy = value} onCancel={() => accountPanel = null} />{/if}
   <p class="note">Skill qualification does not establish equipment readiness. Qualification and queue reads stay offline. Skill acquisition explicitly opens temporary live sessions for free pilots and releases them afterward.</p>
-  <TrainingSettingsPanel {settings} {busy} {corporations} authorities={settingsAuthorities} contextError={Object.values(settingsErrors).filter(Boolean).join(" ")} onSave={saveSettings} onResolve={resolveHome} onSearch={searchHomes} />
+  <TrainingSettingsPanel {settings} {busy} {corporations} authorities={settingsAuthorities} {homeAccessPilots} bind:homeAccessPilot contextError={Object.values(settingsErrors).filter(Boolean).join(" ")} onSave={saveSettings} onResolve={resolveHome} onSearch={searchHomes} />
   {#if onboardingMessage}<p role="status">{onboardingMessage}</p>{/if}
   {#if onboardingReview}
     <p>Onboarding: pilot {onboardingReview.value.characterID} → corporation {onboardingReview.value.corporationID}; authority {onboardingReview.value.authorityID}; rights {onboardingReview.value.rights}. CEO {onboardingReview.value.ceoID} stays unchanged.</p>

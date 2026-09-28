@@ -20,7 +20,7 @@ const props = { settings, busy: false,
 };
 test("settings render names with stored IDs only as option values or collapsed read-only details", () => {
   const html = render(Settings, { props }).body, normal = html.split('<details class="advanced')[0]!;
-  for (const label of ["Marked By Luck", "BHauler1", "Full access (except CEO)", "Division 1", settings.home!.name, "Search NPC stations by name"]) assert.ok(normal.includes(label), label);
+  for (const label of ["Marked By Luck", "BHauler1", "Full access (except CEO)", "Division 1", settings.home!.name, "Search NPC stations or accessible structures"]) assert.ok(normal.includes(label), label);
   assert.doesNotMatch(normal, /CEO must not appear|Onboarding corporation ID|Training wallet corporation ID|\(1000\)|>FULL_ACCESS_EXCEPT_CEO</);
   assert.doesNotMatch(normal, /<input[^>]*value="(?:98000002|60010825|1000)"/);
   assert.match(html, /Advanced details/); assert.match(html, /<dd[^>]*>98000002<\/dd>/); assert.match(html, /60010825 \/ 30004504 \/ NPC_STATION/);

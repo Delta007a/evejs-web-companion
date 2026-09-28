@@ -1092,6 +1092,15 @@ function tripScript(): BotScript {
   return script([macroStep("m", "mine-at-belt", { kind: "ore-hold-at-least", fraction: 0.9 })], [shieldTrip]);
 }
 
+test("an imported repair watch with structure Home pauses before travel or repair", () => {
+  const s: BotScript = { ...tripScript(),
+    home: { entity: "structure", id: 1030000000001, name: "My Astrahus", systemName: "Jita" } };
+  const result = decideScriptAction(s, obs({ shieldRatio: 0.2 }), initialMemory(s), withShop, home);
+  assert.equal(result.status, "paused");
+  assert.equal(result.action.kind, "wait");
+  assert.match(result.pauseReason ?? "", /NPC station/);
+});
+
 test("dock-and-repair flies home, pays the shop, undocks, and carries on where it left off", () => {
   const s = tripScript();
   const { results } = run(s, [

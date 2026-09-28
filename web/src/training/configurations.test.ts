@@ -46,3 +46,12 @@ test("settings default disabled with no corporation, wallet or home; explicit va
   saveTrainingSettings(local,settings);assert.deepEqual(readTrainingSettings(local),settings);
   assert.throws(()=>saveTrainingSettings(local,{...settings,onboarding:{enabled:true,corporationID:98,authorityKey:"",rights:"FULL_ACCESS_EXCEPT_CEO"}}));
 });
+test("resolved structure Home persists under the existing key without moving a pilot",()=>{
+  const local=storage();
+  const home={locationID:1030000000001,name:"My Astrahus",systemID:30000142,kind:"PLAYER_STRUCTURE" as const,
+    relocation:"CONFIG_ONLY" as const,capability:"DOCKABLE_STRUCTURE" as const};
+  const settings={...defaultTrainingSettings(),home};
+  saveTrainingSettings(local,settings);
+  assert.deepEqual(readTrainingSettings(local),settings);
+  assert.throws(()=>saveTrainingSettings(local,{...settings,home:{...home,relocation:"MANUAL_GM_ONLY" as const}}));
+});

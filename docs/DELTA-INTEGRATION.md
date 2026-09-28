@@ -2,7 +2,7 @@
 
 This branch builds on [Farmer's original EveJS Web Companion](https://github.com/rrfarmer/evejs-web-companion) and [Tokeiito's substantial modifications and extensions](https://github.com/Tokeiito/evejs-web-companion), following Tokeiito's `tokeiito` line. Delta's systems below are experimental extensions on that foundation, not a claim to have originated Web Companion.
 
-The selected gameplay integration was rebuilt from audited Tokeiito base `2dd519ce5a496a2067c4c731a4a3f86858b94f68`. The previous publication included gameplay through `cd258b02e8a8f53b4825e9921efaf12e7c2fdd96` (preceded by public gameplay point `b41344dda95dfd278453050f92d6c5ca9136687f`). The current integrated gameplay/documentation point is `77f5365b1a19367437276b2f708b139ca588c043`, including the accepted Pilot Training and Mining Command Center histories. Normal merges preserve both those histories and the earlier public documentation lineage; this publication does not update to a newer Tokeiito base.
+The selected gameplay integration was rebuilt from audited Tokeiito base `2dd519ce5a496a2067c4c731a4a3f86858b94f68`. The previous publication included gameplay through `cd258b02e8a8f53b4825e9921efaf12e7c2fdd96` (preceded by public gameplay point `b41344dda95dfd278453050f92d6c5ca9136687f`). The accepted Pilot Training and Mining Command Center histories were integrated by `77f5365b1a19367437276b2f708b139ca588c043`. Normal merges preserve both those histories and the earlier public documentation lineage; this work does not update to a newer Tokeiito base.
 
 This document owns integration history, change summaries and verification status.
 Usage belongs in the [Pilot Training guide](pilot-training.md) and
@@ -20,6 +20,16 @@ the [runtime patch instructions](pilot-training-runtime-setup.md).
 - Distribution delivery runs can prefer levels 1–4, optionally falling back only to lower levels. Agent-conversation authority decides eligibility and the existing cargo-capacity gate remains in force.
 
 Tokeiito's Pilot Groups, ore-site mining and planetary industry implementations remain the upstream implementations on this line. This branch is for inspecting and selectively integrating behavior; it is not a wholesale merge of Farmer and Tokeiito history.
+
+## Dockable destinations
+
+Generic WC travel, dock and personal-hangar ore delivery can target an NPC station or an access-checked player structure. The shared destination picker searches names and keeps station and structure identities distinct. Structure access is checked again before routing and docking; arrival requires the corresponding `stationID` or `structureID` in authoritative flight status. Existing station script and MCC parking references retain their saved format.
+
+MCC Fleet Parking can return to a structure for dock-only or personal-hangar unload. Start preflights structure access for all executable members before starting any, and each hosted member checks again before its automation begins. Standard MCC Hauler Service and Self-Unload delivery still require an NPC station and corporation division: the existing corporation unload authority can fall back to a personal hangar, so structure corporation delivery is blocked rather than claiming a strict division delivery succeeded. Pilot Training Home may record an accessible structure as a future provisioning base; saving it does not relocate a pilot. Station-only agent, mission and service workflows remain station-only.
+
+Standalone MCC and Pilot Training pickers check access for an explicitly chosen pilot owned by the authenticated account without selecting or taking control of that pilot. The actual hosted member or browser pilot rechecks access before live work. An unavailable structure read leaves NPC station search usable with a warning. Repair watches still require an NPC-station Home because structure repair service is not verified.
+
+All-system access-scoped structure search requires the small [runtime patch](../runtime-patches/dockable-structure-search.patch) on the audited mutable EveJS 0.12.9 runtime. It changes only explicit `GetMyDockableStructures(0)` to return dockable IDs across systems. Omitted arguments retain the current-system read. It does not expose operational structure data or modify the immutable clean reference. No runtime was restarted for this source change; gameplay docking and structure unload remain to be verified.
 
 ## Drone lifecycle and recovery since the previous public gameplay point
 

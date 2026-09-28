@@ -160,6 +160,7 @@ function makeFakeStack(log) {
         },
         async retryDroneRecovery() { log.push(["retryDroneRecovery"]); },
         requireAutomationReady() { log.push(["requireAutomationReady"]); },
+        async verifyDockableStructure(id) { log.push(["verifyDockableStructure", id]); },
         async startCustomBot(doc) {
           log.push(["startCustomBot", doc]);
           store._set({ customBot: { ...IDLE_SLICE, status: "running", phase: "Working" } });
@@ -907,6 +908,36 @@ test("an operation pilot cannot start when login drone recovery is blocked", asy
   assert.match(outcome.message, /Lost-drone recovery unconfirmed/);
   assert.equal(host.claimedBy(START.characterID), null);
   assert.equal(log.some(([kind]) => kind === "startCustomBot"), false);
+});
+
+test("structure parking access is checked after pilot selection and before operation work", async () => {
+  const log = [];
+  const host = makeHost({ log });
+  const id = 1030000000001;
+  const started = await host.start({ ...START, operationID: "structure-park", operationRole: "MINER", parkingStructureID: id });
+  assert.equal(started.ok, true);
+  const order = log.map(row => row[0]);
+  assert.ok(order.indexOf("selectCharacter") < order.indexOf("verifyDockableStructure"));
+  assert.ok(order.indexOf("verifyDockableStructure") < order.indexOf("startCustomBot"));
+  assert.deepEqual(log.find(row => row[0] === "verifyDockableStructure"), ["verifyDockableStructure", id]);
+  await host.stopAll();
+});
+
+test("structure parking access loss refuses hosted work and releases the claim", async () => {
+  const log = [];
+  const stack = makeFakeStack(log);
+  const host = makeHost({ log, loadStack: async () => {
+    const base = await stack();
+    return { ...base, createAppFlow(store, options) {
+      const flow = base.createAppFlow(store, options);
+      return { ...flow, async verifyDockableStructure() { throw new Error("Docking access lost."); } };
+    } };
+  } });
+  const outcome = await host.start({ ...START, operationID: "structure-park", operationRole: "MINER", parkingStructureID: 1030000000001 });
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.stage, "PARKING_STRUCTURE_ACCESS");
+  assert.equal(host.claimedBy(START.characterID), null);
+  assert.equal(log.some(row => row[0] === "startCustomBot"), false);
 });
 
 test("operation pilot acquisition failure retains its stage and gateway cause code", async () => {

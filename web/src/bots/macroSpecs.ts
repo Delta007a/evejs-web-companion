@@ -10,6 +10,8 @@ export interface MacroArgSpec {
   readonly key: string;
   readonly kind: Arg["kind"];
   readonly required: boolean;
+  /** Only this station-shaped argument may also point at a player structure. */
+  readonly dockable?: boolean;
 }
 
 export interface MacroSpec {
@@ -21,7 +23,7 @@ export interface MacroSpec {
 export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
   undock: { args: [], untilRequired: false },
   "travel-to-station": {
-    args: [{ key: "station", kind: "station", required: true }],
+    args: [{ key: "station", kind: "station", required: true, dockable: true }],
     untilRequired: false,
   },
   // Same belt arg as mine-at-belt (a pinned one, or "nearest") — just the trip,
@@ -81,7 +83,7 @@ export const MACRO_SPECS: Readonly<Record<MacroID, MacroSpec>> = {
   },
   "deliver-ore": {
     args: [
-      { key: "station", kind: "station", required: true },
+      { key: "station", kind: "station", dockable: true, required: true },
       // Optional: absent = the pilot's own hangar, the shipped behaviour. Set,
       // the load is aimed at that corporation division — and still lands in the
       // pilot's own hangar if the office or the role is not there when the ship

@@ -910,6 +910,8 @@ async function selectHeldCharacter(webSessionID, account, characterID) {
     // semantic key (hangar/cargo/ship). Handles live here only — never in
     // browser JS — exactly like the bridgeSessionID.
     stationID: Number(outcome.session.stationID) || null,
+    structureID: Number(outcome.session.structureID) || null,
+    dockedLocationID: Number(outcome.session.structureID) || Number(outcome.session.stationID) || null,
     solarSystemID: Number(outcome.session.solarSystemID) || null,
     activeShipID: Number(outcome.session.shipID) || null,
     boundHandles: new Map(),
@@ -1098,12 +1100,20 @@ function requireHeldBridgeSession(req, res) {
 }
 
 // Bind spec factories for the semantic targets the page addresses.
+function inventoryLocationID(held) {
+  const id = Number(held.dockedLocationID) || 0;
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw Object.assign(new Error("Dock before accessing a hangar."), { code: "NOT_DOCKED", statusCode: 409 });
+  }
+  return id;
+}
 function hangarBindSpec(held) {
+  const locationID = inventoryLocationID(held);
   return {
-    key: `hangar:${held.stationID}`,
+    key: `hangar:${locationID}`,
     service: "invbroker",
     method: "GetInventory",
-    args: [held.stationID],
+    args: [locationID],
     kwargs: null,
   };
 }
@@ -1119,11 +1129,12 @@ function cargoBindSpec(held, shipID) {
 }
 
 function shipBindSpec(held) {
+  const locationID = inventoryLocationID(held);
   return {
-    key: `ship:${held.stationID}`,
+    key: `ship:${locationID}`,
     service: "ship",
     method: "MachoBindObject",
-    args: [[held.stationID, SHIP_BIND_GROUP_STATION]],
+    args: [[locationID, SHIP_BIND_GROUP_STATION]],
     kwargs: null,
   };
 }
@@ -2295,7 +2306,7 @@ app.post("/api/bridge/inventory/move", requireAuth, async (req, res, next) => {
     kwargs.qty = qty;
   }
   const destSpec = direction === "toCargo" ? cargoBindSpec(held, shipID) : hangarBindSpec(held);
-  const sourceLocationID = direction === "toCargo" ? held.stationID : shipID;
+  const sourceLocationID = direction === "toCargo" ? inventoryLocationID(held) : shipID;
   try {
     const outcome = await boundCall(
       held,
@@ -2399,11 +2410,12 @@ function corpOfficeBindSpec(officeID) {
 // Moniker('invbroker', (stationID, groupStation)) — the inventory MANAGER.
 // TrashItems dispatches on this, not on a per-container binding.
 function inventoryManagerBindSpec(held) {
+  const locationID = inventoryLocationID(held);
   return {
-    key: `invManager:${held.stationID}`,
+    key: `invManager:${locationID}`,
     service: "invbroker",
     method: "MachoBindObject",
-    args: [[held.stationID, SHIP_BIND_GROUP_STATION]],
+    args: [[locationID, SHIP_BIND_GROUP_STATION]],
     kwargs: null,
   };
 }
@@ -2505,7 +2517,7 @@ function decodeDivisionNames(result) {
  */
 async function readCorpOffice(held, webSessionID) {
   const offices = await readCorpOffices(held, webSessionID);
-  const here = offices.find((office) => office.stationID === held.stationID);
+  const here = offices.find((office) => office.stationID === held.dockedLocationID);
   return here ? here.officeID : 0;
 }
 
@@ -2542,7 +2554,7 @@ async function readCorpOffices(held, webSessionID) {
 async function resolvePlace(held, webSessionID, descriptor) {
   const kind = String((descriptor && descriptor.kind) || "");
   if (kind === "hangar") {
-    return { spec: hangarBindSpec(held), flag: ITEM_FLAG_HANGAR, locationID: held.stationID };
+    return { spec: hangarBindSpec(held), flag: ITEM_FLAG_HANGAR, locationID: inventoryLocationID(held) };
   }
   if (kind === "cargo") {
     if (!held.activeShipID) {
@@ -3471,7 +3483,7 @@ app.post("/api/bridge/fitting/fit", requireAuth, async (req, res, next) => {
       req.webSessionID,
       cargoBindSpec(held, shipID),
       "Add",
-      [itemID, source === "cargo" ? shipID : held.stationID],
+      [itemID, source === "cargo" ? shipID : inventoryLocationID(held)],
       { qty: 1, flag: slotFlag },
     );
     // Verify: a silent decline is indistinguishable from success at the call
@@ -14280,6 +14292,104 @@ app.get("/api/bridge/structures", requireAuth, async (req, res, next) => {
   }
 });
 
+// A dockable structure search is deliberately narrower than the structure
+// directory: only IDs returned by the character-scoped access authority may
+// reach the name resolver. The explicit zero asks the WC runtime extension for
+// all systems; ordinary GetMyDockableStructures calls remain system-scoped.
+function structureIDsFromList(result) {
+  if (!result || result.type !== "list" || !Array.isArray(result.items)) {
+    throw Object.assign(new Error("Dockable structure authority is unreadable."), { code: "STRUCTURE_ACCESS_UNREADABLE", statusCode: 503 });
+  }
+  return [...new Set(result.items.map((item) => Number(item)).filter((id) => Number.isSafeInteger(id) && id > 0))];
+}
+
+// Cockpit reads use its held pilot. Standalone MCC/Training pickers may name an
+// account-owned pilot explicitly. Their read is stateless: it never selects or
+// claims that character, and every identity field comes from the owned gateway
+// character record, never from the browser. A live operation rechecks access
+// on its actual held pilot before any route or docking command.
+async function dockableAccessCall(req, method, args, characterID = 0) {
+  const held = bridgeSessions.get(req.webSessionID);
+  if (!characterID && held) return heldTopLevelCall(held, req.webSessionID, "structureDirectory", method, args, null);
+  if (!Number.isSafeInteger(characterID) || characterID <= 0) {
+    throw Object.assign(new Error("Choose an authenticated pilot to check structure access."), { code: "STRUCTURE_PILOT_REQUIRED", statusCode: 409 });
+  }
+  const character = await store.getCharacterForAccount(req.account.accountID, characterID);
+  if (!character) throw Object.assign(new Error("The selected pilot is not owned by this account."), { code: "STRUCTURE_PILOT_UNAVAILABLE", statusCode: 403 });
+  return gateway.callMethod("structureDirectory", method, args, null, {
+    userid: req.account.accountID, characterID,
+    corporationID: character.corporationID || 0, corpid: character.corporationID || 0,
+    allianceID: character.allianceID || 0,
+  });
+}
+
+async function accessibleStructureMatches(req, query, characterID = 0) {
+  const listed = await dockableAccessCall(req, "GetMyDockableStructures", [0], characterID);
+  const ids = structureIDsFromList(listed.result);
+  if (ids.length > 200) {
+    throw Object.assign(new Error("Too many accessible structures to search safely."), { code: "STRUCTURE_SEARCH_LIMIT", statusCode: 409 });
+  }
+  const matches = [];
+  for (let offset = 0; offset < ids.length; offset += STRUCTURE_NAME_LOOKUP_CAP) {
+    const batch = ids.slice(offset, offset + STRUCTURE_NAME_LOOKUP_CAP);
+    const { records, failed } = await resolveRuntimeStructureNames(req, batch, { publicWithoutHeld: true });
+    if (failed.size) {
+      throw Object.assign(new Error("Could not resolve accessible structures; try again."), { code: "STRUCTURE_SEARCH_UNREADABLE", statusCode: 503 });
+    }
+    for (const id of batch) {
+      const record = records.get(id);
+      if (!record?.name || !record.solarSystemID || !record.name.toLocaleLowerCase().includes(query.toLocaleLowerCase())) continue;
+      matches.push({ id, kind: "structure", name: record.name, solarSystemID: record.solarSystemID,
+        solarSystemName: staticData.getSolarSystemName(record.solarSystemID) });
+    }
+  }
+  return matches.sort((a, b) => a.name.localeCompare(b.name)).slice(0, 25);
+}
+
+async function assertStructureDockAccess(held, webSessionID, structureID) {
+  const checked = await heldTopLevelCall(held, webSessionID, "structureDirectory", "CheckMyDockingAccessToStructures", [[structureID]], null);
+  if (!structureIDsFromList(checked.result).includes(structureID)) {
+    throw Object.assign(new Error("This pilot no longer has docking access to that structure."), { code: "STRUCTURE_DOCK_ACCESS_DENIED", statusCode: 409 });
+  }
+}
+
+app.get("/api/dockable-structures/find", requireAuth, async (req, res, next) => {
+  try {
+    const q = String(req.query.q || "").trim().slice(0, 120);
+    const characterID = Number(req.query.characterID || 0);
+    res.json({ ok: true, matches: q.length >= 2 ? await accessibleStructureMatches(req, q, characterID) : [] });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/dockable-structures/pilots", requireAuth, async (req, res, next) => {
+  try {
+    const characters = await store.listCharactersForAccount(req.account.accountID);
+    res.json({ ok: true, pilots: characters.filter((row) => row.accountID === req.account.accountID).map((row) => ({
+      characterID: row.characterID, characterName: row.characterName,
+    })) });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/dockable-structures/:id", requireAuth, async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!isPlayerStructureID(id)) {
+      res.status(400).json({ ok: false, error: "INVALID_STRUCTURE" }); return;
+    }
+    const checked = await dockableAccessCall(req, "CheckMyDockingAccessToStructures", [[id]], Number(req.query.characterID || 0));
+    if (!structureIDsFromList(checked.result).includes(id)) {
+      res.status(409).json({ ok: false, error: "STRUCTURE_DOCK_ACCESS_DENIED" }); return;
+    }
+    const { records, failed } = await resolveRuntimeStructureNames(req, [id], { publicWithoutHeld: true });
+    const record = records.get(id);
+    if (failed.has(id) || !record?.name || !record.solarSystemID) {
+      res.status(409).json({ ok: false, error: "STRUCTURE_UNRESOLVED", message: "That accessible structure cannot be resolved." }); return;
+    }
+    res.json({ ok: true, location: { kind: "structure", id, name: record.name, solarSystemID: record.solarSystemID,
+      solarSystemName: staticData.getSolarSystemName(record.solarSystemID) } });
+  } catch (error) { next(error); }
+});
+
 // --- R66 plumbing sweep: pvp-info READS (bounties / wars / killmail) — no UI ---
 // PLUMBING ONLY: three routes make the bounty / war / killmail READS reachable +
 // decodable so a later goal builds UI cheaply. No panel/tab/store slice ships.
@@ -15382,8 +15492,12 @@ async function readHeldFlight(held, webSessionID) {
         Number.isSafeInteger(Number(flight.shipID)) && Number(flight.shipID) > 0) {
       held.activeShipID = Number(flight.shipID);
     }
-    if (flight.docked === true && Number(flight.stationID) > 0) {
-      held.stationID = Number(flight.stationID);
+    if (flight.docked === true) {
+      held.stationID = Number(flight.stationID) || null;
+      held.structureID = Number(flight.structureID) || null;
+      held.dockedLocationID = held.structureID || held.stationID;
+    } else if (flight.inSpace === true) {
+      held.dockedLocationID = null;
     }
     // The solar system the character is in RIGHT NOW. Tracked here because
     // R15's industry deliver/cancel take it as an argument
@@ -16140,6 +16254,9 @@ app.post("/api/bridge/flight/dock", requireAuth, async (req, res, next) => {
     const before = await readHeldFlight(held, req.webSessionID);
     if (!requireInSpace(res, before.flight)) {
       return;
+    }
+    if (isPlayerStructureID(stationID)) {
+      await assertStructureDockAccess(held, req.webSessionID, stationID);
     }
     const shipID = Number(before.flight.shipID) || 0;
     const expected = { stationID, shipID };
@@ -18558,11 +18675,17 @@ app.get("/api/pilot-training/settings-context", requireTrainingAuth, async (req,
   try { res.json({ ok: true, ...await readTrainingSettingsContext({ account: req.account, store, gateway }) }); }
   catch (error) { next(error); }
 });
-app.get("/api/pilot-training/homes", requireTrainingAuth, (req, res, next) => {
+app.get("/api/pilot-training/homes", requireTrainingAuth, async (req, res, next) => {
   try {
     const q = String(req.query.q || "").trim().slice(0, 120);
     const result = staticData.findMapLocations({ q, kind: "station", limit: 25 });
-    res.json({ ok: true, matches: result.matches, capped: result.capped });
+    let structures = [], structureWarning = null;
+    if (q.length >= 2 && req.query.characterID) {
+      try { structures = await accessibleStructureMatches(req, q, Number(req.query.characterID)); }
+      catch { structureWarning = "Accessible structure search is unavailable; NPC stations remain available."; }
+    }
+    res.json({ ok: true, matches: [...result.matches, ...structures].slice(0, 25),
+      capped: result.capped || result.matches.length + structures.length > 25, structureWarning });
   } catch (error) { next(error); }
 });
 app.get("/api/pilot-training/home", requireTrainingAuth, async (req, res, next) => {
@@ -18570,9 +18693,23 @@ app.get("/api/pilot-training/home", requireTrainingAuth, async (req, res, next) 
     const id = Number(req.query.locationID);
     if (!Number.isSafeInteger(id) || id <= 0) throw Object.assign(new Error("Invalid location ID."), { code: "INVALID_LOCATION", statusCode: 400 });
     const station = staticData.getStation(id);
-    if (!station) throw Object.assign(new Error("This location is not a known NPC station. Player-structure relocation is unsupported: docking authority has not been established."), { code: "UNSUPPORTED_HOME_LOCATION", statusCode: 400 });
-    res.json({ ok: true, home: { locationID: id, name: station.stationName, systemID: station.solarSystemID || null,
-      kind: "NPC_STATION", relocation: "MANUAL_GM_ONLY", capability: "DOCKABLE_STATION" } });
+    if (station) {
+      res.json({ ok: true, home: { locationID: id, name: station.stationName, systemID: station.solarSystemID || null,
+        kind: "NPC_STATION", relocation: "MANUAL_GM_ONLY", capability: "DOCKABLE_STATION" } });
+      return;
+    }
+    if (!isPlayerStructureID(id)) { res.status(400).json({ ok: false, error: "UNSUPPORTED_HOME_LOCATION" }); return; }
+    const checked = await dockableAccessCall(req, "CheckMyDockingAccessToStructures", [[id]], Number(req.query.characterID || 0));
+    if (!structureIDsFromList(checked.result).includes(id)) {
+      res.status(409).json({ ok: false, error: "STRUCTURE_DOCK_ACCESS_DENIED" }); return;
+    }
+    const { records, failed } = await resolveRuntimeStructureNames(req, [id], { publicWithoutHeld: true });
+    const structure = records.get(id);
+    if (failed.has(id) || !structure?.name || !structure.solarSystemID) {
+      res.status(409).json({ ok: false, error: "STRUCTURE_UNRESOLVED" }); return;
+    }
+    res.json({ ok: true, home: { locationID: id, name: structure.name, systemID: structure.solarSystemID,
+      kind: "PLAYER_STRUCTURE", relocation: "CONFIG_ONLY", capability: "DOCKABLE_STRUCTURE" } });
   } catch (error) { next(error); }
 });
 
@@ -19623,7 +19760,9 @@ function readCachedStructureName(structureID, now) {
 }
 
 /**
- * Resolve player-structure IDs on the caller's live session.
+ * Resolve public player-structure names. Ordinary callers use the live session;
+ * access-scoped destination search may use the stateless public read after its
+ * owned-pilot access list has established which IDs may be requested.
  *
  * Returns `{ records, failed }` where `records` maps a structureID to
  * `{ name, solarSystemID, typeID }` — `name` null when the server said "no such
@@ -19634,7 +19773,7 @@ function readCachedStructureName(structureID, now) {
  * needs a structure's system must read it from here rather than making a second
  * call; GetStructureInfo already carries it.
  */
-async function resolveRuntimeStructureNames(req, structureIDs) {
+async function resolveRuntimeStructureNames(req, structureIDs, options = {}) {
   const records = new Map();
   const failed = new Set();
   const wanted = [...new Set(structureIDs.filter(isPlayerStructureID))];
@@ -19660,7 +19799,7 @@ async function resolveRuntimeStructureNames(req, structureIDs) {
   // up, not a finding that the structure is nameless — the caller must be able
   // to tell those apart, so these go to `failed` and nothing is cached.
   const held = bridgeSessions.get(req.webSessionID) || null;
-  if (!held) {
+  if (!held && !options.publicWithoutHeld) {
     for (const structureID of toFetch) {
       failed.add(structureID);
     }
@@ -19674,14 +19813,9 @@ async function resolveRuntimeStructureNames(req, structureIDs) {
 
   for (const structureID of toFetch.slice(0, STRUCTURE_NAME_LOOKUP_CAP)) {
     try {
-      const outcome = await heldTopLevelCall(
-        held,
-        req.webSessionID,
-        "structureDirectory",
-        "GetStructureInfo",
-        [structureID],
-        null,
-      );
+      const outcome = held
+        ? await heldTopLevelCall(held, req.webSessionID, "structureDirectory", "GetStructureInfo", [structureID], null)
+        : await gateway.callMethod("structureDirectory", "GetStructureInfo", [structureID], null, { userid: req.account.accountID });
       const result = outcome && outcome.result;
       if (result === null || result === undefined) {
         // The definitive "not a player structure" — cacheable.
@@ -20387,7 +20521,8 @@ function prepareMiningOperationLaunch(definition) {
   const warnings = definition.members.filter((member) => member.role === "DEFENDER")
     .map((member) => `${member.characterName}: DEFENDER execution is not supported; Start will be DEGRADED.`);
   if (definition.policies?.parking.mode !== undefined && definition.policies.parking.mode !== "STAY_IN_PLACE") {
-    warnings.push(`On manual Stop: ${definition.policies.parking.mode} at ${definition.policies.parking.destination.stationName}. Parking uses the remaining run grant; stop before it expires. Cans left in space are not collected as part of Stop.`);
+    const destination = definition.policies.parking.destination;
+    warnings.push(`On manual Stop: ${definition.policies.parking.mode} at ${destination.kind === "structure" ? destination.name : destination.stationName}. Parking uses the remaining run grant; stop before it expires. Cans left in space are not collected as part of Stop.`);
   }
   return { ok: true, scripts, audits, commonClasses, planHash, warnings };
 }
@@ -20426,6 +20561,33 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
       res.status(409).json({ ok: false, error: "OPERATION_LAUNCH_PLAN_STALE",
         message: "The operation profile or destination changed since preflight. Review and Start again." });
       return;
+    }
+    const parkingStructure = definition.policies?.parking?.destination?.kind === "structure"
+      ? definition.policies.parking.destination : null;
+    if (parkingStructure) {
+      // Check every intended member before begin() changes operation state or
+      // the first bot starts. The held-session check in botHost still repeats
+      // this against the actual ship and access state immediately before work.
+      for (const member of definition.members.filter((row) => row.role !== "DEFENDER")) {
+        const account = await store.getAccount(member.accountName);
+        const character = account && !account.banned
+          ? await store.getCharacterForAccount(account.accountID, member.characterID) : null;
+        if (!character) {
+          res.status(409).json({ ok: false, error: "PARKING_STRUCTURE_PILOT_UNAVAILABLE",
+            message: `${member.characterName}: account-owned pilot is unavailable for structure preflight.` });
+          return;
+        }
+        const checked = await gateway.callMethod("structureDirectory", "CheckMyDockingAccessToStructures", [[parkingStructure.id]], null, {
+          userid: account.accountID, characterID: character.characterID,
+          corporationID: character.corporationID || 0, corpid: character.corporationID || 0,
+          allianceID: character.allianceID || 0,
+        });
+        if (!structureIDsFromList(checked.result).includes(parkingStructure.id)) {
+          res.status(409).json({ ok: false, error: "PARKING_STRUCTURE_ACCESS_DENIED",
+            message: `${member.characterName}: docking access to the parking structure is unavailable. No member was started.` });
+          return;
+        }
+      }
     }
     const { scripts, audits, commonClasses } = plan;
     const begin = miningOperations.begin(definition.operationID, commonClasses);
@@ -20502,6 +20664,8 @@ app.post("/api/mining-operations/:operationID/start", requireAuth, async (req, r
               released = true;
             }
           },
+          parkingStructureID: definition.policies?.parking?.destination?.kind === "structure"
+            ? definition.policies.parking.destination.id : null,
         });
         if (
           !outcome.ok &&

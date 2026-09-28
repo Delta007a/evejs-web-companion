@@ -23,18 +23,31 @@ function normalizePolicies(input, resolveStation, resolveSystem) {
   if (!STOP_MODES.includes(parking.mode)) throw invalid("Choose a supported Stop / Parking policy.");
   let destination = null;
   if (parking.mode !== "STAY_IN_PLACE") {
-    const id = Number(parking.destination?.stationID);
-    const station = Number.isSafeInteger(id) && id > 0 ? resolveStation(id) : null;
-    const system = station ? resolveSystem(Number(station.solarSystemID)) : null;
-    if (!station?.stationName || !system?.solarSystemName) throw invalid("Return-home parking requires an explicit known parking station. Starting station is never substituted.");
-    if ((parking.destination.stationName && parking.destination.stationName !== station.stationName) ||
-        (parking.destination.systemName && parking.destination.systemName !== system.solarSystemName)) {
-      throw invalid("Parking station identity does not match the authoritative catalog.");
+    if (parking.destination?.kind === "structure") {
+      const { id, name, solarSystemID, solarSystemName } = parking.destination;
+      const system = Number.isSafeInteger(solarSystemID) ? resolveSystem(solarSystemID) : null;
+      if (!Number.isSafeInteger(id) || id < 1_000_000_000_000 || typeof name !== "string" || !name.trim() ||
+          !system?.solarSystemName || solarSystemName !== system.solarSystemName) {
+        throw invalid("Return-home parking requires a resolved player structure and known solar system.");
+      }
+      destination = { kind: "structure", id, name: name.trim(), solarSystemID, solarSystemName: system.solarSystemName };
+    } else {
+      const id = Number(parking.destination?.stationID);
+      const station = Number.isSafeInteger(id) && id > 0 ? resolveStation(id) : null;
+      const system = station ? resolveSystem(Number(station.solarSystemID)) : null;
+      if (!station?.stationName || !system?.solarSystemName) throw invalid("Return-home parking requires an explicit known parking station. Starting station is never substituted.");
+      if ((parking.destination.stationName && parking.destination.stationName !== station.stationName) ||
+          (parking.destination.systemName && parking.destination.systemName !== system.solarSystemName)) {
+        throw invalid("Parking station identity does not match the authoritative catalog.");
+      }
+      destination = { stationID: id, stationName: station.stationName, systemName: system.solarSystemName };
     }
-    destination = { stationID: id, stationName: station.stationName, systemName: system.solarSystemName };
   }
   const division = parking.corporationDivision ?? null;
   if (division !== null && (!Number.isSafeInteger(division) || division < 1 || division > 7)) throw invalid("Parking unload division must be 1–7, or personal hangar.");
+  if (destination?.kind === "structure" && parking.mode === "RETURN_HOME_UNLOAD_DOCK" && division !== null) {
+    throw invalid("Corporation-division delivery at a player structure is not verified; choose personal-hangar parking or an NPC station.");
+  }
   return { version: 1,
     resourcePolicy: normalizeResourcePolicy(value.resourcePolicy),
     parking: { mode: parking.mode, destination, corporationDivision: division },

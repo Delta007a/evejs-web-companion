@@ -1,11 +1,12 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import type { TrainingSettings, TrainingCorporation, TrainingAuthority, TrainingHomeMatch } from "../training/settings.ts";
-  let { settings, corporations, authorities, busy, contextError = "", onSave, onResolve, onSearch }: {
+  let { settings, corporations, authorities, homeAccessPilots = [], homeAccessPilot = $bindable(""), busy, contextError = "", onSave, onResolve, onSearch }: {
     settings: TrainingSettings; corporations: readonly TrainingCorporation[]; authorities: readonly TrainingAuthority[];
+    homeAccessPilots?: readonly { key: string; label: string }[]; homeAccessPilot?: string;
     busy: boolean; contextError?: string; onSave: (value: TrainingSettings) => void;
     onResolve: (id: number) => Promise<TrainingSettings["home"]>;
-    onSearch: (query: string) => Promise<{ matches: TrainingHomeMatch[]; capped: boolean }>;
+    onSearch: (query: string) => Promise<{ matches: TrainingHomeMatch[]; capped: boolean; structureWarning?: string | null }>;
   } = $props();
   let enabled = $state(untrack(() => settings.onboarding.enabled)), corporation = $state(untrack(() => String(settings.onboarding.corporationID || "")));
   let rights = $state(untrack(() => settings.onboarding.rights)), authority = $state(untrack(() => settings.onboarding.authorityKey));
@@ -33,8 +34,9 @@
   }
   async function searchHome() {
     searching = true; searched = false; message = ""; matches = [];
-    try { const result = await onSearch(search.trim()); matches = result.matches; capped = result.capped; searched = true; }
-    catch { message = "Station search is unavailable. Existing home has been preserved."; }
+    try { const result = await onSearch(search.trim()); matches = result.matches; capped = result.capped; searched = true;
+      if (result.structureWarning) message = result.structureWarning; }
+    catch { message = "Dockable destination search is unavailable. Existing home has been preserved."; }
     finally { searching = false; }
   }
   async function chooseHome(id: number) {
@@ -77,16 +79,22 @@
   <p>Full access grants ordinary corporation rights and delegation. It does not transfer CEO ownership or promote the trainee to Director. The authority must be a dedicated non-CEO Director; busy pilots are never taken over.</p>
   <p>Funding is opt-in and covers only the reviewed shortfall. Wallet permissions and balances are checked again before any transfer.</p>
   {#if differentWalletCorp}<p class="notice">A different wallet corporation is saved. Review it under Advanced details; funding still requires matching trainee membership.</p>{/if}
-  <label>Training / provisioning home
-    <input bind:value={search} disabled={busy || searching} placeholder="Search NPC stations by name…" onkeydown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (search.trim().length >= 2) void searchHome(); } }} />
+  <label>Check structure access as pilot
+    <select bind:value={homeAccessPilot} disabled={busy || searching}>
+      <option value="">NPC station search only</option>
+      {#each homeAccessPilots as pilot}<option value={pilot.key}>{pilot.label}</option>{/each}
+    </select>
   </label>
-  <button class="minor" type="button" disabled={busy || searching || search.trim().length < 2} onclick={searchHome}>{searching ? "Searching…" : "Search stations"}</button>
-  {#if matches.length}<ul class="matches">{#each matches as match}<li><button type="button" class="minor" disabled={busy || searching} onclick={() => chooseHome(match.id)}>{match.name}</button></li>{/each}</ul>
-  {:else if searched}<p>No matching NPC stations.</p>{/if}
+  <label>Training / provisioning home
+    <input bind:value={search} disabled={busy || searching} placeholder="Search NPC stations or accessible structures…" onkeydown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (search.trim().length >= 2) void searchHome(); } }} />
+  </label>
+  <button class="minor" type="button" disabled={busy || searching || search.trim().length < 2} onclick={searchHome}>{searching ? "Searching…" : "Search destinations"}</button>
+  {#if matches.length}<ul class="matches">{#each matches as match}<li><button type="button" class="minor" disabled={busy || searching} onclick={() => chooseHome(match.id)}>{match.name} · {match.kind === "structure" ? "Upwell structure" : "NPC station"}{match.solarSystemName ? ` · ${match.solarSystemName}` : ""}</button></li>{/each}</ul>
+  {:else if searched}<p>No matching dockable destinations.</p>{/if}
   {#if capped && searched}<p>Showing 25 results. Refine your search.</p>{/if}
   <p>Selected: <strong>{home?.name ?? "Unconfigured"}</strong></p>
   {#if home}<button class="minor" type="button" disabled={busy || searching} onclick={() => home = null}>Clear home</button>{/if}
-  <p>Home is configuration only; saving does not move pilots. NPC stations support manual GM relocation. Player-structure relocation is unavailable.</p>
+  <p>Home is configuration only; saving does not move pilots. NPC stations support manual GM relocation. Player-structure relocation remains a separate unverified workflow.</p>
   <button type="button" disabled={busy || searching || invalid} onclick={save}>Save training settings</button>
   {#if invalid}<p class="notice">Resolve unavailable choices or select an eligible authority before saving.</p>{/if}
   {#if message}<p role="status">{message}</p>{/if}

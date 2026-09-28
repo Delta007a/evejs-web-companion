@@ -1939,7 +1939,8 @@ export interface MiningOperationDefinition {
     readonly version: 1;
     readonly parking: {
       readonly mode: "STAY_IN_PLACE" | "RETURN_HOME_DOCK" | "RETURN_HOME_UNLOAD_DOCK";
-      readonly destination: { readonly stationID: number; readonly stationName: string; readonly systemName: string } | null;
+      readonly destination: { readonly stationID: number; readonly stationName: string; readonly systemName: string; readonly kind?: "station" } |
+        import("../nav/dockableLocation.ts").DockableLocation | null;
       readonly corporationDivision: number | null;
     };
     readonly travelAssist?: { readonly mode: "DISABLED" | "AUTO" };
@@ -3384,7 +3385,7 @@ export async function resolveDestination(
 export interface MapLocation {
   readonly id: number;
   readonly name: string;
-  readonly kind: "system" | "station";
+  readonly kind: "system" | "station" | "structure";
   readonly solarSystemID: number | null;
   readonly solarSystemName: string | null;
 }
@@ -3399,7 +3400,7 @@ export interface FindMapLocationsResult {
 
 function asMapLocation(value: JsonValue): MapLocation {
   const row = (value ?? {}) as Record<string, JsonValue>;
-  const kind = row.kind === "station" ? "station" : "system";
+  const kind = row.kind === "station" || row.kind === "structure" ? row.kind : "system";
   return {
     id: asNumberOrNull(row.id) ?? 0,
     name: typeof row.name === "string" ? row.name : `Location ${asNumberOrNull(row.id) ?? 0}`,
@@ -3428,6 +3429,43 @@ export async function findMapLocations(
     capped: data.capped === true,
     matches: Array.isArray(data.matches) ? data.matches.map(asMapLocation) : [],
   };
+}
+
+/** Search only structures the selected pilot may dock at. The BFF intersects
+ * the runtime's access-scoped ID list with public identity, never with the
+ * operational structure directory. An unavailable read rejects, not an empty
+ * list. */
+export async function findAccessibleStructures(q: string, options: ApiOptions = {}, characterID?: number): Promise<readonly MapLocation[]> {
+  const data = await getJson(`/api/dockable-structures/find?q=${encodeURIComponent(q)}${characterID ? `&characterID=${characterID}` : ""}`, options);
+  if (!Array.isArray(data.matches)) throw new Error("Accessible structure search is unreadable.");
+  return data.matches.map((row) => {
+    const match = row as Record<string, JsonValue>;
+    return { id: asNumberOrNull(match.id) ?? 0,
+      name: typeof match.name === "string" ? match.name : "",
+      kind: "structure" as const,
+      solarSystemID: asNumberOrNull(match.solarSystemID),
+      solarSystemName: typeof match.solarSystemName === "string" ? match.solarSystemName : null };
+  }).filter((row) => row.id > 0 && row.name && row.solarSystemID !== null);
+}
+
+/** Recheck access and current identity immediately before a structure route. */
+export async function resolveAccessibleStructure(id: number, options: ApiOptions = {}, characterID?: number): Promise<import("../nav/dockableLocation.ts").DockableLocation> {
+  const data = await getJson(`/api/dockable-structures/${id}${characterID ? `?characterID=${characterID}` : ""}`, options);
+  const row = (data.location ?? {}) as Record<string, JsonValue>;
+  const solarSystemID = asNumberOrNull(row.solarSystemID);
+  if (row.kind !== "structure" || asNumberOrNull(row.id) !== id || solarSystemID === null || typeof row.name !== "string" || !row.name) {
+    throw new Error("Structure docking authority is unreadable.");
+  }
+  return { kind: "structure", id, name: row.name, solarSystemID,
+    solarSystemName: typeof row.solarSystemName === "string" ? row.solarSystemName : null };
+}
+
+export async function listDockableAccessPilots(options: ApiOptions = {}): Promise<readonly { characterID: number; characterName: string }[]> {
+  const data = await getJson("/api/dockable-structures/pilots", options);
+  if (!Array.isArray(data.pilots)) throw new Error("Dockable access pilots are unreadable.");
+  return data.pilots.map((row) => ({ characterID: asNumberOrNull((row as Record<string, JsonValue>).characterID) ?? 0,
+    characterName: String((row as Record<string, JsonValue>).characterName ?? "") }))
+    .filter((row) => row.characterID > 0 && row.characterName);
 }
 
 // ─── Player Bot Builder library (goal D2/D3) ─────────────────────────────────
@@ -4750,14 +4788,19 @@ export async function acquireFactorySkills(reviewID: string, funding: import("..
 export async function trainingOnboarding(action: "review" | "apply", body: unknown, options: ApiOptions): Promise<Record<string, any>> {
   return (await postJson(`/api/pilot-training/onboarding/${action}`, body, options)).outcome as Record<string, any>;
 }
-export async function resolveTrainingHome(locationID: number, options: ApiOptions): Promise<import("../training/settings.ts").TrainingSettings["home"]> {
-  return (await getJson(`/api/pilot-training/home?locationID=${locationID}`, options)).home as unknown as import("../training/settings.ts").TrainingSettings["home"];
+export async function resolveTrainingHome(locationID: number, options: ApiOptions, characterID?: number): Promise<import("../training/settings.ts").TrainingSettings["home"]> {
+  return (await getJson(`/api/pilot-training/home?locationID=${locationID}${characterID ? `&characterID=${characterID}` : ""}`, options)).home as unknown as import("../training/settings.ts").TrainingSettings["home"];
 }
 export async function loadTrainingSettingsContext(options: ApiOptions): Promise<import("../training/settings.ts").TrainingSettingsContext> {
   return await getJson("/api/pilot-training/settings-context", options) as unknown as import("../training/settings.ts").TrainingSettingsContext;
 }
-export async function searchTrainingHomes(query: string, options: ApiOptions): Promise<{ matches: import("../training/settings.ts").TrainingHomeMatch[]; capped: boolean }> {
-  return await getJson(`/api/pilot-training/homes?q=${encodeURIComponent(query)}`, options) as unknown as { matches: import("../training/settings.ts").TrainingHomeMatch[]; capped: boolean };
+export async function searchTrainingHomes(query: string, options: ApiOptions, characterID?: number): Promise<{ matches: import("../training/settings.ts").TrainingHomeMatch[]; capped: boolean; structureWarning: string | null }> {
+  const data = await getJson(`/api/pilot-training/homes?q=${encodeURIComponent(query)}${characterID ? `&characterID=${characterID}` : ""}`, options);
+  if (!Array.isArray(data.matches)) throw new Error("Training Home search is unreadable.");
+  const matches = data.matches.map(asMapLocation).filter(row =>
+    (row.kind === "station" || row.kind === "structure") && row.id > 0 && !!row.name && row.solarSystemID !== null);
+  return { matches: matches as import("../training/settings.ts").TrainingHomeMatch[], capped: data.capped === true,
+    structureWarning: typeof data.structureWarning === "string" ? data.structureWarning : null };
 }
 
 export async function factoryOwnership(characterID: number, options: ApiOptions = {}): Promise<{ owner: string; online: boolean }> {

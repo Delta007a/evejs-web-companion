@@ -510,6 +510,16 @@ test("decide: docked away from destination -> undock; docked at destination -> a
   );
 });
 
+test("structure route arrives only on confirmed structureID, not an NPC stationID", () => {
+  const id = 1030000000001;
+  const plan = { ...COMPILED, destinationStationID: id, destinationKind: "structure" as const };
+  const memory = { warpedInSystem: null, jumpedFromSystem: null, pendingApproachGate: null };
+  assert.equal(decideAutopilotAction(status({ docked: true, solarSystemID: DEST_SYSTEM,
+    stationID: null, structureID: id }), plan, memory).kind, "arrived");
+  assert.notEqual(decideAutopilotAction(status({ docked: true, solarSystemID: DEST_SYSTEM,
+    stationID: id, structureID: null }), plan, memory).kind, "arrived");
+});
+
 test("decide: in warp -> wait; at gate system already warped -> jump", () => {
   assert.equal(
     decideAutopilotAction(status({ inSpace: true, shipMode: "WARP", solarSystemID: ORIGIN_SYSTEM }), COMPILED, {

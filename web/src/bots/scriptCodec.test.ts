@@ -67,6 +67,29 @@ function golden(): BotScript {
   };
 }
 
+test("dockable structure refs round-trip only in generic travel, delivery and home slots", () => {
+  const structure = { entity: "structure" as const, id: 1030000000001, name: "My Astrahus", systemName: "Jita" };
+  const doc = golden();
+  const travel = { ...doc, home: structure, program: [
+    { id: "travel", kind: "macro" as const, macro: "travel-to-station" as const, args: { station: { kind: "station" as const, ref: structure } } },
+    { id: "deliver", kind: "macro" as const, macro: "deliver-ore" as const, args: { station: { kind: "station" as const, ref: structure } } },
+  ] };
+  assert.deepEqual(mustAccept(decodeScriptValue(travel)).doc, travel);
+  assert.deepEqual(mustAccept(decodeScriptText(encodeScriptDoc(travel))).doc, travel);
+  const station = golden();
+  assert.deepEqual(mustAccept(decodeScriptText(encodeScriptDoc(station))).doc, station);
+  const corporate = clone();
+  corporate.program = [{ id: "corp", kind: "macro", macro: "haul-all", args: {
+    stationA: { kind: "station", ref: structure }, stationB: { kind: "station", ref: doc.home },
+    pickupDivisionA: { kind: "corpDivision", division: 1, name: null },
+    deliveryDivisionB: { kind: "corpDivision", division: 1, name: null },
+  } }];
+  assert.equal(decodeScriptValue(corporate).ok, false, "corporate route station does not silently accept a structure");
+  const mislabelled = clone();
+  mislabelled.program[0].body[1].args.station.ref.id = structure.id;
+  assert.equal(decodeScriptValue(mislabelled).ok, false, "a structure ID cannot masquerade as an NPC station");
+});
+
 // A deep, deliberately UNTYPED clone. These tests break one field at a time into
 // shapes the type system would reject on purpose (an unknown macro, a garbage
 // condition, an out-of-range number) — the whole point is to feed the codec what

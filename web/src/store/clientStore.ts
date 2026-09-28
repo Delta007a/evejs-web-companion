@@ -1089,6 +1089,7 @@ export function createClientStore(): ClientStore {
           online: {
             ...current.online,
             stationID: event.stationID,
+            structureID: event.structureID ?? null,
             solarSystemID: event.solarSystemID,
           },
           station: event.station,

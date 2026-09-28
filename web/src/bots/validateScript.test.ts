@@ -45,6 +45,24 @@ test("a complete draft has no problems", () => {
   assert.deepEqual(validateScript(ready()), []);
 });
 
+test("structure Home supports pause watches but rejects repair watches", () => {
+  const structure = { entity: "structure" as const, id: 1030000000001, name: "My Astrahus", systemName: "Jita" };
+  assert.deepEqual(validateScript({ ...ready(), home: structure }), []);
+  const repairing: BotScript = { ...ready(), home: structure,
+    interrupts: [{ id: "repair", when: { kind: "health-below", fraction: 0.5 }, respond: "dock-and-repair" }] };
+  assert.match(validateScript(repairing).find((problem) => problem.path === "home")?.sentence ?? "", /NPC station/);
+});
+
+test("structure personal delivery is editable but corporation-division delivery is blocked", () => {
+  const structure = { entity: "structure" as const, id: 1030000000001, name: "My Astrahus", systemName: "Jita" };
+  const delivery: MacroStep = { id: "delivery", kind: "macro", macro: "deliver-ore",
+    args: { station: { kind: "station", ref: structure } } };
+  assert.deepEqual(validateScript({ ...ready(), program: [delivery] }), []);
+  const corporate: MacroStep = { ...delivery, args: { ...delivery.args,
+    into: { kind: "corpDivision", division: 1, name: null } } };
+  assert.match(validateScript({ ...ready(), program: [corporate] })[0]?.sentence ?? "", /Corporation-division/);
+});
+
 test("distribution agent level 5 is rejected because current EveJS exposes levels 1 to 4", () => {
   const draft: BotScript = {
     ...ready(),

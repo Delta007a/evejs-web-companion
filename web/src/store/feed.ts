@@ -143,7 +143,8 @@ export type FeedEvent =
   // the previous station's panel reads so the flow's re-fetch repopulates them.
   | {
       readonly type: "station/relocated";
-      readonly stationID: number;
+      readonly stationID: number | null;
+      readonly structureID?: number | null;
       readonly solarSystemID: number | null;
       readonly station: StationStatic | null;
     }

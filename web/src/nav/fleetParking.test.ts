@@ -10,11 +10,12 @@ import { decodeScriptValue } from "../bots/scriptCodec.ts";
 
 const policy: FleetParkingPolicy = { mode: "RETURN_HOME_UNLOAD_DOCK",
   destination: { stationID: 60003760, stationName: "Home", systemName: "Jita" }, corporationDivision: 1 };
-function observation(docked: boolean, holds: readonly MiningHold[] | null): ScriptObservation {
+function observation(docked: boolean, holds: readonly MiningHold[] | null, structure = false): ScriptObservation {
   return { inSpace: !docked, docked, inWarp: false, health: 1, shieldRatio: 1, armorRatio: 1, hullRatio: 1,
     hostileOnGrid: false, dronesOut: false, oreHoldFraction: 0, holdEmpty: false, snapshot: null,
     holds, lockedTargetIDs: [], miningModuleIDs: [], droneBayItemIDs: [], startingStationID: 12345,
-    flightStatus: { docked, inSpace: !docked, stationID: docked ? 60003760 : null, shipID: 9, shipIsCapsule: false } as FlightStatus,
+    flightStatus: { docked, inSpace: !docked, stationID: docked && !structure ? 60003760 : null,
+      structureID: docked && structure ? 1030000000001 : null, shipID: 9, shipIsCapsule: false } as FlightStatus,
     miningDrones: { bay: [], out: [], roles: {}, maxActive: 5 },
     // Normal operation is STOPPING and may have no target. Only the fixed,
     // trusted parking program is allowed to travel in this situation.
@@ -26,7 +27,7 @@ function observation(docked: boolean, holds: readonly MiningHold[] | null): Scri
 function hold(key: "ore" | "cargo", id: number, categoryID: number): MiningHold {
   return { key, label: key, present: true, error: null, capacity: null, items: [{ itemID: id, typeID: 1, quantity: 2, groupID: 1, categoryID }] };
 }
-function harness(options: { badHold?: boolean; refuseTravel?: boolean; refuseUnload?: boolean; initiallyDocked?: boolean; family?: "ORE_ANOMALY" | "ICE" } = {}) {
+function harness(options: { badHold?: boolean; refuseTravel?: boolean; refuseUnload?: boolean; initiallyDocked?: boolean; structure?: boolean; family?: "ORE_ANOMALY" | "ICE" } = {}) {
   let docked = !!options.initiallyDocked;
   let holds = [hold("ore", 10, 25), hold("cargo", 20, 7)];
   if (options.family === "ICE") holds[0] = { ...holds[0]!, key: "ice", items: [{ itemID: 10, typeID: 16265, categoryID: 25, groupID: 465, quantity: 2 }] };
@@ -35,13 +36,13 @@ function harness(options: { badHold?: boolean; refuseTravel?: boolean; refuseUnl
   const deps: ScriptRunnerDeps = {
     observe: async () => {
       if (++reads > 160) throw new Error("test exceeded bounded runner attempts");
-      const obs = observation(docked, options.badHold ? null : holds);
+      const obs = observation(docked, options.badHold ? null : holds, options.structure);
       if (options.family) Object.assign(obs, { miningOperation: { ...obs.miningOperation!, area: { ...obs.miningOperation!.area, targetClasses: [options.family] } } });
       return options.refuseTravel ? { ...obs, travel: { status: "paused", destinationStationID: 60003760, failureReason: "Dock refused", remainingJumps: 0 } } : obs;
     },
     issue: async action => {
       actions.push(action);
-      if (action.kind === "startRoute") { assert.equal(action.stationID, 60003760); docked = true; }
+      if (action.kind === "startRoute") { assert.equal(action.stationID, options.structure ? 1030000000001 : 60003760); docked = true; }
       if (action.kind === "unloadOre") {
         if (options.refuseUnload) throw new Error("No permission to unload");
         assert.equal(docked, true);
@@ -58,7 +59,23 @@ function harness(options: { badHold?: boolean; refuseTravel?: boolean; refuseUnl
 test("parking is a finite existing macro with explicit home, no starting station or mining selector", () => {
   assert.equal(decodeScriptValue(parkingScript(policy)).ok, true);
   assert.deepEqual(parkingScript(policy).program.map(row => row.kind === "macro" ? row.macro : null), ["deliver-ore"]);
-  assert.throws(() => parkingScript({ ...policy, destination: null! }), /explicit station/);
+  assert.throws(() => parkingScript({ ...policy, destination: null! }), /explicit dockable destination/);
+});
+
+test("player-structure parking uses the same finite route and proves structureID on arrival", async () => {
+  const destination = { kind: "structure" as const, id: 1030000000001, name: "My Astrahus",
+    solarSystemID: 30000142, solarSystemName: "Jita" };
+  const dockOnly: FleetParkingPolicy = { mode: "RETURN_HOME_DOCK", destination, corporationDivision: null };
+  assert.equal(decodeScriptValue(parkingScript(dockOnly)).ok, true);
+  assert.equal(parkingScript(dockOnly).home.entity, "structure");
+  const h = harness({ structure: true });
+  await runFleetParking(h.deps, dockOnly, Date.now() + 60_000, () => {});
+  assert.deepEqual(h.actions.map(action => action.kind), ["startRoute"]);
+  const unload: FleetParkingPolicy = { ...dockOnly, mode: "RETURN_HOME_UNLOAD_DOCK" };
+  const u = harness({ structure: true });
+  await runFleetParking(u.deps, unload, Date.now() + 60_000, () => {});
+  assert.deepEqual(u.actions.map(action => action.kind), ["startRoute", "unloadOre"]);
+  assert.throws(() => parkingScript({ ...unload, corporationDivision: 1 }), /Corporation-division/);
 });
 
 test("return, dock, unload only existing freight, confirm empty freight, remain docked", async () => {

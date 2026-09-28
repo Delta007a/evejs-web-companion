@@ -189,6 +189,20 @@ test("searchDestinations finds systems/stations by name, annotated with jumps (R
   assert.equal(station?.jumps, 2);
 });
 
+test("unavailable structure search retains static destinations with a visible warning", async () => {
+  const flow = createAppFlow(createClientStore(), { fetch: makeFakeFetch((path) => {
+    if (path.startsWith("/api/map/find")) return { status: 200, body: { ok: true, matches: [
+      { id: 60000003, name: "Charlie Station", kind: "station", solarSystemID: 3, solarSystemName: "Charlie" },
+    ], capped: false } };
+    if (path.startsWith("/api/dockable-structures/find")) return { status: 503, body: { ok: false, error: "UNAVAILABLE" } };
+    return defaultResponder(path);
+  }) });
+  const found = await flow.searchDestinations("Charlie", "dockable");
+  assert.equal(found.length, 1);
+  assert.equal(found[0]?.kind, "station");
+  assert.match(found.warning ?? "", /structure search is unavailable/i);
+});
+
 test("searchDestinations ignores a too-short query without a request", async () => {
   const store = createClientStore();
   const responder = (path: string) => {

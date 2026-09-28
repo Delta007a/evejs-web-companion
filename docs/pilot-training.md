@@ -17,7 +17,7 @@ The older `factory*` modules and login alias remain compatibility implementation
    personal-wallet shortfall, subject to authoritative permissions.
 5. Review and directly purchase missing skills, then separately review/apply the
    append-only training queue. Existing queue entries are preserved.
-6. Set an NPC training/provisioning home if useful. This records the intended home;
+6. Set an NPC station or accessible player-structure training/provisioning home if useful. This records the intended home;
    it does not move the pilot, buy equipment or provision a ship.
 
 Install the [supported runtime patches](pilot-training-runtime-setup.md) before using
@@ -103,10 +103,10 @@ partial completion; no clawback, skill rollback or automatic queue application o
 Queue review/apply retains account ownership, offline state/version, fitting/plan
 fingerprint, append-only behavior and authoritative post-write verification.
 
-Home stores generic locationID/name/system/kind/capability. The current resolver
-supports authoritative NPC stations and describes relocation as MANUAL_GM_ONLY.
-Saving a home does not move a pilot. Player structures/citadels are explicitly
-unsupported until their docking/relocation authority is established.
+Home stores generic locationID/name/system/kind/capability. The resolver accepts
+catalog NPC stations and player structures with current docking access. NPC Home
+retains `MANUAL_GM_ONLY`; structure Home records `CONFIG_ONLY` for future provisioning.
+Saving either Home does not move a pilot. Player-structure relocation is not implemented.
 Legacy character-roster balances are no longer displayed as current wallets;
 financial decisions continue reading live wallet authority.
 
@@ -220,10 +220,14 @@ CEO), and named wallet divisions. The wallet normally inherits the selected corp
 Previously saved different-corporation wallets remain preserved and visible under
 Advanced details. Internal IDs and rights enum are read-only technical details.
 
-`GET /api/pilot-training/homes?q=...` uses the existing static map search, restricted
-to NPC stations and at most 25 results. Selecting a result calls the existing `/home`
-resolver before saving. No relocation occurs; player-structure relocation remains
-unsupported. The `pilot-training:settings:v1` schema/key is reused without migration
+Choose an authenticated account pilot for the Home picker to include access-scoped
+structures. The read does not select or move that pilot. Without a pilot, NPC
+station search remains available. `GET /api/pilot-training/homes?q=...&characterID=...`
+combines NPC station names with that pilot's access-scoped structure names, capped
+at 25 results. A structure read failure preserves NPC results with a warning.
+Selecting a result calls
+the existing `/home` resolver and rechecks structure access before saving. No relocation
+occurs. The `pilot-training:settings:v1` schema/key is reused without migration
 or new defaults. Fresh onboarding remains disabled/unconfigured.
 
 ### New trainee and account authority

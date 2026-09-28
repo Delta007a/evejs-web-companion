@@ -578,6 +578,7 @@ function createBotHost(options) {
     expectedExpiresAt = null,
     callerSessionID = null,
     beforeStart = null,
+    parkingStructureID = null,
     operationID = null,
     operationRole = null,
     operationControllerAccountID = null,
@@ -823,6 +824,10 @@ function createBotHost(options) {
         startStage = "DRONE_RECOVERY";
         await flow.retryDroneRecovery();
         flow.requireAutomationReady();
+      }
+      if (parkingStructureID !== null) {
+        startStage = "PARKING_STRUCTURE_ACCESS";
+        await flow.verifyDockableStructure(parkingStructureID);
       }
       const online = store.station.get().online;
       record.characterName = online ? online.characterName : null;

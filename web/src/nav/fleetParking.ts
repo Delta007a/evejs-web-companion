@@ -2,20 +2,34 @@ import type { BotScript } from "../bots/botScript.ts";
 import type { ScriptObservation } from "./scriptConditions.ts";
 import { createScriptRunner, type ScriptRunnerController, type ScriptRunnerDeps } from "./scriptRunner.ts";
 import { freightHoldItemIDs } from "./miningBotLoop.ts";
+import { dockedAt, type DockableLocation } from "./dockableLocation.ts";
+
+type ParkingDestination = { readonly stationID: number; readonly stationName: string; readonly systemName: string; readonly kind?: "station" } | DockableLocation;
+
+function locationOf(destination: ParkingDestination): Pick<DockableLocation, "kind" | "id" | "name" | "solarSystemName"> {
+  return "kind" in destination && destination.kind === "structure"
+    ? destination
+    : { kind: "station", id: (destination as { stationID: number }).stationID,
+        name: (destination as { stationName: string }).stationName,
+        solarSystemName: (destination as { systemName: string }).systemName };
+}
 
 export interface FleetParkingPolicy {
   readonly mode: "RETURN_HOME_DOCK" | "RETURN_HOME_UNLOAD_DOCK";
-  readonly destination: { readonly stationID: number; readonly stationName: string; readonly systemName: string };
+  readonly destination: ParkingDestination;
   readonly corporationDivision: number | null;
 }
 
 export function parkingScript(policy: FleetParkingPolicy): BotScript {
+  const location = policy.destination && locationOf(policy.destination);
   if (!["RETURN_HOME_DOCK", "RETURN_HOME_UNLOAD_DOCK"].includes(policy.mode) ||
-      !Number.isSafeInteger(policy.destination?.stationID) || policy.destination.stationID <= 0) {
-    throw new Error("Parking requires an explicit station; starting station is not a fallback.");
+      !location || !Number.isSafeInteger(location.id) || location.id <= 0) {
+    throw new Error("Parking requires an explicit dockable destination; starting station is not a fallback.");
   }
-  const home = { entity: "station" as const, id: policy.destination.stationID,
-    name: policy.destination.stationName, systemName: policy.destination.systemName };
+  if (location.kind === "structure" && policy.mode === "RETURN_HOME_UNLOAD_DOCK" && policy.corporationDivision !== null) {
+    throw new Error("Corporation-division parking at a player structure is not verified.");
+  }
+  const home = { entity: location.kind, id: location.id, name: location.name, systemName: location.solarSystemName ?? "" };
   return { format: "evejs-bot-script", version: 1, name: "Fleet Parking", notes: "Finite operation stop, not a mining routine.",
     home, interrupts: [], program: [{ id: "park", kind: "macro",
       macro: policy.mode === "RETURN_HOME_UNLOAD_DOCK" ? "deliver-ore" : "travel-to-station",
@@ -35,6 +49,7 @@ function readableFreight(obs: ScriptObservation): boolean {
 export async function runFleetParking(deps: ScriptRunnerDeps, policy: FleetParkingPolicy, deadlineMs: number,
   install: (runner: ScriptRunnerController) => void, now = Date.now): Promise<void> {
   const doc = parkingScript(policy);
+  const location = locationOf(policy.destination);
   let last: ScriptObservation | null = null;
   let fatal: Error | null = null;
   let lastReadError: unknown = null;
@@ -64,8 +79,8 @@ export async function runFleetParking(deps: ScriptRunnerDeps, policy: FleetParki
     issue: async action => {
       deadline();
       if (!["startRoute", "warp", "dock", "undock", "align", "approach", "stopShip", "recallDrones", "unloadOre"].includes(action.kind) ||
-          (action.kind === "startRoute" && action.stationID !== policy.destination.stationID) ||
-          (action.kind === "dock" && action.stationID !== policy.destination.stationID)) {
+          (action.kind === "startRoute" && action.stationID !== location.id) ||
+          (action.kind === "dock" && action.stationID !== location.id)) {
         throw new Error(`Parking refused an out-of-scope action: ${action.kind}`);
       }
       return deps.issue(action);
@@ -81,9 +96,8 @@ export async function runFleetParking(deps: ScriptRunnerDeps, policy: FleetParki
   const observed = last as ScriptObservation | null;
   if (fatal) throw fatal;
   if (lastReadError) throw lastReadError;
-  if (result.status !== "stopped" || result.pauseReason || observed?.flightStatus?.docked !== true ||
-      observed.flightStatus.stationID !== policy.destination.stationID ||
-      (policy.mode === "RETURN_HOME_UNLOAD_DOCK" && (!readableFreight(observed) || freightHoldItemIDs(observed.holds ?? null).length > 0))) {
+  if (result.status !== "stopped" || result.pauseReason || !dockedAt(observed?.flightStatus, location) ||
+      (policy.mode === "RETURN_HOME_UNLOAD_DOCK" && (observed === null || !readableFreight(observed) || freightHoldItemIDs(observed.holds ?? null).length > 0))) {
     throw new Error(result.pauseReason || "Parking arrival / freight delivery was not authoritatively confirmed; pilot control is retained.");
   }
 }

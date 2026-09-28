@@ -1889,6 +1889,10 @@ function continueRecovering(
   travelHome: HomeTravelDecider,
 ): ScriptTickResult {
   const latched = mem.latched;
+  if (script.home.entity === "structure" && latched?.recover !== undefined) {
+    return paused("Repair watches require an NPC station; structure repair service is not verified.",
+      { ...mem, latched: null }, latched.interruptID);
+  }
   if (latched === null || latched.recover === undefined) {
     // Not a repair trip at all — the ordinary "fly home and stop" latch.
     return continueHeadingHome(obs, mem, travelHome);

@@ -273,6 +273,25 @@ test("a dock at a NEW station re-targets station-scoped reads (held station sync
   );
 });
 
+test("docked structure inventory binds the structure hangar, never a stale NPC station", async () => {
+  const structureID = 1030000000001;
+  const gateway = fakeGateway({ async readFlightStatus() {
+    return { flight: { docked: true, inSpace: false, stationID: null, structureID,
+      solarSystemID: 30000142, shipID: ACTIVE_SHIP_ID }, notifications: [] };
+  } });
+  const { baseUrl } = await startTestServer({ gateway });
+  await selectOnServer(baseUrl);
+  const loaded = await apiRequest(baseUrl, "/api/bridge/inventory");
+  assert.equal(loaded.response.status, 200);
+  assert.ok(gateway.calls.bind.some(bind => bind.method === "GetInventory" && bind.args[0] === structureID));
+  assert.ok(!gateway.calls.bind.some(bind => bind.method === "GetInventory" && bind.args[0] === STATION_ID));
+  const moved = await apiRequest(baseUrl, "/api/bridge/inventory/move", { method: "POST",
+    body: { itemID: 100, direction: "toCargo", qty: 1 } });
+  assert.equal(moved.response.status, 200);
+  const add = gateway.calls.boundCall.find(call => call.method === "Add");
+  assert.deepEqual(add.args, [100, structureID]);
+});
+
 test("a bind handle is reused across reads (cached per semantic key)", async () => {
   const gateway = fakeGateway();
   const { baseUrl } = await startTestServer({ gateway });

@@ -24,6 +24,7 @@ import type { RatThreat } from "./ratThreat.ts";
 import { pickAdvertisedFleet } from "./scriptConditions.ts";
 import { BOARD_SLOT_KEY, DEFAULT_HUNT_MAX_JUMPS, DEFAULT_HUNT_RANGE_AU } from "../bots/botScript.ts";
 import type { MacroStep, OreFamilyArg, SquadRoleArg, WorldRef } from "../bots/botScript.ts";
+import { dockedAt, type DockableKind } from "./dockableLocation.ts";
 import { launchFullPercent } from "../bots/macroSpecs.ts";
 import type { SpaceEntity, SpaceSnapshot, SpaceVector } from "../store/types.ts";
 import { BELT_ARRIVAL_RADIUS_M, beltWarpFloorMeters, freightHoldItemIDs, holdsFreeM3, isMineableRock } from "./miningBotLoop.ts";
@@ -1617,10 +1618,16 @@ function mineWithRocks(
 // the office, at the moment of the move.
 const deliverOre: MacroDecider = (step, obs, mem, board) => {
   const target = stationTarget(step, obs, board);
+  const targetKind: DockableKind = step.args["station"]?.kind === "station" && step.args["station"].ref.entity === "structure" ? "structure" : "station";
   if (target === null) {
     return tick(WAIT, "No station picked to unload at.", "Hauling", {
       kind: "blocked",
       reason: "This step needs a station to unload at.",
+    });
+  }
+  if (targetKind === "structure" && step.args["into"]?.kind === "corpDivision") {
+    return tick(WAIT, "Corporation delivery at a player structure is not verified.", "Delivery blocked", {
+      kind: "blocked", reason: "Choose a personal hangar at this structure or a verified NPC station for corporation delivery.",
     });
   }
   const operation = obs.miningOperation ?? null;
@@ -1646,7 +1653,7 @@ const deliverOre: MacroDecider = (step, obs, mem, board) => {
       mem,
     );
   }
-  if (obs.flightStatus?.docked === true && obs.flightStatus.stationID === target) {
+  if (dockedAt(obs.flightStatus, { kind: targetKind, id: target })) {
     // The FREIGHT holds, not every hold. On a hull with an ore hold the cargo
     // hold is not where the ore is, and emptying it here put the ship's spare
     // crystals and ammunition ashore every lap — see freightHoldItemIDs.
@@ -1707,7 +1714,7 @@ const deliverOre: MacroDecider = (step, obs, mem, board) => {
   if (recall !== null) {
     return recall;
   }
-  const ride = rideAutopilotTo(obs, target, drainGridClear ? "Final partial delivery" : "Flying to the station");
+  const ride = rideAutopilotTo(obs, target, drainGridClear ? "Final partial delivery" : "Flying to the destination", targetKind);
   if (ride !== null) {
     return ride;
   }
@@ -1720,10 +1727,12 @@ const deliverOre: MacroDecider = (step, obs, mem, board) => {
 // block is a destination plus the never-abandon-drones send-off.
 const travelToStation: MacroDecider = (step, obs, mem, board) => {
   const target = stationTarget(step, obs, board);
+  const stationArg = step.args["station"];
+  const targetKind: DockableKind = stationArg?.kind === "station" && stationArg.ref.entity === "structure" ? "structure" : "station";
   if (target === null) {
     return tick(WAIT, "No station picked.", "Travelling", { kind: "blocked", reason: "This step needs a station to go to." });
   }
-  if (obs.flightStatus?.docked === true && obs.flightStatus.stationID === target) {
+  if (dockedAt(obs.flightStatus, { kind: targetKind, id: target })) {
     return tick(WAIT, "Docked.", "Arrived", { kind: "done" });
   }
   // Align only to something actually on this grid; off-grid, recall just holds.
@@ -1732,7 +1741,7 @@ const travelToStation: MacroDecider = (step, obs, mem, board) => {
   if (recall !== null) {
     return recall;
   }
-  const ride = rideAutopilotTo(obs, target, "Travelling");
+  const ride = rideAutopilotTo(obs, target, "Travelling", targetKind);
   if (ride !== null) {
     return ride;
   }
@@ -1926,8 +1935,8 @@ function countArg(step: MacroStep, key: string): number | null {
 }
 
 /** Riding the shared autopilot to a station, multi-system. Null once docked there. */
-function rideAutopilotTo(obs: ScriptObservation, stationID: number, phase: string): MacroTick | null {
-  if (obs.flightStatus?.docked === true && obs.flightStatus.stationID === stationID) {
+function rideAutopilotTo(obs: ScriptObservation, stationID: number, phase: string, kind: DockableKind = "station"): MacroTick | null {
+  if (dockedAt(obs.flightStatus, { kind, id: stationID })) {
     return null; // arrived
   }
   const travel = obs.travel ?? null;
@@ -6739,7 +6748,7 @@ export const scriptTravelHome: HomeTravelDecider = (obs, mem) => {
   // The trip is judged BEFORE the drones are called in: a ship that cannot leave
   // needs its drones out to shoot its way free, and pulling them in first would
   // disarm it in the one moment it needs them.
-  const ride = rideAutopilotTo(obs, target, "Heading home");
+  const ride = rideAutopilotTo(obs, target, "Heading home", obs.homeDockableKind ?? "station");
   if (ride !== null && ride.outcome.kind === "blocked") {
     const escape = fightTheWayOut(obs, mem, target);
     if (escape !== null) {

@@ -156,6 +156,8 @@
   // svelte-ignore state_referenced_locally
   const station = store.station;
   // svelte-ignore state_referenced_locally
+  const flight = store.flight;
+  // svelte-ignore state_referenced_locally
   const names = store.names;
   // svelte-ignore state_referenced_locally
   const fitting = store.fitting;
@@ -845,7 +847,7 @@
     if (container) {
       list.push({ id: "container", label: containerName(), badge: `${container.rows.length}` });
     }
-    if (isDocked) {
+    if (isDocked && !$station.online?.structureID) {
       list.push({ id: "services", label: "Station services", badge: "" });
     }
     return list;
@@ -887,7 +889,7 @@
   const stationHint = $derived.by<string>(() => {
     const here = $station.station;
     if (!here) {
-      return "";
+      return $station.online?.structureID ? ($flight.structureName ?? "Player structure") : "";
     }
     return here.solarSystemName ? `${here.stationName} · ${here.solarSystemName}` : here.stationName;
   });
@@ -1250,8 +1252,12 @@
       undocked from is exactly the kind of stale label this rewrite exists to
       remove. In space it says what it is actually showing.
     -->
-    <span class="stn-head-title">{isDocked ? "Station" : "Ship"}</span>
+    <span class="stn-head-title">{isDocked ? ($station.online?.structureID ? "Structure" : "Station") : "Ship"}</span>
     <span class="stn-head-hint">{stationHint}</span>
+    {#if isDocked && $station.online?.structureID}
+      <button type="button" class="stn-icon-btn" disabled={busy} onclick={() => run(() => flow.releaseSession())}>Go offline</button>
+      <button type="button" class="stn-icon-btn" disabled={busy} onclick={() => run(() => flow.logout())}>Log out</button>
+    {/if}
     <button
       type="button"
       class="stn-icon-btn"
@@ -1503,7 +1509,7 @@
     </section>
 
     <!-- -------------------------------------------------- station services -->
-    {#if isDocked}
+    {#if isDocked && !$station.online?.structureID}
     <section class="stn-view stn-services" id="stn-view-services" role="tabpanel" aria-labelledby="stn-tab-services" hidden={view !== "services"}>
       <div class="stn-services-col">
         <h3 class="stn-section">Station</h3>

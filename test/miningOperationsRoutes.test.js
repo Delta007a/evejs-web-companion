@@ -136,6 +136,8 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
   const operations = createMiningOperations({ store: operationStore, targetBoard: board, beltMemory: createBeltMemory() });
   const heldSessions = new Map();
   const host = fakeHost(heldSessions);
+  let structureAccessAllowed = true;
+  const structureAccessCalls = [];
   const app = createApp({
     eveStore: {
       getAccount: async (username) => username === account.username ? { ...account } : null,
@@ -143,7 +145,10 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
         Number(accountID) === account.accountID ? crew.find((row) => row.characterID === Number(characterID)) || null : null,
       listCharactersForAccount: async () => crew.map((row) => ({ ...row })),
     },
-    eveGatewayClient: {},
+    eveGatewayClient: { async callMethod(service, method, args, kwargs, sessionFields) {
+      structureAccessCalls.push({ service, method, args, sessionFields });
+      return { result: { type: "list", items: structureAccessAllowed ? [1030000000001] : [] }, notifications: [] };
+    } },
     webAuth,
     botHost: host,
     bridgeSessionStore: heldSessions,
@@ -450,4 +455,29 @@ test("Mining Operations routes persist definitions, launch through botHost, proj
     assert.equal(familyPlan.response.status, 200, JSON.stringify(familyPlan.payload));
     assert.ok(familyPlan.payload.members.every(row => row.script.scriptID.startsWith(`mcc.${profileID}.hauler-service.`)));
   }
+  const structure = { kind: "structure", id: 1030000000001, name: "My Astrahus", solarSystemID: 30000142, solarSystemName: "Jita" };
+  const structureDef = await request(baseUrl, "/api/mining-operations", { method: "POST", token,
+    body: { ...standardInput, name: "Structure parking", policies: { parking: { mode: "RETURN_HOME_DOCK", destination: structure } } } });
+  assert.equal(structureDef.response.status, 200);
+  const structurePlan = await request(baseUrl, `/api/mining-operations/${structureDef.payload.definition.operationID}/launch-plan`, { token });
+  assert.equal(structurePlan.response.status, 200);
+  const structureStart = await request(baseUrl, `/api/mining-operations/${structureDef.payload.definition.operationID}/start`, { method: "POST", token,
+    body: { planHash: structurePlan.payload.planHash,
+      grants: Object.fromEntries(crew.map((pilot, index) => [pilot.characterID,
+        { scriptRev: structurePlan.payload.members[index].script.rev, riskClasses: [], maxRuntimeMinutes: 60 }])) } });
+  assert.equal(structureStart.response.status, 200);
+  assert.equal(structureAccessCalls.filter((call) => call.method === "CheckMyDockingAccessToStructures").length, 3);
+  assert.ok(host.inputs.slice(-3).every(input => input.parkingStructureID === structure.id));
+  await request(baseUrl, `/api/mining-operations/${structureDef.payload.definition.operationID}/stop`, { method: "POST", token, body: {} });
+  structureAccessAllowed = false;
+  const deniedDef = await request(baseUrl, "/api/mining-operations", { method: "POST", token,
+    body: { ...standardInput, name: "Structure access lost", policies: { parking: { mode: "RETURN_HOME_DOCK", destination: structure } } } });
+  const deniedPlan = await request(baseUrl, `/api/mining-operations/${deniedDef.payload.definition.operationID}/launch-plan`, { token });
+  const startsBefore = host.inputs.length;
+  const deniedStart = await request(baseUrl, `/api/mining-operations/${deniedDef.payload.definition.operationID}/start`, { method: "POST", token,
+    body: { planHash: deniedPlan.payload.planHash, grants: Object.fromEntries(crew.map((pilot, index) => [pilot.characterID,
+      { scriptRev: deniedPlan.payload.members[index].script.rev, riskClasses: [], maxRuntimeMinutes: 60 }])) } });
+  assert.equal(deniedStart.response.status, 409);
+  assert.equal(deniedStart.payload.error, "PARKING_STRUCTURE_ACCESS_DENIED");
+  assert.equal(host.inputs.length, startsBefore, "no member starts when structure preflight fails");
 });

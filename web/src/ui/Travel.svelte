@@ -130,7 +130,9 @@
       return;
     }
     await run(async () => {
-      searchResults = await flow.searchDestinations(query);
+      const found = await flow.searchDestinations(query);
+      searchResults = found;
+      if (found.warning) error = found.warning;
       searchTotal = searchResults.length;
       searched = true;
     });

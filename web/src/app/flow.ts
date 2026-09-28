@@ -466,6 +466,8 @@ export interface AppFlow {
    * instead of reconstructing only the token and silently dropping the rest.
    */
   requestOptions(): api.ApiOptions;
+  /** Access-scoped structure identity, checked before an operation member starts. */
+  verifyDockableStructure(id: number): Promise<void>;
   /**
    * Create a character on the signed-in account, then re-read the roster so the
    * select screen shows it. Runs with NO character online — that is the state
@@ -1089,8 +1091,8 @@ export interface AppFlow {
    */
   searchDestinations(
     query: string,
-    kind?: "system" | "station" | null,
-  ): Promise<DestinationMatch[]>;
+    kind?: "system" | "station" | "dockable" | null,
+  ): Promise<DestinationMatch[] & { warning?: string }>;
   // --- R26: the mining bot -----------------------------------------------
   //
   // A SECOND browser decide-loop, built from the same parts as the autopilot
@@ -1952,6 +1954,9 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   }
 
   async function refreshStationPanel(): Promise<void> {
+    // Station services and the static station catalog do not describe a player
+    // structure. Inventory has its own docked-location read below.
+    if (store.station.get().online?.structureID) return;
     // Retail issues these when the docked UI loads; the page issues them after
     // select succeeds (push forwarding is a later goal, G6). The three reads
     // are INDEPENDENT: a slow or failed map.GetStationInfo (the heavy
@@ -4055,21 +4060,23 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   // its own onMount). A lost session inside any read unwinds to character select
   // (rethrown); any other per-read failure rides that read's own slice.
   async function relocateStationContext(
-    stationID: number,
+    locationID: number,
     solarSystemID: number | null,
+    kind: "station" | "structure" = "station",
   ): Promise<void> {
     let station: StationStatic | null = null;
-    try {
-      station = await api.loadStationStatic(stationID, callOptions);
-    } catch {
-      // Static identity is a display nicety; fall back to ID-only rather than
-      // fail the whole relocate if the read hiccups.
-      station = null;
+    if (kind === "station") {
+      try {
+        station = await api.loadStationStatic(locationID, callOptions);
+      } catch {
+        station = null;
+      }
     }
-    store.apply({ type: "station/relocated", stationID, solarSystemID, station });
+    store.apply({ type: "station/relocated", stationID: kind === "station" ? locationID : null,
+      structureID: kind === "structure" ? locationID : null, solarSystemID, station });
 
-    await refreshStationPanel();
-    if (store.agents.get().loaded) {
+    if (kind === "station") await refreshStationPanel();
+    if (kind === "station" && store.agents.get().loaded) {
       await loadAgents();
     }
     if (store.inventory.get().loaded) {
@@ -4097,14 +4104,14 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     if (store.station.get().online === null) {
       return;
     }
-    const stationID = status.docked ? status.stationID : null;
-    if (stationID === null || stationID === syncedStationID || relocating) {
+    const locationID = status.docked ? status.structureID ?? status.stationID : null;
+    if (locationID === null || locationID === syncedStationID || relocating) {
       return;
     }
-    syncedStationID = stationID;
+    syncedStationID = locationID;
     relocating = true;
     try {
-      await relocateStationContext(stationID, status.solarSystemID);
+      await relocateStationContext(locationID, status.solarSystemID, status.structureID === locationID ? "structure" : "station");
     } catch {
       // Session-loss already unwound to offline; nothing more to do here.
     } finally {
@@ -5694,6 +5701,16 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     if (destination.kind === "unknown" || destination.solarSystemID === null) {
       return planFailed(`Unknown destination ${destinationID}.`);
     }
+    if (destination.kind === "structure") {
+      try {
+        const accessible = await api.resolveAccessibleStructure(destinationID, callOptions);
+        if (accessible.solarSystemID !== destination.solarSystemID) {
+          return planFailed("That structure changed location; choose it again.");
+        }
+      } catch (error) {
+        return planFailed(`Cannot dock at that structure: ${errorWords(error)}`, error);
+      }
+    }
 
     // 4. Solve the route (fewest jumps).
     const route = solveRoute(graph, originSystem, destination.solarSystemID);
@@ -5703,11 +5720,12 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       );
     }
 
-    const destinationStationID = destination.kind === "station" ? destination.stationID : null;
-    const destinationName = destination.kind === "station" ? destination.stationName : destination.systemName;
+    const destinationStationID = destination.kind === "station" || destination.kind === "structure" ? destination.stationID : null;
+    const destinationName = destinationStationID !== null ? destination.stationName : destination.systemName;
     const plan: RoutePlan = {
       destinationSystemID: destination.solarSystemID,
       destinationStationID,
+      destinationKind: destination.kind === "station" || destination.kind === "structure" ? destination.kind : null,
       destinationName,
       hops: route.hops,
     };
@@ -5792,7 +5810,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       return;
     }
 
-    if (status.docked && status.stationID === stationID) {
+    if (status.docked && (status.stationID === stationID || status.structureID === stationID)) {
       // Already there. Say so rather than starting a loop that would only
       // discover it on its first tick.
       store.apply({ type: "travel/plan-error", message: "You are already docked here." });
@@ -5802,13 +5820,25 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       store.apply({ type: "travel/plan-error", message: "Your current solar system is unknown." });
       return;
     }
+    if (stationID >= 1000000000000) {
+      try {
+        const accessible = await api.resolveAccessibleStructure(stationID, callOptions);
+        if (accessible.solarSystemID !== status.solarSystemID) {
+          store.apply({ type: "travel/plan-error", message: "That structure is not in this solar system." });
+          return;
+        }
+      } catch (error) {
+        store.apply({ type: "travel/plan-error", message: `Cannot dock at that structure: ${errorWords(error)}` });
+        return;
+      }
+    }
 
     // The station's NAME, for the readout (R7d: the panel must never show the
     // id). Static reference data, best-effort — an unnamed station still docks.
     let destinationName: string | null = null;
     try {
       const resolved = await api.resolveDestination(stationID, callOptions);
-      destinationName = resolved.kind === "station" ? resolved.stationName : resolved.systemName;
+      destinationName = resolved.kind === "station" || resolved.kind === "structure" ? resolved.stationName : resolved.systemName;
     } catch {
       destinationName = null;
     }
@@ -5818,6 +5848,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
     const plan: RoutePlan = {
       destinationSystemID: status.solarSystemID,
       destinationStationID: stationID,
+      destinationKind: stationID >= 1000000000000 ? "structure" : "station",
       destinationName,
       hops: [],
     };
@@ -10396,6 +10427,7 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
           walletBalance,
           startingStationID,
           homeStationID: resolveStationRef(home, startingStationID, hint.board),
+          homeDockableKind: home.entity === "structure" ? "structure" : "station",
           myCharacterID: store.station.get().online?.characterID ?? null,
           myCorporationID: store.station.get().online?.corporationID ?? null,
         };
@@ -11200,13 +11232,19 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
   // distance. A hard read failure throws so the caller can surface it.
   async function searchDestinations(
     query: string,
-    kind: "system" | "station" | null = null,
-  ): Promise<DestinationMatch[]> {
+    kind: "system" | "station" | "dockable" | null = null,
+  ): Promise<DestinationMatch[] & { warning?: string }> {
     const trimmed = query.trim();
     if (trimmed.length < 2) {
       return [];
     }
-    const result = await api.findMapLocations(trimmed, kind, callOptions);
+    const result = await api.findMapLocations(trimmed, kind === "dockable" ? "station" : kind, callOptions);
+    let structures: readonly api.MapLocation[] = [];
+    let warning: string | undefined;
+    if (kind !== "station" && kind !== "system") {
+      try { structures = await api.findAccessibleStructures(trimmed, callOptions); }
+      catch { warning = "Accessible structure search is unavailable; station and system results remain available."; }
+    }
 
     // The origin is the live location if known (in space or docked), else the
     // docked character's system. Distances come from ONE BFS over the map graph.
@@ -11223,13 +11261,13 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       }
     }
 
-    return result.matches.map((match) => ({
+    return Object.assign([...result.matches, ...structures].map((match) => ({
       ...match,
       jumps:
         distances !== null && match.solarSystemID !== null
           ? distances.get(match.solarSystemID) ?? null
           : null,
-    }));
+    })), { warning });
   }
 
   // --- R7c Names everywhere (batch name cache) -----------------------------
@@ -11452,6 +11490,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       return callOptions;
     },
 
+    async verifyDockableStructure(id) {
+      requireAutomationReady();
+      await api.resolveAccessibleStructure(id, callOptions);
+    },
+
     async login(username, password) {
       const result = await api.login(username, password, callOptions);
       authLost = false;
@@ -11506,11 +11549,11 @@ export function createAppFlow(store: ClientStore, options: AppFlowOptions = {}):
       // Anchor the docked-station sync to where select landed so the first
       // flight read at this station doesn't trigger a redundant relocate; a
       // later dock elsewhere on this session will.
-      syncedStationID = result.character.stationID;
+      syncedStationID = result.character.structureID ?? result.character.stationID;
       // R10: the session is live, so open the push channel before the docked
       // reads — anything the reads trigger is then already being observed.
       startLiveStream();
-      await refreshStationPanel();
+      if (!result.character.structureID) await refreshStationPanel();
       void retryDroneRecovery();
     },
 
