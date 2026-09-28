@@ -10,6 +10,9 @@ They created the foundation; Delta's additions below continue that work.
 - **[Mining Command Center](docs/mining-command-center.md)** at `/mining-command-center`:
   coordinated Belt/Ore Anomaly/Ice operations, Hauler Service or Self-Unload, Fleet
   Parking, locality/resource preferences, Travel Assist and hosted timing/recovery.
+- **[Upwell structures](docs/upwell-structure-support.md)**: accessible player structures
+  as dockable destinations for travel, inventory, fitting, MCC and Pilot Training Home.
+  EveJS 0.12.9 runtime patches are required; the guide includes installation steps.
 
 GAS, adjacent scouting, dedicated operation Defender execution, equipment provisioning,
 citadel relocation, a general role taxonomy and production password registration are
@@ -59,7 +62,7 @@ authority boundary and must respect session ownership and graceful cleanup.
   Web BFF  (src/server.js, :26500)        ← bridge, sessions and approved hosted bots
         │  the retail {service, method} call tuple
         ▼
-  EveJS gateway (eve.js, :26002)          ← the retail Handle_* handlers, unchanged
+  EveJS gateway (eve.js, :26002)          ← retail Handle_* authority plus documented patches
         │
         ▼
   EveJS  = the game, the sole authority   ← owns all state + validation + persistence

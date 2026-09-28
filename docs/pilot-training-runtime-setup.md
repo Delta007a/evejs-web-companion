@@ -102,23 +102,8 @@ version control. Do not publish tokens with bug reports.
 
 ## Shared dockable destinations and services
 
-The [dockable-structure-search patch](../runtime-patches/dockable-structure-search.patch)
-is separate from the Training patches above. It changes only
-`server/src/services/structure/structureDirectoryService.js`: explicit
-`GetMyDockableStructures(0)` requests access-filtered IDs across systems, while the
-omitted/current-system call stays unchanged. WC needs this for named destination
-search. The audited clean file SHA-256 is
-`2B9F24731397DF582CA0240644754985FF84188690C9AEBA9A8A54D194EB2C73`;
-the patched mutable gameplay file SHA-256 is
-`843AE5B31C39F274885B6322B820F116E232BA8C3DBB05D4993B5B6A2BBCFA03`.
-The [accessible-structure-services patch](../runtime-patches/accessible-structure-services.patch)
-builds on that exact patched state. It adds an access-scoped read of currently
-online structure services, and gateway permission for that read and the normal
-`officeManager.RentOffice` authority. It does not publish owner-only operational
-structure records to other pilots. Apply it only after verifying the intermediate
-bytes in the [hash manifest](../runtime-patches/runtime-hashes.json), or review
-custom differences first. Its three final runtime files and hashes are listed
-there. Restart only through the normal launcher/mod-loader so the changed
-gateway allowlist is actually loaded. The isolated Nonni QA fixture exercised
-the loaded service read and office rental, as well as structure docking,
-personal/corporation inventory, fitting and repair/reprocessing quotes.
+Pilot Training Home shares WC's dockable-destination model. The Upwell patches
+are separate from the Training patches above; use the
+[Upwell support and installation guide](upwell-structure-support.md) for their
+order, affected runtime files and hash checks. Saving a structure as Home records
+provisioning intent and does not relocate the pilot.
