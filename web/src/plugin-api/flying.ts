@@ -11,9 +11,11 @@
 // --- Asking the server, as a pilot's session (`flow.requestOptions()`) --------
 export {
   boundDogma,
+  bridgeAsk,
   fetchTypeDogma,
   getDrones,
   getFlightStatus,
+  getScriptObservation,
   getShipBays,
   getSpaceSnapshot,
   getTargets,
@@ -40,7 +42,9 @@ export {
 export type { Ask } from "../bridge/ask.ts";
 
 // --- What the server's answers mean -------------------------------------------
+export { preferredBays } from "../bridge/bayRouting.ts";
 export { decodeChatChannel } from "../bridge/chat.ts";
+export { decodeCorpAssetItems } from "../bridge/corpAssets.ts";
 export { defense } from "../bridge/dogma/defense.ts";
 export { decodeDroneBay, decodeDroneLimits } from "../bridge/drones.ts";
 export { isSlotFlag, buildSlots, decodeChargeFits, slotFlagOf } from "../bridge/fitting.ts";
@@ -61,7 +65,8 @@ export { canBroadcastInFleet, canTagInFleet } from "../bridge/fleetCommand.ts";
 export { decodeFlightStatus } from "../bridge/flight.ts";
 export { decodeContainer, decodeInventoryRows } from "../bridge/inventoryShip.ts";
 export { scrammedByWarpScrambler, tacklersHolding } from "../bridge/jamNotifications.ts";
-export { isTransitionTimeout, isTransportTransient, panelErrorWords } from "../bridge/refusals.ts";
+export { unwrapCachedResult } from "../bridge/market.ts";
+export { isSessionChangeSettling, isTransitionTimeout, isTransportTransient, panelErrorWords } from "../bridge/refusals.ts";
 export { repairTargets } from "../bridge/repairQuotes.ts";
 export { decodeShipBays } from "../bridge/shipBays.ts";
 export { known } from "../bridge/shipStats.ts";
@@ -74,7 +79,7 @@ export { acceptFleetInvite, leaveFleet, tagFleetTarget } from "../bridge/fleetWr
 export { moveItems, officeAt } from "../bridge/inventoryWrites.ts";
 export { warpToFleetMember } from "../bridge/movementWrites.ts";
 export { undock } from "../bridge/placeChanges.ts";
-export { repairItemsAtShop } from "../bridge/repairShop.ts";
+export { quoteRepairs, repairItemsAtShop, repairQuoted } from "../bridge/repairShop.ts";
 export { lockTarget } from "../bridge/targetWrites.ts";
 
 // --- The rules core's bots fly by ---------------------------------------------
@@ -122,7 +127,7 @@ export {
 export { AUTOMATIC_UTILITY_FAMILIES, automaticCombatUtility } from "../nav/combatUtilityPolicy.ts";
 export type { CombatWeapon, CombatWeapons } from "../nav/combatWeapons.ts";
 export { droneStackSizes, wholeStackLaunch } from "../nav/droneLaunch.ts";
-export { splitDroneRoles, type DroneRoleIDs } from "../nav/droneRoles.ts";
+export { droneRoleForGroup, splitDroneRoles, type DroneRoleIDs } from "../nav/droneRoles.ts";
 export { MAX_DRONE_ROTATIONS } from "../nav/droneRotation.ts";
 export {
   EMPTY_JOIN_MEMORY,
@@ -132,6 +137,7 @@ export {
   type FleetJoinVerdict,
 } from "../nav/fleetJoinWatch.ts";
 export { RANGE_HYSTERESIS_M, type BandThreat } from "../nav/kiteBand.ts";
+export { isLootableContainer, lootRightsGrant } from "../nav/lootableContainers.ts";
 export { lowestHealth } from "../nav/miningBotLoop.ts";
 export { RAT_RESONANCE_ATTRIBUTE_IDS, ratResonancesFromAttributes, type RatResonances, type Resonances } from "../nav/ratResonances.ts";
 export { isNotActivatableRefusal, type ModuleActivation } from "../nav/moduleActivation.ts";

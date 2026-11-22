@@ -154,9 +154,11 @@ export {
   loadBotCorpDivisionNames,
   loadRosterPlanets,
   login,
+  loginFactoryAccount,
   logout,
   pluginGetJson,
   pluginPostJson,
+  readRosterCharacters,
   startPluginRun,
   startServerBot,
   stopServerBot,
@@ -167,6 +169,7 @@ export type { ActiveServerBot, ApiOptions, ServerBot } from "../app/api.ts";
 export { readCorpStock } from "../app/corpStockRead.ts";
 export type { BotPilot, CorpItemFilter, OnlinePilot } from "../app/corpStockRead.ts";
 export type { AppFlow } from "../app/flow.ts";
+export { createAccountPass, type AccountPass } from "../app/accountPass.ts";
 export { loadHangarPrefs, onHangarPrefsSaved } from "../app/hangarPrefs.ts";
 export { loadKnownAccounts, loadKnownCharacters } from "../app/knownCharacters.ts";
 export type { KnownCharacter } from "../app/knownCharacters.ts";
@@ -175,15 +178,17 @@ export { createPilotReach } from "../app/pilotReach.ts";
 export type { PilotReach } from "../app/pilotReach.ts";
 export { skipWhileBusy } from "../app/skipWhileBusy.ts";
 export { stopServerBotFor } from "../app/stopBotFor.ts";
+export { MAX_IN_FLIGHT } from "../app/transport.ts";
 export { groupStartFinished, groupStartSummary, startForGroup } from "../bots/groupStart.ts";
 export type { GroupStartEntry, GroupStartState } from "../bots/groupStart.ts";
 export { SCRIPT_FORMAT, SCRIPT_VERSION, startingStation } from "../bots/botScript.ts";
 export type { BotScript, WorldRef } from "../bots/botScript.ts";
-export { analyzeBotRunPolicy, createBotLaunchGrant, createPluginRunGrant } from "../bots/runPolicy.ts";
+export { analyzeBotRunPolicy, createBotLaunchGrant, createPluginRunGrant, MAX_SERVER_BOT_RUNTIME_MINUTES } from "../bots/runPolicy.ts";
 export type { BotLaunchGrant, PluginRunPolicy } from "../bots/runPolicy.ts";
 export { decodeScriptValue } from "../bots/scriptCodec.ts";
 export { decodePlanetResourceInfo } from "../bridge/boundPlanets.ts";
 export { BridgeCallError } from "../bridge/callMethod.ts";
+export { decodeCharacterSelectionData } from "../bridge/characterSelection.ts";
 export {
   attentionByColony,
   bySeverityThenTime,
