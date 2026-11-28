@@ -20,6 +20,7 @@ import {
 } from "../combat/defenderPreparation.ts";
 import { boundedDroneWrite } from "../combat/droneAdapter.ts";
 import { bridgeCallQueueTimeout } from "../shared/progressDeadline.ts";
+import type { JsonValue } from "../shared/wire.ts";
 import { assertFleetDroneDeparture, recallFleetDrones } from "./droneRecall.ts";
 import { createNativeMiningNavigation } from "./nativeMember.ts";
 import { targetKey, type Claim, type Target, type SynchronousStore } from "./targetBoard.ts";
@@ -112,6 +113,21 @@ export class DefenderStopBeforeAction extends Error {
 function defenderAsk(run: PluginRunContext, session: PilotSession, current: () => void) {
   return async (service: string, method: string, args: unknown[] = [], of?: number) => {
     current();
+    if (
+      (service === "entity" && method === "CmdEngage") ||
+      (service === "ship" && method === "LaunchDrones") ||
+      (service === "dogmaIM" && method === "Deactivate")
+    ) {
+      const result = await session.flow.flying.bridgeDo(
+        service,
+        method,
+        args as JsonValue[],
+        null,
+        of,
+      );
+      current();
+      return result;
+    }
     const notifications = session.flow.requestOptions().captureNotificationSink?.();
     const response = await run.fetch(new URL("/api/bridge/call", run.baseUrl), {
       method: "POST",
@@ -675,6 +691,7 @@ export function createMiningDefender(config: {
     ask,
     defender: {
       protectedShips: config.protectedShips ?? [],
+      settling: () => stopping,
       timing: config.timing,
       preparation,
       checkTarget: fence,

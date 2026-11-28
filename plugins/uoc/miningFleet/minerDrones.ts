@@ -82,12 +82,6 @@ export function createMinerDroneFlight(
     types: Set<number>;
     combatBayOnly: boolean;
   } | null = null;
-  let reconnectAttempt: {
-    signature: string;
-    ids: ReadonlySet<number>;
-    sampledAtMs: number;
-    inFlight: boolean;
-  } | null = null;
   type PendingOrder = { targetID: number | null; sampledAt: number | null };
   const ordersInFlight = new Map<number, PendingOrder>();
   let bayRead: Promise<ReturnType<typeof checkedInventory>> | undefined;
@@ -170,26 +164,20 @@ export function createMinerDroneFlight(
     droneRangeSample = { meters, expires: Date.now() + 15000 };
     return meters;
   }
-  const reconnectCandidate = (d: Entity) =>
-    d.kind === "drone" && d.ownerID === run.characterID && d.controllerID === null;
+  // Ownership survives ship loss. An old drone joins this flight only when the scene shows this hull controls it.
   const sceneDrones = (scene: Scene) =>
     scene.entities
       .filter(
-        (d) => d.kind === "drone" && (d.ownerID === run.characterID || d.controllerID === shipID),
+        (d) => d.kind === "drone" && d.ownerID === run.characterID && d.controllerID === shipID,
       )
       .map((d) => ({
         itemID: d.itemID,
         typeID: d.typeID,
-        controlled: d.ownerID === run.characterID && d.controllerID === shipID,
+        controlled: true,
         activity: d.droneActivity,
         targetID: d.targetEntityID,
         shieldRatio: d.shieldRatio,
       }));
-  const awaitingReconnect = (sampledAtMs: number | null) =>
-    reconnectAttempt !== null &&
-    (reconnectAttempt.inFlight ||
-      sampledAtMs === null ||
-      sampledAtMs <= reconnectAttempt.sampledAtMs);
   const launchKey = (fighting: boolean, drones: ReturnType<typeof sceneDrones>) =>
     JSON.stringify([
       fighting,
@@ -232,9 +220,11 @@ export function createMinerDroneFlight(
       const d = panel.out.find((d) => d.itemID === id);
       if (
         panel.bay.some((d) => d.itemID === id) ||
-        ((!scene || scene.sampledAtMs !== order.sampledAt) &&
-          d?.controlled &&
-          (order.targetID === null ? d.activity === "returning" : d.targetID === order.targetID))
+        ((!scene ||
+          (scene.sampledAtMs !== null &&
+            (order.sampledAt === null || scene.sampledAtMs > order.sampledAt))) &&
+          (!d?.controlled ||
+            (order.targetID === null ? d.activity === "returning" : d.targetID === order.targetID)))
       )
         ordersInFlight.delete(id);
     }
@@ -455,19 +445,11 @@ export function createMinerDroneFlight(
         eligible.find((e) => drones.some((d) => d.targetID === e.itemID)) ?? eligible[0] ?? null
       );
     };
-    if ((rock || observedThreat || combat) && scene.entities.some(reconnectCandidate))
-      await refreshIfStale();
     if (observedThreat || combat || rangeRefusalSample || scene !== initial)
       await refreshCombatTargets();
     let hostile = combatTargets[0] ?? null;
     let visible = sceneDrones(scene),
       deployed = visible.filter((d) => d.controlled);
-    let reconnectable = scene.entities.filter(reconnectCandidate),
-      sampledAt = scene.sampledAtMs;
-    if (reconnectAttempt && sampledAt !== null && sampledAt > reconnectAttempt.sampledAtMs) {
-      for (const d of deployed) if (reconnectAttempt.ids.has(d.itemID)) launched.add(d.itemID);
-      if (!reconnectable.length && !reconnectAttempt.inFlight) reconnectAttempt = null;
-    }
     for (const [id, order] of ordersInFlight) {
       if (
         order.sampledAt !== null &&
@@ -553,8 +535,6 @@ export function createMinerDroneFlight(
       visible = sceneDrones(scene);
       deployed = visible.filter((d) => d.controlled);
       visibleCombat = deployed.filter((d) => knownRole(d.typeID) === "combat");
-      reconnectable = scene.entities.filter(reconnectCandidate);
-      sampledAt = scene.sampledAtMs;
     }
     const needsFlight = !!(rock || hostile);
     if (!hostile) combatInBay = undefined;
@@ -568,51 +548,6 @@ export function createMinerDroneFlight(
         undefined,
         "essential",
       );
-    }
-    if (
-      needsFlight &&
-      reconnectable.length &&
-      sampledAt !== null &&
-      scene.shipID === shipID &&
-      scene.ship?.itemID === shipID &&
-      (scene.ship.characterID === null || scene.ship.characterID === run.characterID) &&
-      !scene.ship.warp &&
-      scene.ship.mode?.toUpperCase() !== "WARP" &&
-      performance.now() - observedAt <= sceneFreshMs &&
-      !launchInDoubt &&
-      !reconnectAttempt?.inFlight &&
-      (!reconnectAttempt || sampledAt > reconnectAttempt.sampledAtMs) &&
-      (activeDroneCap === null || deployed.length < activeDroneCap)
-    ) {
-      // GamePort can omit the state of an owned ball. EveJS checks ownership,
-      // free control and bandwidth; only a later scene confirms a reconnect.
-      const ids = reconnectable
-        .map((d) => d.itemID)
-        .sort((a, b) => a - b)
-        .slice(0, 25);
-      const signature = JSON.stringify([ids, deployed.map((d) => d.itemID).sort((a, b) => a - b)]);
-      if (reconnectAttempt?.signature !== signature) {
-        active();
-        const attempt = { signature, ids: new Set(ids), sampledAtMs: sampledAt, inFlight: true };
-        reconnectAttempt = attempt;
-        await timed(
-          timing,
-          "miner-drone-reconnect-rpc",
-          () =>
-            boundedDroneWrite(
-              async () => {
-                try {
-                  await f.bridgeDo("entity", "CmdReconnectToDrones", [ids]);
-                } finally {
-                  attempt.inFlight = false;
-                }
-              },
-              12000,
-              () => {},
-            ),
-          { droneCount: ids.length },
-        );
-      }
     }
     const working = (d: (typeof deployed)[number], id: number, fighting: boolean) =>
       (earlyTarget === id && earlyOrdered.has(d.itemID)) ||
@@ -654,30 +589,22 @@ export function createMinerDroneFlight(
           ordersInFlight.get(d.itemID)?.targetID === null,
       );
     const plannedCombat = !!hostile && (visibleCombat.length > 0 || combatInBay === true);
-    const controlUnconfirmed = reconnectable.length > 0 || awaitingReconnect(sampledAt);
-    if (controlUnconfirmed && !deployed.length && !launchInDoubt && needsFlight)
-      throw new FleetObservationUnavailable(
-        "Waiting for native control observation of drones in space.",
-      );
     const needsBay =
       !assignMiningFirst &&
       (!!launchInDoubt ||
-        (!controlUnconfirmed &&
-          !atCap &&
+        (!atCap &&
           !awaitingRecall &&
           needsFlight &&
           !launchDeferred(launchKey(plannedCombat, deployed))) ||
         (!!hostile && combatInBay === undefined && !visibleCombat.length));
-    if (needsBay && hostile && plannedCombat && !atCap && !controlUnconfirmed)
-      prepareCombatLaunch();
+    if (needsBay && hostile && plannedCombat && !atCap) prepareCombatLaunch();
     // Returning Mining Drones change the mining stacks, not the combat stacks
     // already verified in this drone bay. Reuse them once, with free slots
-    // confirmed on the current grid and no unconfirmed drone control or launch.
+    // confirmed on the current grid and no unconfirmed launch.
     const preparedBay =
       hostile &&
       combat &&
       !deployed.length &&
-      !controlUnconfirmed &&
       !launchInDoubt &&
       combatBayBeforeRecall &&
       Date.now() < combatBayBeforeRecall.expires
@@ -814,13 +741,7 @@ export function createMinerDroneFlight(
         await recalled;
       }
     }
-    if (!ready.length && !available.length) {
-      if (controlUnconfirmed && needsFlight)
-        throw new FleetObservationUnavailable(
-          "Waiting for native control observation of drones in space.",
-        );
-      return status();
-    }
+    if (!ready.length && !available.length) return status();
     let target = targetOnGrid();
     if (!target) return status();
     const signature = launchKey(fighting, controlled);
@@ -841,7 +762,6 @@ export function createMinerDroneFlight(
     );
     const canLaunch =
       available.length > 0 &&
-      !controlUnconfirmed &&
       !launchInDoubt &&
       !controlled.some((d) => d.typeID === null) &&
       !launchDeferred(signature);
@@ -951,8 +871,6 @@ export function createMinerDroneFlight(
     await refreshCombatTargets();
     target = targetOnGrid();
     if (!target || (controlRange !== null && distance(scene.ship!, target) > controlRange))
-      return status();
-    if (scene.entities.some(reconnectCandidate) || awaitingReconnect(scene.sampledAtMs))
       return status();
     const stillDeployed = sceneDrones(scene).filter((d) => d.controlled);
     if (

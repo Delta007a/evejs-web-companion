@@ -6,6 +6,28 @@ const action:CombatModuleAction={key:'room-1/target-2/module-3',characterID:1,sh
 function fixture(){let doc:unknown=null,clock=1,calls=0,active=false;const d:CombatModuleActionDeps={document:{read:()=>doc,write:v=>{doc=structuredClone(v);}},current:()=>{},fence:async()=>{},observed:async()=>active,activate:async()=>{calls++;active=true;},sleep:async ms=>{clock+=ms;},now:()=>clock};return {d,get calls(){return calls;},get doc(){return doc;},setActive(v:boolean){active=v;}};}
 test('native effect confirms one dispatch, and a repeated tick does not dispatch again',async()=>{const f=fixture();await executeCombatModuleAction(action,f.d);await executeCombatModuleAction(action,f.d);assert.equal(f.calls,1);assert.equal((f.doc as any).entries[0].status,'CONFIRMED');});
 test('unknown write remains durable and is never replayed without positive native effect',async()=>{const f=fixture();let calls=0;f.d.activate=async()=>{calls++;throw Error('transport lost');};await assert.rejects(executeCombatModuleAction(action,f.d),/transport lost/);await assert.rejects(executeCombatModuleAction(action,f.d),/unresolved/);assert.equal(calls,1);f.setActive(true);await executeCombatModuleAction(action,f.d);assert.equal((f.doc as any).entries[0].status,'CONFIRMED');assert.equal(calls,1);});
+test("a known pre-send slot rejection permits one freshly fenced activation", async () => {
+  const f = fixture();
+  const activate = f.d.activate;
+  let fences = 0;
+  f.d.fence = async () => { fences++; };
+  f.d.activate = async () => {
+    throw Object.assign(Error(
+      "Bridge call dogmaIM.Activate could not reach the BFF: " +
+      "/api/bridge/call waited 65s for a hosted request slot. " +
+      "Hosted BFF requests: 8 active, 72 queued, oldest 3583 ms. Active routes: /api/bridge/call."
+    ), { code: "BRIDGE_NETWORK_ERROR", status: 0 });
+  };
+  await assert.rejects(executeCombatModuleAction(action, f.d), /waited 65s for a hosted request slot/);
+  assert.deepEqual(f.doc, { version: 1, entries: [] });
+  assert.equal(f.calls, 0);
+
+  f.d.activate = activate;
+  await executeCombatModuleAction(action, f.d);
+  await executeCombatModuleAction(action, f.d);
+  assert.ok(fences >= 2);
+  assert.equal(f.calls, 1);
+});
 test('only exact pre-effect target-not-locked refusal permits another activation',async()=>{const f=fixture();let calls=0;f.d.activate=async()=>{calls++;if(calls===1)throw {code:'CALL_REFUSED',status:409,message:'That target is not locked.',refusal:{key:'CustomNotify',values:{type:'dict',entries:[['notify','That target is not locked.']]}}};f.setActive(true);};await executeCombatModuleAction(action,f.d);assert.equal(calls,2);});
 test('foreign action using the same journal key and failed ownership fence cannot dispatch',async()=>{const f=fixture();await executeCombatModuleAction(action,f.d);await assert.rejects(executeCombatModuleAction({...action,targetID:6},f.d),/different identity/);const g=fixture();g.d.fence=async()=>{throw Error('owner changed');};await assert.rejects(executeCombatModuleAction(action,g.d),/owner changed/);assert.equal(g.calls,0);assert.equal(g.doc,null);});
 test('an unresolved command blocks a different target for the same module',async()=>{const f=fixture();let calls=0;f.d.activate=async()=>{calls++;throw Error('unknown');};await assert.rejects(executeCombatModuleAction(action,f.d),/unknown/);await assert.rejects(executeCombatModuleAction({...action,key:'room-1/target-6/module-3',targetID:6},f.d),/another command/i);assert.equal(calls,1);});
@@ -15,7 +37,7 @@ test('absence is never used to clear an unknown dispatch',async()=>{const f=fixt
 
 test('Defender observes a lost response on its own module without replaying it or blocking another weapon',async()=>{
  const f=fixture(),writes:number[]=[];
- f.d.observeWeapon=async()=> 'inactive';
+ f.d.observeWeapon=async(_action,fresh)=>fresh?null:'inactive';
  f.d.activate=async a=>{writes.push(a.moduleID);if(a.moduleID===3)throw Error('response lost');f.setActive(true);};
  assert.equal(await executeCombatModuleAction(action,f.d),'pending');
  assert.equal(await executeCombatModuleAction(action,f.d),'pending');

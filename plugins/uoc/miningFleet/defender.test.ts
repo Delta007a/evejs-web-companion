@@ -185,9 +185,16 @@ test("defender proactively engages a hostile with no current target at its exact
         sessionGeneration: () => 1,
         isSessionClosing: () => false,
         bridgeAsk: async () => 45000,
-        bridgeDo: async () => {
-          locked = true;
-          return [0];
+        bridgeDo: async (service: string, method: string, args: unknown[]) => {
+          if (method === "AddTarget") {
+            locked = true;
+            return [0];
+          }
+          const response = await run.fetch(new URL("/api/bridge/call", run.baseUrl), {
+            method: "POST",
+            body: JSON.stringify({ service, method, args, confirm: true }),
+          });
+          return (await response.json()).result;
         },
         readFit: async () => true,
         resolveDefenseModuleIDs: () => ({
@@ -282,12 +289,14 @@ function escortFixture(writeTiming?: (line: string) => void) {
     smallX: 7000,
     largeShield: 1,
     stopping: false,
+    stopFitUnavailable: false,
     sceneAvailable: true,
     weaponTargetsAvailable: true,
     nativeLockReply: true,
     pendingLock: false,
     beforeWeaponReply: undefined as ((moduleID: number) => Promise<void>) | undefined,
     onDroneOrder: undefined as (() => void) | undefined,
+    beforeDroneOrder: undefined as (() => void) | undefined,
     beforeLockRead: undefined as ((id: number) => Promise<void>) | undefined,
     heldLocks: undefined as number[] | undefined,
     beforeLaunchReply: undefined as (() => Promise<void>) | undefined,
@@ -414,6 +423,11 @@ function escortFixture(writeTiming?: (line: string) => void) {
       quantity: 1,
       categoryID: 7,
     });
+    const fittedRows = () => [
+      ...weaponIDs,
+      ...local.map((m) => m.itemID),
+      ...(propulsion ? [propulsion.itemID] : []),
+    ].map(row);
     const flight = {
       shipID,
       inSpace: true,
@@ -554,6 +568,28 @@ function escortFixture(writeTiming?: (line: string) => void) {
             errors: { bay: null, inSpace: null, shipInfo: null },
           });
         }
+        if (path === "/api/bridge/fitting") {
+          mark("fitted-slots");
+          if (controls.stopFitUnavailable) {
+            controls.stopFitUnavailable = false;
+            return Response.json({
+              ok: true,
+              activeShipID: shipID,
+              slots: null,
+              errors: { slots: "EVE_GATEWAY_UNREACHABLE" },
+            });
+          }
+          const charge = { ...row(weaponID), itemID: [shipID, 27, 101], typeID: 101, categoryID: 8 };
+          const packedRows = [...fittedRows(), charge].map((fields) => ({ type: "packedrow", fields }));
+          return Response.json({
+            ok: true,
+            activeShipID: shipID,
+            slots: {
+              type: "objectex1",
+              header: [{ value: "__builtin__.set" }, [{ type: "list", items: packedRows }]],
+            },
+          });
+        }
         if (path === "/api/bridge/space/snapshot") {
           mark("snapshot");
           reads.grid++;
@@ -594,13 +630,7 @@ function escortFixture(writeTiming?: (line: string) => void) {
                         categoryID: 8,
                       },
                     ]
-                  : [
-                      ...weaponIDs,
-                      ...local.map((m) => m.itemID),
-                      ...(propulsion ? [propulsion.itemID] : []),
-                    ]
-                      .map(row)
-                      .filter((item) => item.flagID === args[0]),
+                  : fittedRows().filter((item) => item.flagID === args[0]),
           };
         } else if (method === "QueryAllAttributesForItem")
           result = dict([
@@ -793,8 +823,17 @@ function escortFixture(writeTiming?: (line: string) => void) {
           async bridgeDo(
             _service: string,
             method: string,
-            args: readonly (number | string | null)[],
+            args: readonly unknown[],
           ) {
+            if (["CmdEngage", "LaunchDrones", "Deactivate"].includes(method)) {
+              mark(`confirmed:${method}`);
+              if (method === "CmdEngage") controls.beforeDroneOrder?.();
+              const response = await run.fetch(new URL("/api/bridge/call", run.baseUrl), {
+                method: "POST",
+                body: JSON.stringify({ service: _service, method, args, confirm: true }),
+              });
+              return (await response.json()).result;
+            }
             mark(method);
             assert.equal(controls.stopping, false);
             const itemID = Number(args[0]),
@@ -1860,6 +1899,7 @@ test("prepared Defender dispatches AddTarget and CmdEngage while redundant nativ
   assert.deepEqual(gridActions.slice(0, lastOrder + 1).sort(), [
     "AddTarget",
     "CmdEngage",
+    "confirmed:CmdEngage",
     "snapshot",
   ]);
   assert.deepEqual(x.events.slice().sort(), ["engage:3:901", "lock:3:901"]);
@@ -2149,7 +2189,7 @@ test(
 
 test("unknown reload stays scoped to its empty gun while the ready gun and drones keep attacking", async () => {
   const x = escortFixture(),
-    defender = x.pilot(3, false, true, true),
+    defender = x.pilot(3, false, true, true, { wait: async () => {} }),
     activations: number[] = [];
   let reloads = 0;
   x.controls.ammoFit = true;
@@ -2171,6 +2211,10 @@ test("unknown reload stays scoped to its empty gun while the ready gun and drone
   assert.equal(reloads, 1);
   const record = [...x.docs.entries()].find(([key]) => key.includes("reloads"))?.[1] as any;
   assert.equal(record?.rows?.[0]?.status, "DISPATCHED");
+  x.controls.stopping = true;
+  await defender.stop(true);
+  assert.equal(reloads, 1);
+  assert.deepEqual([...x.docs.entries()].find(([key]) => key.includes("reloads"))?.[1], record);
 });
 
 test("a pending native lock delays the gun while Defender drones engage in the same pass", async () => {
@@ -2770,21 +2814,87 @@ test("lost drone response during a parallel attack does not replay either native
   assert.deepEqual(x.events.slice().sort(), ["engage:3:901", "fire:3:901", "lock:3:901"]);
 });
 
-test("a Defender can regroup after an unknown weapon response while that gun remains fenced", async () => {
+test("Retry Stop settles the actual gun without replaying or retiring its unknown activation", async () => {
   const x = escortFixture(),
-    defender = x.pilot(3, false);
+    defender = x.pilot(3, false, false, false, { wait: async () => {} });
   x.controls.hostiles = [{ id: 901, x: 2800 }];
   x.controls.loseWeaponResponse = true;
   assert.equal(await defender.tick(), "combat-wait");
   x.controls.hostiles = [];
   assert.equal(await defender.tick(), "checking-grid");
   assert.equal(await defender.tick(), "watching");
-  x.controls.hostiles = [{ id: 903, x: 5300 }];
-  x.controls.loseWeaponResponse = false;
-  assert.equal(await defender.tick(), "combat-wait");
-  assert.deepEqual(x.events, ["lock:3:901", "fire:3:901", "lock:3:903"]);
+  const actionDoc = [...x.docs.keys()].find((key) => key.startsWith("mining-fleet-defender-actions:"))!;
+  const unresolved = x.docs.get(actionDoc) as { entries: { status: string }[] };
+  assert.equal(unresolved.entries[0]!.status, "DISPATCHED");
+
   x.controls.stopping = true;
-  await assert.rejects(defender.stop(true), /A combat module command remains unresolved/);
+  x.currentFire.set(3, 901);
+  x.controls.stopFitUnavailable = true;
+  await assert.rejects(defender.stop(true), /Security fitted inventory: EVE_GATEWAY_UNREACHABLE/);
+  assert.equal(x.currentFire.get(3), 901);
+
+  const trace = x.traces.get(3)!;
+  const before = trace.length;
+  await defender.stop(true);
+  const actions = trace.slice(before).map(({ action }) => action);
+  assert.equal(actions.filter((action) => action === "fitted-slots").length, 1);
+  assert.equal(actions.includes("List"), false);
+  assert.equal(actions.filter((action) => action === "ItemGetInfo").length, 2);
+  assert.equal(actions.filter((action) => action === "confirmed:Deactivate").length, 1);
+  assert.deepEqual(x.events, ["lock:3:901", "fire:3:901", "deactivate:3:901"]);
+  assert.equal(x.currentFire.has(3), false);
+  assert.deepEqual(x.docs.get(actionDoc), unresolved);
+  await defender.stop(true);
+  assert.equal(x.events.filter((event) => event.startsWith("deactivate:")).length, 1);
+});
+
+test("a lost AddTarget reply for a vanished NPC does not block a fresh lock on its replacement", async () => {
+  const x = escortFixture(), defender = x.pilot(3, false);
+  x.controls.hostiles = [{ id: 901, x: 4000 }];
+  x.controls.onLock = () => { throw Error("lock reply lost"); };
+  assert.equal(await defender.tick(), "waiting-lock");
+  x.controls.onLock = undefined;
+  x.controls.hostiles = [{ id: 903, x: 4000 }];
+  await defender.tick();
+  await defender.tick();
+  assert.equal(x.events.filter((event) => event === "lock:3:901").length, 1);
+  assert.ok(x.events.includes("lock:3:903"), JSON.stringify(x.events));
+});
+
+test("a fresh inactive gun can engage a new NPC after losing the previous Activate reply", async () => {
+  const x = escortFixture(), defender = x.pilot(3, false);
+  x.controls.hostiles = [{ id: 901, x: 2800 }];
+  x.controls.loseWeaponResponse = true;
+  assert.equal(await defender.tick(), "combat-wait");
+  x.controls.hostiles = [];
+  await defender.tick();
+  await defender.tick();
+  x.controls.hostiles = [{ id: 903, x: 2800 }];
+  x.controls.loseWeaponResponse = false;
+  await defender.tick();
+  assert.deepEqual(x.events.filter((event) => event.startsWith("fire:")), ["fire:3:901", "fire:3:903"]);
+});
+
+test("a rejected hosted slot permits a fresh confirmed drone order on the next Defender pass", async () => {
+  const x = escortFixture(), defender = x.pilot(3, false, true);
+  x.controls.hostiles = [{ id: 901, x: 2800 }];
+  x.controls.beforeDroneOrder = () => {
+    throw Error(
+      "/api/bridge/call waited 65s for a hosted request slot. " +
+      "Hosted BFF requests: 8 active, 72 queued, oldest 3583 ms. Active routes: /api/bridge/call.",
+    );
+  };
+  await assert.rejects(defender.tick(), /waited 65s for a hosted request slot/);
+  assert.equal(x.events.includes("engage:3:901"), false);
+
+  x.controls.beforeDroneOrder = undefined;
+  await defender.tick();
+  await defender.tick();
+  assert.equal(x.events.filter((event) => event === "engage:3:901").length, 1);
+  assert.equal(
+    x.traces.get(3)!.filter(({ action }) => action === "confirmed:CmdEngage").length,
+    2,
+  );
 });
 
 test("120 km target eligibility uses any active Miner and excludes 121 km from the group", async () => {

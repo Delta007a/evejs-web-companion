@@ -15,3 +15,14 @@ test("only a definite queue rejection proves the bridge command was never sent",
  assert.equal(bridgeCallQueueTimeout(error("Bridge call invbroker.Add timed out; other calls waited 65s for a hosted request slot.")),false);
  assert.equal(bridgeCallQueueTimeout({code:"CALL_TIMEOUT",status:504,message:"Remote call timed out"}),false);
 });
+
+test("Bot Host preserves a definite slot rejection through both IPC error shapes", () => {
+  const rejected = "/api/bridge/call waited 65s for a hosted request slot. " +
+    "Hosted BFF requests: 8 active, 72 queued, oldest 3583 ms. Active routes: /api/bridge/call.";
+  const wrapped = "Bridge call dogmaIM.Activate could not reach the BFF: " + rejected + " — Requests waiting.";
+  assert.equal(bridgeCallQueueTimeout(Error(rejected)), true);
+  assert.equal(bridgeCallQueueTimeout({ code: "BRIDGE_NETWORK_ERROR", status: 0, message: wrapped }), true);
+  assert.equal(bridgeCallQueueTimeout({ code: "CALL_TIMEOUT", status: 504, message: rejected }), false);
+  assert.equal(bridgeCallQueueTimeout(Error("Execution timeout. Other callers: " + rejected)), false);
+  assert.equal(bridgeCallQueueTimeout({ code: "BRIDGE_NETWORK_ERROR", status: 0, message: "The answer to bridge call dogmaIM.Activate was not read: TimeoutError" }), false);
+});

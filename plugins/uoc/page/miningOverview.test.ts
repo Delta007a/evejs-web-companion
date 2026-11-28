@@ -26,6 +26,11 @@ test("the Mining overview separates observed ore, confirmed freight and the pilo
   assert.match(active, /Ore in observed holds.*11 units/s);
   assert.match(active, /Needs attention · 1 pilot.*FixtureCargo1.*Container access denied/s);
   assert.doesNotMatch(active, /40 units|90 units|500 units/);
+  const byID = render(Overview, { props: {
+    runtime: { ...runtime, currentTarget: { targetName: "Belt I", systemName: null, systemID: 300, state: "ACTIVE" } },
+    systemLabel: (id: number) => id === 300 ? "Sibot" : "Unknown system",
+  } }).body;
+  assert.match(byID, /Sibot · ACTIVE/);
   const draft = render(Overview, { props: { runtime: { ...runtime, state: "DRAFT", currentTarget: null,
     lastRun: { deliveredUnits: 58, trips: 2 } } } }).body;
   assert.match(draft, /2 assigned.*Last run delivered.*58 units.*2 trips/s);

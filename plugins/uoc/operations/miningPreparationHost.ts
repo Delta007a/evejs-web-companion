@@ -186,6 +186,8 @@ async function miningPreparationTask(
     current();
     document.write(v);
   };
+  const reconcile = (reviewID: string) =>
+    json("/api/bridge/provisioning/reconcile", { operationID: reviewID });
   const strict = setup.role === "COMBAT" && setup.verifyEquipment === true;
   const sourceLabel = miningSupplySourceLabel(setup.preparation.source);
   const report = (detail: Record<string, unknown>): PluginRunReport => {
@@ -456,7 +458,7 @@ async function miningPreparationTask(
     ) {
       if (stopping || held?.stopRequested())
         throw Error("Preparation stopped before inventory dispatch.");
-      save({
+      const attempt = {
         version: 1,
         phase: "PENDING",
         world,
@@ -466,8 +468,10 @@ async function miningPreparationTask(
         reviewHash: r.reviewHash,
         input,
         shipID: originalShipID,
+        context: r.context,
         issuedAt: Date.now(),
-      });
+      };
+      save(attempt);
       let receipt: any, applyError: unknown;
       try {
         receipt = await json("/api/bridge/provisioning/replenish", {
@@ -480,12 +484,13 @@ async function miningPreparationTask(
       }
       if (!receipt || !["COMPLETE", "RECONCILED"].includes(receipt.state)) {
         try {
-          receipt = await json("/api/bridge/provisioning/reconcile", { operationID: r.reviewID });
+          receipt = await reconcile(r.reviewID);
         } catch (error) {
           // Apply may reject a stale Review before Core writes a receipt. Core
           // journals every move before dispatch, so these two responses on the
           // same held pilot allow one fresh Review, with its own review ID.
-          if (conflict(applyError, "REVIEW_REQUIRED") && conflict(error, "OPERATION_NOT_OWNED")) {
+          const refused = conflict(applyError, "REVIEW_REQUIRED");
+          if (refused && conflict(error, "OPERATION_NOT_OWNED")) {
             save(null);
             if (stopping || held?.stopRequested())
               return { status: "stopped", phase: "Mining preparation settled" };
@@ -498,6 +503,7 @@ async function miningPreparationTask(
               targets: reportedTargets(),
             });
           }
+          if (refused) save({ ...attempt, applyRefused: true });
           if (applyError instanceof Error)
             throw new Error(
               `${applyError.message}. Replenishment reconciliation failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -570,9 +576,60 @@ async function miningPreparationTask(
   };
   const work = (async () => {
     if (pending?.phase === "PENDING") {
-      const receipt = await json("/api/bridge/provisioning/reconcile", {
-        operationID: pending.reviewID,
-      });
+      let receipt;
+      try {
+        receipt = await reconcile(pending.reviewID);
+      } catch (error) {
+        if (!conflict(error, "OPERATION_NOT_OWNED")) throw error;
+        const previous = pending.context;
+        if (pending.version !== 1 || !object(previous) || !object(pending.input))
+          throw new Error(
+            "The retained replenishment review is missing its original pilot session scope.",
+            { cause: error },
+          );
+
+        const review = await json("/api/bridge/provisioning/review", pending.input);
+        const scope = review.context;
+        if (
+          !object(scope) ||
+          !positive(previous.accountID) ||
+          scope.accountID !== previous.accountID ||
+          previous.characterID !== run.characterID ||
+          scope.characterID !== run.characterID ||
+          !positive(pending.shipID) ||
+          previous.shipID !== pending.shipID ||
+          scope.shipID !== pending.shipID ||
+          (held && held.shipID !== pending.shipID) ||
+          !positive(previous.locationID) ||
+          scope.locationID !== previous.locationID ||
+          !positive(previous.corporationID) ||
+          scope.corporationID !== previous.corporationID ||
+          typeof previous.sessionGeneration !== "string" ||
+          !previous.sessionGeneration ||
+          typeof scope.sessionGeneration !== "string" ||
+          !scope.sessionGeneration
+        )
+          throw new Error(
+            "The retained replenishment review belongs to a different inventory scope.",
+            { cause: error },
+          );
+        if (scope.sessionGeneration === previous.sessionGeneration && pending.applyRefused !== true)
+          throw new Error("The original Apply may still be running. Reconcile its result first.", {
+            cause: error,
+          });
+
+        // Check again after proving ownership and that the old request cannot
+        // dispatch. An inventory move always has a durable Core journal entry.
+        try {
+          receipt = await reconcile(pending.reviewID);
+        } catch (confirmed) {
+          if (!conflict(confirmed, "OPERATION_NOT_OWNED")) throw confirmed;
+          if (!Array.isArray(review.pending) || review.pending.length)
+            throw Error("The current inventory custody is unresolved or unreadable.");
+          save(null);
+          return prepare(true);
+        }
+      }
       if (!["COMPLETE", "RECONCILED"].includes(receipt.state))
         throw Error(
           `PREPARATION_UNRESOLVED: ${String(receipt.state)}; the original inventory action was not repeated.`,

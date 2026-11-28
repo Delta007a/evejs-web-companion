@@ -2,7 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {decodeSpaceSnapshot} from "../../../web/src/plugin-api/flying.ts";
 import {createMinerDroneFlight} from "./minerDrones.ts";
-import {FleetObservationUnavailable} from "./stopSignal.ts";
 
 function pendingFlight(maxActive=1,controlRange:number|null=10_000){
  type Drone={itemID:number;typeID:number;activity:string|null;targetID:number|null;ownerID?:number;controllerID?:number|null};
@@ -10,7 +9,7 @@ function pendingFlight(maxActive=1,controlRange:number|null=10_000){
  const calls:string[]=[];let heldMethod:string|null=null,failedMethod:string|null=null,release=()=>{},entered=()=>{},bayReads=0;
  const sentAt=new Map<string,number>();
  let rangeReads=0,snapshotReads=0,invalidations=0,limitReads=0,allowSnapshot=false,refuseRange=false;
- let stateValid=true,exposeDroneControl=true,reconnectRefused=false,combatTypeKnown=true,deferRecall=false;
+ let stateValid=true,combatTypeKnown=true,deferRecall=false;
  const returnDrone=(id:number)=>{const d=out.get(id)!;out.delete(id);bay.set(id,{itemID:id,typeID:d.typeID,quantity:1});};
  let secondHostileM:number|undefined;
  let nativeGrid:{hostile:boolean|number;sampledAtMs:number}|undefined;
@@ -20,8 +19,8 @@ function pendingFlight(maxActive=1,controlRange:number|null=10_000){
   ship:{itemID:11,characterID:1,mode:"STOP",position:{x:0,y:0,z:0},radius:1},entities:[
    {itemID:77,typeID:30,categoryID:25,kind:"asteroid",position:{x:100,y:0,z:0},radius:1},
    ...[...out.values()].map(d=>({...d,kind:"drone",ownerID:d.ownerID??1,
-    controllerID:exposeDroneControl&&d.controllerID!==null?d.controllerID??11:null,
-    droneActivity:exposeDroneControl?d.activity:null,targetEntityID:exposeDroneControl?d.targetID:null,
+     controllerID:d.controllerID!==null?d.controllerID??11:null,
+     droneActivity:d.activity,targetEntityID:d.targetID,
     position:{x:0,y:0,z:0},radius:1})),
    ...(hostile?[{itemID:90,typeID:40,categoryID:11,kind:"ship",isNpc:true,npcEntityType:"npc",position:{x:typeof hostile==="number"?hostile:500,y:0,z:0},radius:1}]:[]),
    ...(secondHostileM===undefined?[]:[{itemID:91,typeID:40,categoryID:11,kind:"ship",isNpc:true,npcEntityType:"npc",position:{x:secondHostileM,y:0,z:0},radius:1}]),
@@ -50,16 +49,7 @@ function pendingFlight(maxActive=1,controlRange:number|null=10_000){
     ]}]])};
    }
    if(method==="LaunchDrones")for(const [id]of args[0]){const d=bay.get(id)!;bay.delete(id);out.set(id,{...d,activity:"idle",targetID:null});}
-   if(method==="CmdReconnectToDrones"){
-    assert.equal(_service,"entity");
-    assert.ok(args[0].length>0&&args[0].length<=25);
-    for(const id of args[0]){
-     const d=out.get(id)!;
-     assert.equal(d.ownerID??1,1,"never request control of another pilot's drone");
-     if(reconnectRefused||d.controllerID!==null)continue;
-     d.controllerID=11;d.activity="idle";d.targetID=null;
-    }
-   }
+    assert.notEqual(method,"CmdReconnectToDrones","MCC must not claim loose drones by owner");
    if(method==="CmdReturnBay"&&!deferRecall)for(const id of args[0])returnDrone(id);
    if(method==="CmdEngage"||method==="CmdMineRepeatedly")for(const id of args[0]){const d=out.get(id)!;d.targetID=args[1];d.activity=method==="CmdEngage"?"fighting":"mining";}
    if(heldMethod===method){entered();await gate;}
@@ -79,12 +69,10 @@ function pendingFlight(maxActive=1,controlRange:number|null=10_000){
    observeMiningGrid(hostile:boolean|number){latest={space:decodeSpaceSnapshot(space(hostile)),observedAt:performance.now()};},
    setNativeGrid(hostile:boolean|number,sampledAtMs:number){allowSnapshot=true;nativeGrid={hostile,sampledAtMs};},
    setControlRange(meters:number|null){controlRange=meters;},
-   showDroneControl(value:boolean){exposeDroneControl=value;},
    setSceneValid(value:boolean){stateValid=value;},
    deferRecall(){deferRecall=true;},
    returnDrone,
    showCombatType(value:boolean){combatTypeKnown=value;},
-   refuseReconnect(){reconnectRefused=true;},
    addSecondHostile(meters:number){secondHostileM=meters;},
    refuseNextEngageForRange(){refuseRange=true;},
   failNext(method:string){failedMethod=method;},
@@ -98,60 +86,29 @@ function pendingFlight(maxActive=1,controlRange:number|null=10_000){
  };
 }
 
-test("a resumed Miner reconnects its loose Mining Drones and uses the existing flight",async t=>{
- t.mock.timers.enable({apis:["Date"]});
+test("a resumed Miner uses the current hull's flight and ignores drones from former hulls",async()=>{
  const x=pendingFlight();
  x.bay.clear();
- x.out.set(8,{itemID:8,typeID:101,controllerID:null,activity:null,targetID:null});
- x.out.set(9,{itemID:9,typeID:101,ownerID:2,controllerID:null,activity:null,targetID:null});
- await assert.rejects(x.tick(false),FleetObservationUnavailable);
- assert.deepEqual(x.calls,["CmdReconnectToDrones"]);
- assert.equal(x.out.get(8)?.controllerID,11);
- assert.deepEqual(x.flight.launchedIDs,[],"submission alone does not confirm the flight");
- t.mock.timers.tick(1000);
+ x.out.set(8,{itemID:8,typeID:101,controllerID:11,activity:"idle",targetID:null});
+ x.out.set(9,{itemID:9,typeID:101,controllerID:null,activity:null,targetID:null});
+ x.out.set(10,{itemID:10,typeID:101,controllerID:12,activity:"idle",targetID:null});
  await x.tick(false);
- assert.deepEqual(x.calls,["CmdReconnectToDrones","CmdMineRepeatedly"]);
+ assert.deepEqual(x.calls,["CmdMineRepeatedly"]);
  assert.equal(x.out.get(8)?.activity,"mining");
  assert.equal(x.out.get(9)?.controllerID,null);
- assert.deepEqual(x.flight.launchedIDs,[8]);
+ assert.equal(x.out.get(10)?.targetID,null);
  assert.equal(x.reads(),0);
  assert.equal(x.snapshotReads(),0);
 });
 
-test("an unreadable drone controller cannot authorize a replacement launch",async t=>{
- t.mock.timers.enable({apis:["Date"]});
+test("old loose drones do not occupy slots of the current hull's flight",async()=>{
  const x=pendingFlight();
- x.out.set(8,{itemID:8,typeID:101,controllerID:11,activity:"idle",targetID:null});
- x.showDroneControl(false);
- for(let i=0;i<3;i++){
-  await assert.rejects(x.tick(false),FleetObservationUnavailable);
-  t.mock.timers.tick(1000);
- }
- assert.deepEqual(x.calls,["CmdReconnectToDrones"],"a native no-op must not repeat on unchanged observations");
- assert.equal(x.bay.has(7),true);
- x.showDroneControl(true);
- await x.tick(false);
- assert.deepEqual(x.calls,["CmdReconnectToDrones","CmdMineRepeatedly"]);
-});
-
-test("an unconfirmed reconnect still in transport blocks a replacement launch",async t=>{
- t.mock.timers.enable({apis:["Date","setTimeout"]});
- const x=pendingFlight();
- x.out.set(8,{itemID:8,typeID:101,controllerID:null,activity:null,targetID:null});
- x.refuseReconnect();
- const command=x.hold("CmdReconnectToDrones"),first=x.tick(false);
- // Fail immediately when the implementation attempts a blind Launch instead.
- await Promise.race([command.started,first.then(()=>assert.fail("Expected a reconnect before any launch"))]);
- t.mock.timers.tick(12001);
- await assert.rejects(first,/still in flight/);
  x.out.clear();
- await assert.rejects(x.tick(false),FleetObservationUnavailable);
- assert.deepEqual(x.calls,["CmdReconnectToDrones"]);
- command.release();
- await new Promise<void>(resolve=>setImmediate(resolve));
- t.mock.timers.tick(1000);
+ for(let id=8;id<19;id++)x.out.set(id,{itemID:id,typeID:101,controllerID:null,activity:null,targetID:null});
  await x.tick(false);
- assert.deepEqual(x.calls,["CmdReconnectToDrones","LaunchDrones","CmdMineRepeatedly"]);
+ assert.deepEqual(x.calls,["LaunchDrones","CmdMineRepeatedly"]);
+ assert.deepEqual(x.flight.launchedIDs,[7]);
+ assert.equal(x.out.get(8)?.controllerID,null);
 });
 
 test("a resumed Miner launches from its bay only after a readable grid confirms an empty flight",async()=>{
@@ -166,32 +123,32 @@ test("a resumed Miner launches from its bay only after a readable grid confirms 
  assert.equal(x.out.get(7)?.activity,"mining");
 });
 
-test("a fresh grid showing a loose owned drone cancels a prepared replacement launch",async t=>{
+test("a fresh grid showing a drone controlled by this hull cancels a prepared replacement launch",async t=>{
  let now=1000;t.mock.method(performance,"now",()=>now);
  const x=pendingFlight();
  x.out.clear();
  const bay=x.hold("List"),work=x.tick(false);
  await bay.started;
- x.out.set(8,{itemID:8,typeID:101,controllerID:null,activity:null,targetID:null});
+ x.out.set(8,{itemID:8,typeID:101,controllerID:11,activity:"idle",targetID:null});
  now+=2000;x.observeMiningGrid(false);
  bay.release();
  await work;
  assert.deepEqual(x.calls,[]);
  assert.equal(x.bay.has(7),true);
- await assert.rejects(x.tick(false),FleetObservationUnavailable);
- assert.deepEqual(x.calls,["CmdReconnectToDrones"]);
+ await x.tick(false);
+ assert.deepEqual(x.calls,["CmdMineRepeatedly"]);
 });
 
-test("a resumed Miner returns the recovered combat flight after the old hostile goes beyond 120 km",async t=>{
+test("a resumed Miner returns its current combat flight after a hostile goes beyond 120 km",async t=>{
  t.mock.timers.enable({apis:["Date"]});
  const x=pendingFlight(1,250_000);
- x.out.set(8,{itemID:8,typeID:102,controllerID:null,activity:null,targetID:90});
- await assert.rejects(x.tick(200_000),FleetObservationUnavailable);
+ x.out.set(8,{itemID:8,typeID:102,controllerID:11,activity:"fighting",targetID:90});
+ await x.tick(200_000);
  for(let i=0;i<3;i++){
   t.mock.timers.tick(1000);
   await x.tick(200_000);
  }
- assert.deepEqual(x.calls,["CmdReconnectToDrones","CmdReturnBay","LaunchDrones","CmdMineRepeatedly"]);
+ assert.deepEqual(x.calls,["CmdReturnBay","LaunchDrones","CmdMineRepeatedly"]);
  assert.equal(x.bay.has(8),true);
  assert.equal(x.out.get(7)?.activity,"mining");
 });

@@ -1,5 +1,6 @@
 import { officeList, corporationRow } from "./corporateOfficeFixture.ts";
 import { memoryFleetDocuments } from "./operationStoreFixture.ts";
+import { createFleetLaunchJournal } from "../operations/miningLaunchJournal.ts";
 import { testPilotSession } from "../test/pilotSession.ts";
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
@@ -19,6 +20,7 @@ import { createTargetBoard, targetKey, type Target } from "./targetBoard.ts";
 import { createNativeBeltNavigation, readMiningReadiness } from "./nativeBelt.ts";
 import { pilotServiceOwner, registerRun, runControlRoutes } from "../runControl.ts";
 import { FleetStopBeforeDispatch } from "./stopSignal.ts";
+import { FleetDroneReturnIncomplete } from "./droneRecall.ts";
 import { createRawTypeFacts } from "./typeFacts.ts";
 import { createBurstGroup } from "./support/burstGroup.ts";
 import type { Member } from "./operation.ts";
@@ -60,7 +62,7 @@ test("productive fleet passes take no per-pilot parking snapshots; Stop reads cu
     shipID: i + 20,
     role: i < 9 ? "MINER" : i < 13 ? "DEFENDER" : "HAULER",
   }));
-  const setup = { ...base, operationID: "parking-snapshot-reads", members };
+  const setup = { ...base, operationID: "parking-snapshot-reads", beltName: "Snapshot benchmark belt", members };
   const group = createMiningFleetRuntime(deps).getOrCreate(setup);
   assert.ok(group.op.reserve(1, { kind: "BELT", systemID: 300, name: setup.beltName! }));
   assert.ok(group.op.activate(1));
@@ -3280,12 +3282,26 @@ for (const scenario of [
       }
     },
   );
-test("incomplete roster Stop releases an already docked member without a new route or a terminal fleet receipt", async () => {
+test("partial startup Stop records the docked member before release and finishes when the unused launches are identified", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval"], now: Date.now() });
   const setup = { ...base, operationID: "partial-stop" },
     reports: any[] = [];
+  const launch = createFleetLaunchJournal(document("partial-start"));
+  launch.begin({
+    operationID: setup.operationID, operationRunID: setup.operationRunID,
+    revision: 1, planHash: "plan", setupHash: "setup",
+    members: setup.members.map(m => ({
+      characterID: m.characterID, accountName: "pilot" + m.characterID, role: m.role,
+      kind: m.role === "HAULER" ? "mcc-hauler" : "mcc-miner", beforeIDs: [],
+    })),
+  });
+  launch.dispatch(1);
+  launch.accept(1, "partial-1");
+  launch.dispatch(2);
   let parked = 0;
   const runtime = createMiningFleetRuntime({
     ...deps,
+    launchJournal: () => launch,
     attach: async (run) =>
       ({
         store: {
@@ -3335,13 +3351,24 @@ test("incomplete roster Stop releases an already docked member without a new rou
     } as any),
     group = runtime.getOrCreate(setup);
   group.requestStop();
-  for (let i = 0; i < 60 && !reports.some((r) => r.status === "stopped"); i++)
-    await new Promise((resolve) => setTimeout(resolve, 100));
+  t.after(() => runtime.shutdown());
+  for (let i = 0; i < 12 && !reports.some((r) => r.status === "stopped"); i++) {
+    t.mock.timers.tick(1500);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
   assert.equal(parked, 0);
-  assert.equal(group.op.snapshot().state, "READY");
-  assert.match(reports.find((r) => r.status === "stopped")?.why ?? "", /launch remains incomplete/);
-  assert.ok(group.retireStoppedGroup());
+  assert.ok(reports.some((r) => r.status === "stopped"));
+  assert.deepEqual(group.op.snapshot().settled, [1]);
+  assert.deepEqual(group.op.snapshot().parked, [1]);
+  assert.notEqual(group.op.snapshot().state, "STOPPED", "absence alone does not prove a launch was never dispatched");
   await handle.stop();
+  assert.deepEqual(group.op.snapshot().neverStarted, [3]);
+  const refused = launch.refuse(setup.operationRunID, 2, { code: "BOT_START_FAILED", status: 502 });
+  runtime.launchRefused(refused.operationID, refused.operationRunID, 2);
+  t.mock.timers.tick(1500);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(group.op.snapshot().state, "STOPPED");
+  assert.deepEqual(group.op.snapshot().manifests, []);
 });
 test("loss of one active member parks remaining safe pilots without releasing target custody", async () => {
   const setup = { ...base, operationID: "lost-member", beltName: "lost-member belt" };
@@ -4270,6 +4297,114 @@ test("Stop during rally settles the hosted pilots while a Defender is still trav
   assert.equal(snapshot.parked.length, 15);
   assert.equal(f.reports.filter((r) => r.status === "stopped").length, 15);
   assert.ok(!f.events.some((e) => e.event === "belt warp" || e.event === "mine"));
+});
+
+test("startup Stop resumes after five failed native flight reads without another operator action", async (t) => {
+  const f = startupFleet(t, "stop-after-read-outage");
+  await Promise.all(f.setup.members.map(f.start));
+  await f.advance(4);
+  const miner = f.group.entries.get(2)!;
+  const fetch = miner.run.fetch;
+  let failures = 0;
+  t.mock.method(miner.run, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (new URL(String(input)).pathname === "/api/bridge/flight/status" && failures < 5) {
+      failures++;
+      return Response.json({ ok: false, error: "EVE_GATEWAY_UNREACHABLE", message: "GamePort unavailable" }, { status: 503 });
+    }
+    return fetch(input, init);
+  });
+  f.group.requestStop("RETURN_HOME");
+  f.arrive();
+  await f.advance(65);
+  assert.equal(failures, 5);
+  assert.equal(f.group.op.snapshot().state, "STOPPED", JSON.stringify(f.reports.slice(-12)));
+  assert.equal(f.group.op.snapshot().parked.length, 15);
+  assert.ok(f.reports.some(r => r.id === 2 && r.phase === "Retrying Stop"));
+  assert.equal(f.reports.filter(r => r.id === 2 && r.status === "stopped").length, 1);
+});
+
+test("Stop during assembly parks nine accepted pilots and excludes six undispatched launches", async (t) => {
+  const f = startupFleet(t, "partial-rally-15");
+  const started = [...f.setup.members.slice(0, 8), f.setup.members.find(m => m.characterID === f.defender)!];
+  await Promise.all(started.map(f.start));
+  await f.advance(5);
+  assert.equal(f.group.op.snapshot().state, "READY");
+  assert.ok(f.events.some(e => e.id === f.defender && e.event === "anchor route"));
+  const { operationID, operationRunID, members } = f.setup;
+  const launch = createFleetLaunchJournal(document("partial-rally-launch"));
+  launch.begin({ operationID, operationRunID, revision: 1, planHash: "plan", setupHash: "setup",
+    members: members.map(m => ({
+      characterID: m.characterID, accountName: "pilot" + m.characterID, role: m.role,
+      kind: m.role === "MINER" ? "mcc-miner" : m.role === "HAULER" ? "mcc-hauler" : "mcc-defender",
+      beforeIDs: [],
+    })),
+  });
+  for (const m of started) {
+    launch.dispatch(m.characterID);
+    launch.accept(m.characterID, f.group.entries.get(m.characterID)!.run.botID);
+  }
+  f.runtime.requestOperationStop({ operationID, operationRunID }, "RETURN_HOME", launch.read()!);
+  f.arrive();
+  await f.advance(16);
+  const snapshot = f.group.op.snapshot();
+  const ids = started.map(m => m.characterID);
+  assert.equal(snapshot.state, "STOPPED", JSON.stringify(f.reports.slice(-10)));
+  assert.deepEqual(new Set(snapshot.parked), new Set(ids));
+  assert.deepEqual(new Set(snapshot.settled), new Set(ids));
+  assert.deepEqual(snapshot.neverStarted, members.filter(m => !ids.includes(m.characterID)).map(m => m.characterID));
+  assert.deepEqual(snapshot.manifests, []);
+  assert.equal(f.reports.filter(r => r.status === "stopped").length, 9);
+});
+
+test("Defender recovers from a hosted slot rejection and Retry Stop parks the original pilot", async (t) => {
+  const f = startupFleet(t, "defender-transport-retry");
+  await Promise.all(f.setup.members.map(f.start));
+  f.arrive();
+  await f.advance(10);
+  const state = f.states.get(f.defender)!;
+  state.warping = false;
+  state.onBelt = true;
+  await f.advance(6);
+  assert.equal(f.group.op.snapshot().state, "ACTIVE");
+
+  const entry = f.group.entries.get(f.defender)!;
+  const defender = entry.defender!;
+  const tick = defender.tick;
+  let passes = 0;
+  defender.tick = async () => {
+    if (++passes === 1)
+      throw Error(
+        "/api/bridge/call waited 65s for a hosted request slot. " +
+        "Hosted BFF requests: 8 active, 58 queued, oldest 4016 ms. Active routes: /api/bridge/call.",
+      );
+    return tick();
+  };
+  await f.advance();
+  assert.equal(entry.failed, null);
+  assert.ok(f.reports.some((r) => r.id === f.defender && r.phase === "Waiting for hosted transport"));
+  await f.advance(2);
+  assert.equal(passes, 2);
+  assert.equal(entry.observationFailures, 0);
+
+  const stop = defender.stop;
+  let stops = 0;
+  defender.stop = async (deferRecall) => {
+    if (++stops === 1) throw Error("Security fitted inventory is unreadable.");
+    await stop(deferRecall);
+  };
+  const operation = { operationID: f.setup.operationID, operationRunID: f.setup.operationRunID };
+  f.runtime.requestOperationStop(operation, "RETURN_HOME");
+  await f.advance(3);
+  assert.equal(entry.failed, "Security fitted inventory is unreadable.");
+  assert.equal(f.group.op.snapshot().parked.includes(f.defender), false);
+  assert.equal(state.station, null);
+
+  assert.equal(f.runtime.requestOperationStop(operation, "RETURN_HOME").live, true);
+  await f.advance(12);
+  assert.equal(stops, 2);
+  assert.equal(f.group.op.snapshot().parked.includes(f.defender), true);
+  assert.equal(state.station, 601);
+  assert.ok(f.reports.some((r) => r.id === f.defender && r.status === "stopped"));
 });
 
 test("MCC waits for a Defender's preparation in its hosted session and uses that session for Rally", async (t) => {
@@ -8021,13 +8156,20 @@ test("known empty Burst charge degrades without activation and miners continue",
   for (const e of group.entries.values()) e.active = false;
 });
 
-for (const blockedHauler of [false, true])
+for (const scenario of ["normal", "blocked-hauler", "drone-delay", "slow-flight"] as const)
   test(
-    blockedHauler
-      ? "belt relocation preserves a Hauler's unresolved delivery error"
-      : "eight held Miners change belts while the Hauler still scans and collects the old belt",
+    {
+      normal:
+        "eight held Miners change belts while the Hauler still scans and collects the old belt",
+      "blocked-hauler": "belt relocation preserves a Hauler's unresolved delivery error",
+      "drone-delay":
+        "belt relocation rechecks a Miner after delayed drone return and activates the chosen belt",
+      "slow-flight": "belt relocation retains a slow pilot's fresh flight proof while refreshing older peers",
+    }[scenario],
     async (t) => {
-      t.mock.timers.enable({ apis: ["setInterval"] });
+      t.mock.timers.enable({ apis: ["Date", "setInterval"], now: Date.now() });
+      const blockedHauler = scenario === "blocked-hauler",
+        delayedDrones = scenario === "drone-delay";
       const members: Member[] = [
         ...Array.from({ length: 8 }, (_, index) => ({
           characterID: index + 1,
@@ -8037,8 +8179,9 @@ for (const blockedHauler of [false, true])
         { characterID: 9, shipID: 19, role: "HAULER" },
       ];
       if (blockedHauler) members.push({ characterID: 10, shipID: 20, role: "HAULER" });
-      const oldBelt = blockedHauler ? "old-blocked-belt" : "old-belt",
-        newBelt = blockedHauler ? "new-blocked-belt" : "new-belt";
+      if (delayedDrones) members.push({ characterID: 11, shipID: 21, role: "DEFENDER" });
+      const oldBelt = "old-belt-" + scenario,
+        newBelt = "new-belt-" + scenario;
       const setup = {
         ...base,
         operationID: "relocation-runtime-" + oldBelt,
@@ -8046,8 +8189,12 @@ for (const blockedHauler of [false, true])
         members,
       };
       const events: string[] = [];
+      let releaseFlight: (() => void) | undefined;
+      const parkingReads = new Map<number, number>();
       let releaseScan!: () => void,
-        deliver = false;
+        deliver = false,
+        dronesReturned = false,
+        settlementReads = 0;
       const scanGate = new Promise<void>((resolve) => {
         releaseScan = resolve;
       });
@@ -8056,6 +8203,16 @@ for (const blockedHauler of [false, true])
         createCycle: async () => {
           events.push("new-cycle");
           return { tick: async () => "blocked" as const, stop: async () => {} };
+        },
+        settle: async (run, _session, current, options) => {
+          current();
+          if (delayedDrones && run.characterID === 1) {
+            assert.equal(options?.beltRecovery?.systemID, 300);
+            assert.deepEqual(options?.expectedDrones, [707]);
+            settlementReads++;
+            if (!dronesReturned) throw new FleetDroneReturnIncomplete([707], null);
+          }
+          return deps.settle();
         },
       });
       const group = runtime.getOrCreate(setup),
@@ -8119,6 +8276,11 @@ for (const blockedHauler of [false, true])
             report() {},
             async fetch(input: unknown) {
               const path = new URL(String(input)).pathname;
+              if (scenario === "slow-flight" && path.endsWith("/status") && op.snapshot().state === "PARKING") {
+                parkingReads.set(id, (parkingReads.get(id) ?? 0) + 1);
+                if (id === 8 && parkingReads.get(id) === 1)
+                  await new Promise<void>(resolve => { releaseFlight = resolve; });
+              }
               if (path.endsWith("/status"))
                 return Response.json({
                   ok: true,
@@ -8161,6 +8323,14 @@ for (const blockedHauler of [false, true])
           failed,
           flushed: false,
           selfUnload: null,
+          ...(member.role === "DEFENDER" ? {
+            escortGeneration: old.generation,
+            defender: {
+              warning: () => null, focus: () => null, repairStatus: () => null, droneIDs: () => [],
+              tick: async () => { events.push("covered old belt"); return "watching"; },
+              stop: async () => { events.push("settled escort"); },
+            },
+          } : {}),
           ...(failed
             ? { telemetry: { phase: "Needs attention", reason: failed, reportedAt: Date.now() } }
             : {}),
@@ -8174,8 +8344,9 @@ for (const blockedHauler of [false, true])
               ? {
                   tick: async () => "blocked",
                   stop: async () => {
-                    events.push("stop");
+                    events.push("stop-" + id);
                   },
+                  ...(delayedDrones && id === 1 ? { droneIDs: () => [707] } : {}),
                   release: async () => {
                     events.push("release-cycle");
                   },
@@ -8204,7 +8375,7 @@ for (const blockedHauler of [false, true])
             ) {
               if (!final) return;
               assert.equal(claim.key, old.key);
-              assert.equal(events.filter((event) => event === "stop").length, 8);
+              assert.equal(new Set(events.filter((event) => event.startsWith("stop-"))).size, 8);
               events.push("scan");
               await scanGate;
               assert.ok(available(900, 1));
@@ -8260,18 +8431,44 @@ for (const blockedHauler of [false, true])
           false,
         );
         assert.equal(group.requestRelocation({ ...scope, next }, 99), true);
+        if (delayedDrones) {
+          t.mock.timers.tick(1500);
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          assert.equal(settlementReads, 1);
+          assert.ok(events.includes("covered old belt"));
+          assert.ok(!events.includes("settled escort"));
+          assert.equal(op.snapshot().relocation?.phase, "PREPARING");
+          assert.equal(group.entries.get(1)?.failed, null);
+          assert.equal(
+            group.telemetrySnapshot().members.find((member) => member.characterID === 1)?.phase,
+            "Waiting for drone return",
+          );
+          dronesReturned = true;
+        }
         for (
           let i = 0;
-          i < 20 &&
+          i < 36 &&
           (events.filter((event) => event === "new-cycle").length < 8 || !events.includes("scan"));
           i++
         ) {
           t.mock.timers.tick(1500);
           await new Promise<void>((resolve) => setImmediate(resolve));
+          if (releaseFlight && i >= 18) releaseFlight();
         }
         const snapshot = op.snapshot();
         assert.equal(snapshot.state, "ACTIVE");
         assert.equal(snapshot.claim?.key, `BELT:300:${newBelt}`);
+        if (delayedDrones) assert.ok(events.includes("settled escort"));
+        if (scenario === "slow-flight") {
+          assert.equal(parkingReads.get(8), 1);
+          assert.ok((parkingReads.get(1) ?? 0) >= 2);
+        }
+        if (delayedDrones)
+          assert.equal(
+            settlementReads,
+            3,
+            "recheck the delayed flight, then confirm settlement before swapping claims",
+          );
         assert.ok(snapshot.claim.generation > old.generation);
         assert.equal(events.filter((event) => event === "new-cycle").length, 8);
         assert.ok(events.includes("scan"));

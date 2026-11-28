@@ -4,6 +4,7 @@ import { readMiningReadiness } from "./nativeBelt.ts";
 import { targetKey, type Claim, type SynchronousStore } from "./targetBoard.ts";
 import { selectNativeSite, type NativeSite, type SiteTarget } from "./siteDiscovery.ts";
 import { sameSiteClassification, validSavedSiteClassification } from "./siteSelection.ts";
+import { FleetObservationUnavailable, fleetReadFailed } from "./stopSignal.ts";
 type Scope = Pick<PluginRunContext, "characterID" | "baseUrl" | "fetch">;
 type Authority = { state: string; target: SiteTarget; claim: Claim | null };
 type Position = { x: number; y: number; z: number };
@@ -161,7 +162,7 @@ export function createSiteNavigation(
   };
   const verifySite = async () => {
     verifyAuthority();
-    const sites = await config.readSites();
+    const sites = await config.readSites().catch(fleetReadFailed);
     verifyAuthority();
     const fresh = selectNativeSite(sites, site.target.kind, site.scannerKey);
     if (!equalSite(fresh, site)) throw Error("Selected site was replaced or changed.");
@@ -182,6 +183,7 @@ export function createSiteNavigation(
     const metres = Math.hypot(ship.position.x - p.x, ship.position.y - p.y, ship.position.z - p.z);
     return {
       ready: x.ready,
+      stopped: x.space.ship?.mode?.toUpperCase() === "STOP",
       arrived: x.ready && metres < 150000,
       metres,
       evidence: { sampledAtMs: x.space.sampledAtMs!, position: structuredClone(ship.position) },
@@ -217,15 +219,29 @@ export function createSiteNavigation(
   }
   async function performNavigation() {
     if (await observeArrival()) return;
+    const timeout = config.timeoutMs ?? 180000;
+    let needsRoute = !state.pending;
     if (state.pending) {
-      if (!state.pending.acknowledged) throw Error("Warp outcome is unknown; no replay.");
-    } else {
+      const previous = state.pending;
+      if (now() - previous.issuedAt >= timeout) {
+        const ship = await physical();
+        if (ship.ready && ship.stopped && !ship.arrived &&
+          ship.evidence.sampledAtMs > previous.before.sampledAtMs &&
+          ship.evidence.sampledAtMs <= now() && now() - ship.evidence.sampledAtMs <= 15_000)
+          needsRoute = true;
+      }
+      if (!needsRoute && !previous.acknowledged)
+        throw new FleetObservationUnavailable("Warp outcome is unknown. Waiting for fresh flight and site observations.");
+    }
+    if (needsRoute) {
       const before = await physical();
       if (before.arrived) {
         await verifySite();
+        if (state.pending && !(await observeArrival()))
+          throw new FleetObservationUnavailable("Waiting for a fresh arrival observation.");
         return;
       }
-      if (!before.ready) throw Error("Ship warp or session transition is unresolved.");
+      if (!before.ready) throw new FleetObservationUnavailable("Ship warp or session transition is unresolved.");
       await verifySite();
       verifyAuthority();
       await config.movementAdmission?.();
@@ -233,8 +249,13 @@ export function createSiteNavigation(
       const admitted = await physical();
       await verifySite();
       verifyAuthority();
-      if (admitted.arrived) return;
-      if (!admitted.ready) throw Error("Ship movement changed during admission.");
+      if (admitted.arrived) {
+        if (state.pending && !(await observeArrival()))
+          throw new FleetObservationUnavailable("Waiting for a fresh arrival observation.");
+        return;
+      }
+      if (!admitted.ready || (state.pending && !admitted.stopped))
+        throw new FleetObservationUnavailable("Ship movement changed during admission.");
       const issuedAt = now();
       if (!Number.isSafeInteger(issuedAt) || issuedAt <= 0)
         throw Error("Warp intent time is invalid.");
@@ -244,19 +265,26 @@ export function createSiteNavigation(
         arrivedAt: null,
       });
       guard();
-      await session.flow.warpToProbeResult(site.label, 0);
+      try {
+        await session.flow.warpToProbeResult(site.label, 0);
+      } catch (error) {
+        guard();
+        if ((error as { code?: unknown } | null)?.code === "CALL_REFUSED") throw error;
+        // Keep the pending warp. The next pass first observes this ship at this exact site.
+        throw new FleetObservationUnavailable("Checking site warp after: " + String(error), { cause: error });
+      }
       guard();
       const pending = state.pending as RecordState["pending"];
       if (!pending) throw Error("Warp intent disappeared.");
       save({ ...state, pending: { ...pending, acknowledged: true } });
     }
-    const end = now() + (config.timeoutMs ?? 180000),
+    const end = now() + timeout,
       poll = config.pollMs ?? 1000;
     while (now() < end) {
       if (await observeArrival()) return;
       await wait(poll);
     }
-    throw Error("Site arrival is unconfirmed; warp will not be replayed.");
+    throw new FleetObservationUnavailable("Site arrival is unconfirmed. Rechecking the held ship.");
   }
   let inFlight: Promise<void> | null = null;
   function navigate() {

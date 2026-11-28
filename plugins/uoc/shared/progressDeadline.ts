@@ -95,9 +95,15 @@ export function transientNativeRead(error: unknown): boolean {
 export function bridgeCallQueueTimeout(error: unknown): boolean {
   const e = error as { name?: unknown; code?: unknown; status?: unknown; message?: unknown } | null;
   if (e?.name === "TransportQueueError") return true;
-  if (e?.code !== "BRIDGE_NETWORK_ERROR" || e.status !== 0 || typeof e.message !== "string")
-    return false;
-  return /^\/api\/bridge\/call (?:never got a connection: it waited \d+s for one of the browser's \d+ request lanes\.|waited \d+s for a hosted request slot\.)/.test(
-    e.message,
+  if (typeof e?.message !== "string") return false;
+  // Bot Host forwards a rejected admission to the plugin by message over IPC.
+  const hosted = /^\/api\/bridge\/call waited \d+s for a hosted request slot\. Hosted BFF requests: \d+ active, \d+ queued, oldest \d+ ms\. Active routes: /;
+  if (e.name === "Error" && e.code === undefined && e.status === undefined)
+    return hosted.test(e.message);
+  if (e.code !== "BRIDGE_NETWORK_ERROR" || e.status !== 0) return false;
+  const forwarded = /^Bridge call \w+\.\w+ could not reach the BFF: /.exec(e.message);
+  return (
+    /^\/api\/bridge\/call (?:never got a connection: it waited \d+s for one of the browser's \d+ request lanes\.|waited \d+s for a hosted request slot\.)/.test(e.message) ||
+    (forwarded !== null && hosted.test(e.message.slice(forwarded[0].length)))
   );
 }

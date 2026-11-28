@@ -59,6 +59,7 @@ function fixture(kinds:("shield"|"armor"|"hull")[]=["shield"]){
    shipMode:"STOP",transition:{phase:"ready",sessionStable:true,locationReady:true,sceneReady:true,egoReady:true,shipReady:true,boundContextReady:true}}});
   if(path==="/api/bridge/targets")return Response.json({ok:true,targetIDs:[...locked]});
   if(path==="/api/bridge/drones")return Response.json({ok:true,activeShipID:11,bay:[],inSpace:[],errors:{bay:null,inSpace:null,shipInfo:null}});
+  if(path==="/api/bridge/fitting")return Response.json({ok:true,activeShipID:11,slots:{type:"list",items:fitModules}});
   if(path==="/api/bridge/call"){const q=JSON.parse(String(init?.body));return Response.json({ok:true,result:await call(q.method,q.args,q.of)});}
   throw Error(path);
  }};

@@ -12,6 +12,7 @@ const transition = {
 };
 function fixture() {
   let system = 301,
+    mode = "STOP",
     clock = 1000,
     commands = 0,
     saved: unknown = null,
@@ -36,7 +37,7 @@ function fixture() {
             solarSystemID: system,
             docked: false,
             inSpace: true,
-            shipMode: "STOP",
+            shipMode: mode,
             transition,
           },
         }),
@@ -69,6 +70,7 @@ function fixture() {
       stop = true;
     },
     stopped: () => stop,
+    setMode: (value: string) => { mode = value; },
     fail: () => {
       fail = true;
     },
@@ -135,6 +137,24 @@ test("Stop before dispatch sends no route", async () => {
     "stopped",
   );
   assert.equal(f.commands(), 0);
+});
+
+test("Stop during an anchor warp waits for the ship to settle even if the old autopilot has aborted", async () => {
+  const f = fixture();
+  let waits = 0;
+  f.onWait(() => {
+    if (++waits === 1) {
+      f.stop();
+      f.setMode("WARP");
+      f.session.flow.flying.autopilotProgress = () => ({ status: "aborted" });
+    } else f.setMode("STOP");
+  });
+  const outcome = await ensureMiningAnchor(f.run, f.session, { shipID: 11, systemID: 300,
+    current() {}, stopRequested: f.stopped, document: f.doc, now: f.now, wait: f.wait });
+  assert.equal(outcome, "stopped");
+  assert.equal(waits, 2);
+  assert.equal(f.commands(), 1);
+  assert.equal((f.doc.read() as any).history[0].systemID, 301);
 });
 
 test("anchor route reuses stock observations and reads flight only at system change and arrival", async () => {

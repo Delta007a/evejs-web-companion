@@ -139,8 +139,8 @@ function fixture() {
     bad: () => {
       bad = true;
     },
-    refuse: () => {
-      refusal = true;
+    refuse: (value = true) => {
+      refusal = value;
     },
     stale: () => {
       stale = true;
@@ -183,6 +183,16 @@ test("stop before dispatch causes no undock", async () => {
   x.stop();
   assert.equal(((await x.resolve()) as any).kind, "STOPPED");
   assert.equal(x.orders(), 0);
+});
+test("Stop accepts a fresh stable dock after an unknown search undock without sending another", async () => {
+  const x = fixture();
+  x.lost();
+  x.noLand();
+  await assert.rejects(x.resolve(), /outcome remains unknown/);
+  x.stop();
+  assert.equal(((await x.resolve()) as any).kind, "STOPPED");
+  assert.equal(x.orders(), 1);
+  assert.ok(x.doc().pending, "a current dock says nothing about the historical undock response");
 });
 test("Stop during an accepted undock waits for the physical in-space settlement", async () => {
   const x = fixture(),
@@ -234,14 +244,18 @@ test("stale own scene cannot retire undock intent", async () => {
   assert.ok(x.doc().pending);
   assert.equal(x.orders(), 1);
 });
-test("exact predispatch session refusal with fresh dock proof is durable and never replayed", async () => {
+test("a definite undock refusal waits for the ready origin before starting a fresh search", async () => {
   const x = fixture();
   x.refuse();
   await assert.rejects(x.resolve(), /not dispatched/);
   assert.equal(x.doc().pending, null);
   assert.equal(x.doc().history[0].refusal.code, "SESSION_CHANGE_IN_PROGRESS");
-  await assert.rejects(x.resolve(), /no undock replay/);
+  await assert.rejects(x.resolve(), /Waiting for the original dock/);
   assert.equal(x.orders(), 1);
+  x.refuse(false);
+  await x.config.wait();
+  assert.equal((await x.resolve() as any).instanceID, 89);
+  assert.equal(x.orders(), 2);
 });
 
 test("native locality callback chooses only a still-eligible exact scanner site", async () => {

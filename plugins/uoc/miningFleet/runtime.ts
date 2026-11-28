@@ -59,7 +59,11 @@ import {
   prepareHeldMiningMember,
 } from "../operations/miningPreparationHost.ts";
 import { readMiningOfficeAccess, requireMiningOfficeQuery } from "./corporateOffice.ts";
-import { assertFleetDroneDeparture, recallFleetDrones } from "./droneRecall.ts";
+import {
+  assertFleetDroneDeparture,
+  FleetDroneReturnIncomplete,
+  recallFleetDrones,
+} from "./droneRecall.ts";
 import type { FleetSettlementOptions } from "./settle.ts";
 import { parkNearest, parkWithPolicy } from "../shared/parking.ts";
 import {
@@ -138,7 +142,11 @@ import { createFleetFinishRun, readRetainedFleetTarget } from "./finish.ts";
 import { finishParking, stopParkingSetup } from "./finishParking.ts";
 import type { ParkingFreightRemaining } from "./parkingUnload.ts";
 import { MINING_STOP_WINDOW_MINUTES } from "./shiftTiming.ts";
-import { readAfterTimeout, transientNativeRead } from "../shared/progressDeadline.ts";
+import {
+  bridgeCallQueueTimeout,
+  readAfterTimeout,
+  transientNativeRead,
+} from "../shared/progressDeadline.ts";
 import { createSiteDiscovery, type NativeSite } from "./siteDiscovery.ts";
 import { validSavedSiteClassification } from "./siteSelection.ts";
 import { resolveMiningSite } from "./siteSearch.ts";
@@ -935,15 +943,18 @@ function makeGroup(
       const e = entries.get(m.characterID);
       return !!e?.active && !e.flushed && !e.failed && !e.emergency;
     });
-  const coveringDeparture = (e: Entry) => {
-    if (!stopping || relocating || !e.defender || !producerFinishing()) return false;
-    const current = op.snapshot();
-    return (
-      current.state === "ACTIVE" &&
-      current.stopFreight === "RETURN_HOME" &&
-      !!current.claim &&
-      e.escortGeneration === current.claim.generation
+  const relocatingProducersFinishing = () =>
+    op.movingMembers().some(
+      (m) => producers.some((p) => p.characterID === m.characterID) && !entries.get(m.characterID)?.flushed,
     );
+  const coveringDeparture = (e: Entry) => {
+    if ((!stopping && !relocating) || !e.defender || e.defenderSettled || e.emergency) return false;
+    const current = op.snapshot();
+    if (current.state !== "ACTIVE" || !current.claim || e.escortGeneration !== current.claim.generation)
+      return false;
+    if (relocating && !stopping)
+      return current.relocation?.phase === "PREPARING" && !!current.relocation.oldBeltID && relocatingProducersFinishing();
+    return !relocating && current.stopFreight === "RETURN_HOME" && producerFinishing();
   };
   function pendingForHauler(characterID: number, snapshot = op.snapshot()) {
     return snapshot.manifests.some((m) => {
@@ -2081,10 +2092,22 @@ function makeGroup(
     if (e.preparationPending) await prepareMemberEquipment(e, current, true);
     await e.travel?.settleForStop();
     current();
+    const beltRelocation =
+      relocating && !stopping && !e.emergency ? op.snapshot().relocation : null;
     return deps.settle(e.run, e.session, current, {
       expectedDrones: [
         ...new Set([...(e.cycle?.droneIDs?.() ?? []), ...(e.defender?.droneIDs?.() ?? [])]),
       ],
+      beltRecovery: beltRelocation?.oldBeltID
+        ? {
+            characterID: e.member.characterID,
+            systemID: setup.systemID,
+            beforeWrite: () => {
+              current();
+              if (stopping || !relocating || e.emergency) throw new FleetStopBeforeDispatch();
+            },
+          }
+        : undefined,
       report: (why) => {
         if (why.startsWith("Drones not recovered") || why.startsWith("Drone return did not finish"))
           e.droneWarning = why;
@@ -3175,7 +3198,14 @@ function makeGroup(
         anchorPending.delete(e);
       });
   }
-  function requestStop(mode?: StopFreightMode, fleetWipe = false) {
+  function recordNeverStarted(ids: readonly number[]) {
+    op.recordNeverStarted(ids.filter((id) => !entries.has(id) && !attaching.has(id)));
+  }
+  function requestStop(
+    mode?: StopFreightMode,
+    fleetWipe = false,
+    receipt?: import("../operations/miningLaunchJournal.ts").FleetLaunchReceipt,
+  ) {
     const first = !stopping;
     op.noteStopRequest(
       mode ?? (op.snapshot().stopRequested ? undefined : "RETURN_HOME"),
@@ -3197,6 +3227,8 @@ function makeGroup(
           );
     if (first && op.snapshot().state === "READY") {
       startupStop = true;
+      // Bot Host can deliver a member's Stop before the operation route is called.
+      receipt ??= deps.launchJournal?.(setup.operationID, setup.operationRunID)?.read() ?? undefined;
       for (const e of entries.values())
         report(
           e,
@@ -3205,6 +3237,8 @@ function makeGroup(
           "paused",
         );
     }
+    if (receipt?.operationID === setup.operationID && receipt.operationRunID === setup.operationRunID)
+      recordNeverStarted(receipt.members.filter((m) => m.status === "PREPARED").map((m) => m.characterID));
     for (const e of entries.values())
       if (e.active) {
         e.failed = null;
@@ -3221,7 +3255,7 @@ function makeGroup(
       ...e.session.flow.requestOptions(),
       baseUrl: e.run.baseUrl,
       fetch: e.run.fetch,
-    });
+    }).catch(fleetReadFailed);
     guard(e);
     const f = decodeFlightStatus(flight),
       destinationID = f.stationID ?? f.structureID;
@@ -3814,7 +3848,25 @@ function makeGroup(
         )
           return;
         if (stopping && error instanceof HaulStoppedBeforePickup) return;
-        if (!stopping && error instanceof FleetObservationUnavailable) {
+        if (
+          relocating &&
+          !stopping &&
+          !e.emergency &&
+          error instanceof FleetDroneReturnIncomplete
+        ) {
+          e.retryAt = Date.now() + 5000;
+          report(
+            e,
+            "Waiting for drone return",
+            error.message + " Rechecking the held ship before relocating.",
+            "paused",
+          );
+          return;
+        }
+        const queuedDefenderCall = e.member.role === "DEFENDER" && bridgeCallQueueTimeout(error);
+        if (queuedDefenderCall)
+          error = new FleetObservationUnavailable(message(error), { cause: error });
+        if (error instanceof FleetObservationUnavailable) {
           try {
             if (e.emergency) guardHeld(e);
             else guard(e);
@@ -3828,17 +3880,18 @@ function makeGroup(
             e.retryAt = Date.now() + seconds * 1000;
             report(
               e,
-              failures >= 3 ? "Native observation unavailable" : "Retrying native observation",
+              stopping ? "Retrying Stop" : queuedDefenderCall
+                ? "Waiting for hosted transport"
+                : failures >= 3
+                  ? "Native observation unavailable"
+                  : "Retrying native observation",
               message(error) + " Rechecking the same pilot in " + seconds + " seconds.",
               "paused",
             );
             return;
           }
         }
-        if (
-          ((!stopping || collectStop()) && error instanceof FreightGridUnavailable) ||
-          (collectStop() && error instanceof FleetObservationUnavailable)
-        ) {
+        if ((!stopping || collectStop()) && error instanceof FreightGridUnavailable) {
           e.retryAt = Date.now() + 5000;
           report(e, "Waiting for native evidence", error.message, "paused");
           return;
@@ -3852,7 +3905,6 @@ function makeGroup(
         if (
           stopping &&
           (transientNativeRead(error) ||
-            error instanceof FleetObservationUnavailable ||
             ["JETCAN_OBSERVATION_PENDING", "MCC_MODULE_SHUTDOWN_PENDING"].includes(
               String((error as { code?: unknown } | null)?.code),
             )) &&
@@ -4072,61 +4124,6 @@ function makeGroup(
       reconcileStoppedAnchors();
       reconcileStoppedSearch();
     }
-    if (
-      stopping &&
-      op.snapshot().state === "READY" &&
-      setup.members.some(
-        (m) => !entries.has(m.characterID) && !op.snapshot().neverStarted?.includes(m.characterID),
-      )
-    ) {
-      for (const e of entries.values())
-        if (!startupBlocked(e))
-          launch(e, async () => {
-            report(
-              e,
-              "Stopping startup",
-              "Confirming native module and drone settlement.",
-              "paused",
-            );
-            const proof = await settleMember(e);
-            guard(e);
-            if (
-              proof.modulesInactive !== true ||
-              proof.dronesSafe !== true ||
-              !Number.isFinite(proof.observedAt) ||
-              proof.observedAt > Date.now() ||
-              Date.now() - proof.observedAt > 15000
-            )
-              throw Error("Native settlement could not be verified.");
-            const parkingSetup = parkingForStop(e);
-            if (parkingSetup) await finishMemberParking(e, parkingSetup);
-            else if (!(await dockedAtStartup(e)))
-              await (deps.park ?? parkNearest)(
-                e.run,
-                e.session,
-                (p, w) => report(e, p, w),
-                () => guard(e),
-              );
-            guard(e);
-            await e.cycle?.release?.();
-            guard(e);
-            report(
-              e,
-              "Docked",
-              "Pilot docked before the fleet formed; remaining launch receipts are retained.",
-            );
-            e.unregister();
-            e.active = false;
-            e.session.flow.setLivePush(false);
-            e.run.report({
-              status: "stopped",
-              phase: "Docked",
-              why: "Pilot docked before the fleet formed. Fleet launch remains incomplete.",
-            });
-            persistTelemetry();
-          });
-      return;
-    }
     for (const e of entries.values())
       if (e.emergency) {
         if (stopping && e.active && e.hullRetreat && !e.busy) {
@@ -4141,6 +4138,15 @@ function makeGroup(
       stopping ||
       op.movingMembers().some((m) => m.characterID === e.member.characterID);
     if (stopping || relocating) {
+      // Keep the current belt covered while a Miner is still finishing its work there.
+      // The normal settlement below still gates release of the old claim and the joint move.
+      if (relocating && !stopping)
+        for (const e of entries.values())
+          if (e.member.role === "DEFENDER" && coveringDeparture(e))
+            launch(e, async () => {
+              report(e, "Covering fleet", "Guarding the current belt until the Miners are ready.");
+              await e.defender!.tick();
+            });
       const defenders = [...entries.values()].filter(
         (e) =>
           e.member.role === "DEFENDER" &&
@@ -4167,7 +4173,11 @@ function makeGroup(
             "Stopping weapons and recalling controlled drones.",
             "paused",
           );
-          if (e.defender) await e.defender.stop(dockAfterDroneTimeout());
+          if (e.defender)
+            await e.defender.stop(
+              dockAfterDroneTimeout() ||
+                (relocating && !stopping && !!op.snapshot().relocation?.oldBeltID),
+            );
           const proof = await settleMember(e);
           guard(e);
           if (
@@ -4451,15 +4461,7 @@ function makeGroup(
         });
       }
       const finishing =
-        relocating && !stopping
-          ? op
-              .movingMembers()
-              .some(
-                (m) =>
-                  producers.some((p) => p.characterID === m.characterID) &&
-                  !entries.get(m.characterID)?.flushed,
-              )
-          : producerFinishing();
+        relocating && !stopping ? relocatingProducersFinishing() : producerFinishing();
       const collecting = collectStop();
       // No Miner is still running a Jettison once its final mining turn has retired.
       if (
@@ -4500,6 +4502,8 @@ function makeGroup(
             finalFreightScanned = claim;
           });
         } else if (relocating && !stopping) {
+          if ([...entries.values()].some(e => e.member.role === "DEFENDER" && !e.emergency &&
+            moving(e) && !e.defenderSettled)) return;
           // The mining group can leave once its own actions settle. Haulers scan
           // and collect under the old belt claim while the next belt opens.
           if (!op.drainRelocation(drainingBelt && collectionHaulers().some(freightScanner)))
@@ -4681,7 +4685,7 @@ function makeGroup(
               authority: () => board.read(targetKey(target)),
               current: () => guard(e),
               stopRequested: () =>
-                relocating || (stopping && !coveringDeparture(e)) || !!e.emergency,
+                ((relocating || stopping) && !coveringDeparture(e)) || !!e.emergency,
               protectedShips: setup.members.filter((m) => m.role === "MINER").map((m) => m.shipID),
               preparation: e.defenderPreparation,
               threatJams: () =>
@@ -5439,10 +5443,9 @@ function makeGroup(
         ![...entries.values()].some((e) => ids.has(e.member.characterID) && e.busy)
       ) {
         const values = [...relocationProofs.values()];
-        if (values.some((p) => Date.now() - p.observedAt > 15000)) {
-          relocationProofs.clear();
-          return;
-        }
+        for (const p of values)
+          if (Date.now() - p.observedAt > 15000) relocationProofs.delete(p.characterID);
+        if (relocationProofs.size !== moving.length) return;
         const saved = relocationDoc.read() as { next?: FleetSetup; decision?: unknown } | null,
           r = op.snapshot().relocation;
         if (!saved?.next || !r) throw Error("Relocation destination evidence is unavailable.");
@@ -5614,9 +5617,7 @@ function makeGroup(
     prepareRelocation,
     requestRelocation,
     requestStop,
-    recordNeverStarted(ids: readonly number[]) {
-      op.recordNeverStarted(ids.filter((id) => !entries.has(id) && !attaching.has(id)));
-    },
+    recordNeverStarted,
     async shutdown() {
       closeGroup();
       for (const e of entries.values()) {
@@ -6359,14 +6360,7 @@ export function createMiningFleetRuntime(deps: FleetRuntimeDependencies) {
     if (group) {
       if (group.op.snapshot().runID !== input.operationRunID)
         throw Error("The active fleet generation changed.");
-      const selected = group.requestStop(mode);
-      if (
-        receipt?.operationID === input.operationID &&
-        receipt.operationRunID === input.operationRunID
-      )
-        group.recordNeverStarted(
-          receipt.members.filter((m) => m.status === "PREPARED").map((m) => m.characterID),
-        );
+      const selected = group.requestStop(mode, false, receipt);
       return {
         mode: selected,
         live: [...group.entries.values()].some((e) => e.active || e.reconnecting),
@@ -6438,6 +6432,10 @@ export function createMiningFleetRuntime(deps: FleetRuntimeDependencies) {
     completedFleetResult,
     getOrCreate,
     requestOperationStop,
+    launchRefused(operationID: string, runID: string, characterID: number) {
+      const group = groups.get(operationID);
+      if (group?.op.snapshot().runID === runID) group.recordNeverStarted([characterID]);
+    },
     discardGeneration,
     finalizeRetainedStop: finish.finalize,
     finishSnapshot: (id: string, run: string, characterID: number) =>

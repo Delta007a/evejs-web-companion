@@ -4,11 +4,13 @@
 
   let {
     runtime,
+    systemLabel,
     deliveredUnits = null,
     deliveryIssue = null,
     stale = false,
   }: {
     runtime: MiningOperationRuntime;
+    systemLabel?: (id: number) => string;
     deliveredUnits?: number | null;
     deliveryIssue?: string | null;
     stale?: boolean;
@@ -61,7 +63,7 @@
     ><dt>Current target</dt><dd
       >{target?.targetName ?? "—"}
       {#if target}<small
-          >{target.systemName ?? ""}{target.systemName ? " · " : ""}{target.state.replaceAll(
+          >{target.systemName || systemLabel?.(target.systemID) || "Unknown system"} · {target.state.replaceAll(
             "_",
             " ",
           )}</small

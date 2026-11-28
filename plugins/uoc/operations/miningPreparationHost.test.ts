@@ -3,6 +3,11 @@ import {createMiningPreparationRun} from './miningPreparationHost.ts';
 type DroneFixture = {
   bay?: number;
   otherBay?: number;
+  fittingMining?: number;
+  fittingLight?: number;
+  separateLightDrones?: boolean;
+  parallelLightReturn?: boolean;
+  returnReply?: "lost-before" | "lost-after" | "refused" | "missing-destination";
   controlled?: readonly { typeID: number; quantity: number }[];
   detached?: number;
   effectiveCapacity?: number | null;
@@ -18,18 +23,40 @@ const lightDrone = 2203;
 function fixture(options:{lost?:boolean;equipment?:string;dropPolicy?:boolean;unknownSupplies?:boolean;corporateError?:string;ambiguous?:boolean;unavailable?:boolean;pending?:boolean;unresolved?:boolean;surplus?:boolean;stock?:number;take?:boolean;wrongDivision?:boolean;wrongOfficeLocation?:boolean;stationID?:number;
   staleReviews?: number; lostBeforeReceipt?: boolean; staleAfterTransfer?: boolean;
   beforeStaleResponse?: () => Promise<void>;
+  saved?: unknown;
+  accountID?: number;
+  sessionGeneration?: string;
+  loseReconcile?: boolean;
+  blockedReceiptOnRecheck?: boolean;
   drones?: DroneFixture;
 }={}){
  const target={typeID:3,name:'Mining charge',target:4000,mode:'CARRIED_SPARES',eligibleFlags:[5,143],required:false};
  const locationID=options.stationID??600;
- let saved:any=null,aboard=3200,stock=options.stock??10000,transfers=0;let finish!:()=>void;const done=new Promise<void>(resolve=>{finish=resolve;});const reports:any[]=[],requests:string[]=[],sources:unknown[]=[];
+ let saved:any=structuredClone(options.saved ?? null),aboard=3200,stock=options.stock??10000,transfers=0;let finish!:()=>void;const done=new Promise<void>(resolve=>{finish=resolve;});const reports:any[]=[],requests:string[]=[],sources:unknown[]=[];
  let reviewNumber = 0;
+ const reviewID = () => `${options.saved ? "fresh-" : ""}review-${reviewNumber}`;
  const submittedReviews: string[] = [];
+ const reconciledReviews: string[] = [];
  const receipts = new Set<string>();
  const drone = options.drones;
  let droneBay = drone?.bay ?? 2;
+ const lightBayStacks = new Map<number, number>();
+ if (drone?.otherBay) {
+   if (drone.separateLightDrones) {
+     for (let index = 0; index < drone.otherBay; index++) lightBayStacks.set(502 + index, 1);
+   } else lightBayStacks.set(502, drone.otherBay);
+ }
+ const lightBay = () => [...lightBayStacks.values()].reduce((sum, qty) => sum + qty, 0);
+ const fittingMining = drone?.fittingMining ?? 5;
+ const fittingLight = drone?.fittingLight ?? 0;
+ const droneEquipment = [
+   ...(fittingMining ? [[87, miningDrone, fittingMining]] : []),
+   ...(fittingLight ? [[87, lightDrone, fittingLight]] : []),
+ ];
  const stockStacks = new Map((drone?.stockStacks ?? [drone?.stock ?? 124]).map((qty, index) => [710 + index, qty]));
  const droneTransfers: { itemID: number; qty: number }[] = [];
+ const droneReturns: { itemID: number; qty: number }[] = [];
+ const returnedStock = new Map<number, { typeID: number; quantity: number }>();
  const deployed = (drone?.controlled ?? []).flatMap(({ typeID, quantity }) =>
    Array.from({ length: quantity }, () => ({ typeID, controlled: true })));
  for (let index = 0; index < (drone?.detached ?? 0); index++)
@@ -49,17 +76,19 @@ function fixture(options:{lost?:boolean;equipment?:string;dropPolicy?:boolean;un
    if(corp&&options.corporateError)return Response.json({ok:false,error:options.corporateError},{status:403});
    if(corp){assert.equal(b.corporationID,30);assert.equal(b.source.corporationID,31);}
    const descriptor=options.wrongDivision?{...b.source,division:b.source.division===7?1:7}:b.source;
-   body={reviewID:`review-${++reviewNumber}`,reviewHash:'hash',context:{characterID:10,shipID:50,shipTypeID:22544,locationID,corporationID:31},
+   reviewNumber++;
+   body={reviewID:reviewID(),reviewHash:'hash',context:{accountID:options.accountID??1,characterID:10,shipID:50,shipTypeID:22544,locationID,corporationID:31,
+    sessionGeneration:options.sessionGeneration??'a'.repeat(64)},pending:options.pending?[{operationID:'other'}]:[],
     contract:{name:'Fit',definitionFingerprint:'exact-fit',definition:{characterID:10,fittingID:b.fittingID},supplies:options.dropPolicy?[]:[target],
-     ...(drone?{shipTypeID:22544,operational:[[87,miningDrone,5]]}:{})},
-    status:{equipment:options.equipment??(drone && droneBay !== 5 ? 'MODIFIED' : 'VERIFIED'),...(options.surplus?{equipmentMatch:'REQUIRED_WITH_SURPLUS_EQUIPMENT'}:{}),
+     ...(drone?{shipTypeID:22544,operational:droneEquipment}:{})},
+    status:{equipment:options.equipment??(drone && (droneBay !== fittingMining || lightBay() !== fittingLight) ? 'MODIFIED' : 'VERIFIED'),...(options.surplus?{equipmentMatch:'REQUIRED_WITH_SURPLUS_EQUIPMENT'}:{}),
      supplies:options.unknownSupplies?'UNKNOWN':aboard<4000?'LOW':'FULL',targets:[{...target,current:aboard,deficit:4000-aboard}]},
     canApply:true,source:{pin:{descriptor,ownerID:corp?31:10,dockedLocationID:options.wrongOfficeLocation?locationID+1:locationID,
       office:corp?'corpOffice:700':null,locationID:corp?701:locationID,flag:corp?114+b.source.division:4},
      access:{query:true,take:options.take??true},available:[{typeID:3,quantity:stock}]}};
   }
   else if(p==='/api/bridge/provisioning/replenish'){
-   assert.deepEqual(b,{reviewID:`review-${reviewNumber}`,reviewHash:'hash',confirm:true});
+   assert.deepEqual(b,{reviewID:reviewID(),reviewHash:'hash',confirm:true});
    submittedReviews.push(b.reviewID);
    if (submittedReviews.length <= (options.staleReviews ?? 0)) {
       await options.beforeStaleResponse?.();
@@ -76,9 +105,13 @@ function fixture(options:{lost?:boolean;equipment?:string;dropPolicy?:boolean;un
    body={state:'COMPLETE'};
   }
   else if(p==='/api/bridge/provisioning/reconcile'){
-   if (!receipts.has(b.operationID))
+   reconciledReviews.push(b.operationID);
+   if (options.loseReconcile) throw Error("The reconciliation reply was lost.");
+   if (options.blockedReceiptOnRecheck && b.operationID === saved?.reviewID && reconciledReviews.length === 2)
+     body = {state: 'BLOCKED'};
+   else if (!receipts.has(b.operationID))
      return Response.json({ ok: false, error: "OPERATION_NOT_OWNED" }, { status: 409 });
-   body={state:options.unresolved?'PENDING':'RECONCILED'};
+   else body={state:options.unresolved?'PENDING':'RECONCILED'};
   }
   else if (drone && p === "/api/bridge/flight/status") {
     body = { flight: { docked: true, inSpace: false, stationID: locationID, shipID: 50, solarSystemID: 300 } };
@@ -88,7 +121,9 @@ function fixture(options:{lost?:boolean;equipment?:string;dropPolicy?:boolean;un
       activeShipID: 50,
       bay: [
         ...(droneBay > 0 ? [{ itemID: 501, typeID: miningDrone, quantity: droneBay }] : []),
-        ...(drone.otherBay ? [{ itemID: 502, typeID: lightDrone, quantity: drone.otherBay }] : []),
+        ...[...lightBayStacks].map(([itemID, quantity]) => ({
+          itemID, typeID: lightDrone, quantity: drone.separateLightDrones ? -1 : quantity,
+        })),
       ],
       inSpace: deployed.map((row, index) => ({ ...row, itemID: 550 + index })),
       errors: { bay: null, inSpace: null },
@@ -101,10 +136,10 @@ function fixture(options:{lost?:boolean;equipment?:string;dropPolicy?:boolean;un
   }
   else if (drone && p === "/api/bridge/ship/50/bays") {
     body = { shipID: 50, activeShipID: 50, bays: [{ key: "drone", error: null,
-      capacity: { capacity: drone.bayCapacity ?? 50, used: drone.reportedUsed ?? 5 * (droneBay + (drone.otherBay ?? 0)) },
+      capacity: { capacity: drone.bayCapacity ?? 50, used: drone.reportedUsed ?? 5 * (droneBay + lightBay()) },
     }] };
   }
-  else if (drone && p === "/api/names") body = { names: { ["type:" + miningDrone]: "Mining Drone I" } };
+  else if (drone && p === "/api/names") body = { names: { ["type:" + miningDrone]: "Mining Drone I", ["type:" + lightDrone]: "Acolyte I" } };
   else if (drone && p === "/api/types/volumes") body = { volumes: { [miningDrone]: 5, [lightDrone]: 5 } };
   else if (drone && p === "/api/bridge/call") {
     if (b.method === "InvalidateLocationCache") {
@@ -116,20 +151,42 @@ function fixture(options:{lost?:boolean;equipment?:string;dropPolicy?:boolean;un
       assert.equal(b.method, "List");
       assert.equal(b.of, corp ? 700 : "hangar");
       assert.deepEqual(b.kwargs, { flag: corp ? 121 : 4 });
-      body = { result: { type: "list", items: [...stockStacks].filter(([, quantity]) => quantity > 0)
-        .map(([itemID, quantity]) => ({ itemID, quantity, typeID: miningDrone,
-          ownerID: corp ? 31 : 10, locationID: corp ? 701 : locationID, flagID: corp ? 121 : 4,
-        })) } };
+      const rows = [...stockStacks].filter(([, quantity]) => quantity > 0)
+        .map(([itemID, quantity]) => ({ itemID, quantity, typeID: miningDrone }));
+      for (const [itemID, row] of returnedStock) rows.push({ itemID, ...row });
+      body = { result: { type: "list", items: rows.map((row) => ({ ...row,
+        ownerID: corp ? 31 : 10, locationID: corp ? 701 : locationID, flagID: corp ? 121 : 4,
+      })) } };
     }
   }
   else if (drone && p === "/api/bridge/inventory/transfer") {
     const [itemID] = b.itemIDs;
-    const quantity = stockStacks.get(itemID)!;
-    assert.ok(b.qty > 0 && b.qty <= quantity);
-    assert.deepEqual(b.from, setup.preparation.source.kind === "corp" ? { kind: "corp", division: 7 } : { kind: "hangar" });
-    assert.deepEqual(b.to, { kind: "shipBay", bay: "drone" });
+    const warehouse = setup.preparation.source.kind === "corp" ? { kind: "corp", division: 7 } : { kind: "hangar" };
     // Web Companion's expectedScope belongs to in-space transfers.
     assert.equal(Object.hasOwn(b, "expectedScope"), false);
+    if (b.from.kind === "shipBay") {
+      assert.deepEqual(b.from, { kind: "shipBay", bay: "drone" });
+      assert.deepEqual(b.to, warehouse);
+      const quantity = itemID === 501 ? droneBay : lightBayStacks.get(itemID) ?? 0;
+      assert.ok(b.qty > 0 && b.qty <= quantity);
+      droneReturns.push({ itemID, qty: b.qty });
+      if (drone.returnReply === "refused") return Response.json({ ok: true, applied: false });
+      if (drone.returnReply === "lost-before") throw Error("The warehouse transfer reply was lost.");
+      if (itemID === 501) droneBay -= b.qty;
+      else if (b.qty === quantity) lightBayStacks.delete(itemID);
+      else lightBayStacks.set(itemID, quantity - b.qty);
+      const typeID = itemID === 501 ? miningDrone : lightDrone;
+      if (drone.returnReply !== "missing-destination")
+        returnedStock.set(b.qty === quantity ? itemID : 900 + droneReturns.length, { typeID, quantity: b.qty });
+      if (drone.parallelLightReturn && droneReturns.length === 1)
+        returnedStock.set(999, { typeID: lightDrone, quantity: 1 });
+      if (drone.returnReply === "lost-after") throw Error("The warehouse transfer reply was lost.");
+      return Response.json({ ok: true, applied: true });
+    }
+    const quantity = stockStacks.get(itemID)!;
+    assert.ok(b.qty > 0 && b.qty <= quantity);
+    assert.deepEqual(b.from, warehouse);
+    assert.deepEqual(b.to, { kind: "shipBay", bay: "drone" });
     droneTransfers.push({ itemID, qty: b.qty });
     if (drone.otherPilotTakesStock && itemID === 710) {
       stockStacks.delete(itemID);
@@ -144,7 +201,8 @@ function fixture(options:{lost?:boolean;equipment?:string;dropPolicy?:boolean;un
   else throw Error(p);return new Response(JSON.stringify({ok:true,...body}),{status:200});
  }};
  const definition=createMiningPreparationRun({document:()=>({read:()=>saved,write:v=>{saved=structuredClone(v);}})});
- return {definition,run,reports,requests,sources,done,submittedReviews,droneTransfers,get droneBay(){return droneBay;},get saved(){return saved;},get transfers(){return transfers;},get aboard(){return aboard;}};
+ return {definition,run,reports,requests,sources,done,submittedReviews,reconciledReviews,droneTransfers,droneReturns,returnedStock,
+  get droneBay(){return droneBay;},get lightBay(){return lightBay();},get saved(){return saved;},get transfers(){return transfers;},get aboard(){return aboard;}};
 }
 test('MCC validates actual equipment and uses only shared native personal supply replenishment',async()=>{
  const f=fixture(),handle=await f.definition.start(f.run);await f.done;await handle.stop();
@@ -239,6 +297,70 @@ async function prepare(f: ReturnType<typeof fixture>) {
   return f.reports.at(-1);
 }
 
+test("a new MCC Start recovers a retained Apply that never dispatched", async () => {
+  const interrupted = fixture({ lostBeforeReceipt: true });
+  await prepare(interrupted);
+  assert.equal(interrupted.saved.phase, "PENDING");
+  assert.equal(interrupted.transfers, 0);
+
+  const restarted = fixture({ saved: interrupted.saved, sessionGeneration: "b".repeat(64) });
+  restarted.run.setup.operationRunID = "new-generation";
+  const report = await prepare(restarted);
+  assert.deepEqual(restarted.reconciledReviews, ["review-1", "review-1"]);
+  assert.deepEqual(restarted.submittedReviews, ["fresh-review-2"]);
+  assert.equal(restarted.transfers, 1);
+  assert.equal(restarted.aboard, 4000);
+  assert.equal(restarted.saved.phase, "COMPLETE");
+  assert.equal(report.readout.state, "VERIFIED");
+});
+
+test("a confirmed stale Apply refusal can be recovered after a failed reconciliation", async () => {
+  const refused = fixture({ staleReviews: 1, loseReconcile: true });
+  await prepare(refused);
+  assert.equal(refused.saved.phase, "PENDING");
+  assert.equal(refused.transfers, 0);
+
+  const retried = fixture({ saved: refused.saved });
+  assert.equal((await prepare(retried)).readout.state, "VERIFIED");
+  assert.deepEqual(retried.submittedReviews, ["fresh-review-2"]);
+  assert.equal(retried.transfers, 1);
+});
+
+test("an unowned receipt alone cannot release an ambiguous or foreign attempt", async () => {
+  const interrupted = fixture({ lostBeforeReceipt: true });
+  await prepare(interrupted);
+  const otherSession = "b".repeat(64);
+  for (const options of [
+    { saved: interrupted.saved },
+    { saved: interrupted.saved, sessionGeneration: otherSession, accountID: 2 },
+    { saved: { ...interrupted.saved, context: undefined }, sessionGeneration: otherSession },
+    { saved: interrupted.saved, sessionGeneration: otherSession, pending: true },
+  ]) {
+    const restarted = fixture(options);
+    const report = await prepare(restarted);
+    assert.equal(report.status, "paused");
+    assert.deepEqual(restarted.saved, options.saved);
+    assert.deepEqual(restarted.submittedReviews, []);
+    assert.equal(restarted.transfers, 0);
+  }
+});
+
+test("a Core receipt found during the recheck keeps an uncertain transfer pending", async () => {
+  const interrupted = fixture({ lostBeforeReceipt: true });
+  await prepare(interrupted);
+  const restarted = fixture({
+    saved: interrupted.saved,
+    sessionGeneration: "b".repeat(64),
+    blockedReceiptOnRecheck: true,
+  });
+  const report = await prepare(restarted);
+  assert.equal(report.status, "paused");
+  assert.match(report.why, /PREPARATION_UNRESOLVED: BLOCKED/);
+  assert.deepEqual(restarted.saved, interrupted.saved);
+  assert.deepEqual(restarted.submittedReviews, []);
+  assert.equal(restarted.transfers, 0);
+});
+
 test("MCC fills the three missing Mining Drone I from Division 7 before replenishing charges", async () => {
   const f = fixture({ drones: {} });
   f.run.setup.preparation.source = { kind: "corp", corporationID: 31, division: 7 };
@@ -250,6 +372,92 @@ test("MCC fills the three missing Mining Drone I from Division 7 before replenis
   assert.equal(report.readout.state, "VERIFIED");
   assert.equal(report.readout.targets.find((item: any) => item.typeID === miningDrone).deficit, 0);
   assert.ok(!f.requests.some((path) => path.includes("provision-ship")));
+});
+
+test("MCC replaces two surplus Acolyte I with Mining Drone I from Division 7", async () => {
+  const f = fixture({ drones: {
+    bay: 3, otherBay: 7, fittingLight: 5, separateLightDrones: true, parallelLightReturn: true,
+  } });
+  f.run.setup.preparation.source = { kind: "corp", corporationID: 31, division: 7 };
+  const report = await prepare(f);
+  assert.deepEqual(f.droneReturns, [{ itemID: 502, qty: 1 }, { itemID: 503, qty: 1 }]);
+  assert.deepEqual(f.droneTransfers, [{ itemID: 710, qty: 2 }]);
+  for (const itemID of [502, 503])
+    assert.deepEqual(f.returnedStock.get(itemID), { typeID: lightDrone, quantity: 1 });
+  assert.equal(f.lightBay, 5);
+  assert.equal(f.droneBay, 5);
+  assert.equal(report.readout.state, "VERIFIED");
+  assert.equal(f.transfers, 1, "ordinary charge replenishment still runs");
+});
+
+test("MCC leaves an exact Drone Bay alone and Review never returns surplus", async () => {
+  const exact = fixture({ drones: { bay: 5, otherBay: 5, fittingLight: 5 } });
+  assert.equal((await prepare(exact)).readout.state, "VERIFIED");
+  assert.deepEqual(exact.droneReturns, []);
+  assert.deepEqual(exact.droneTransfers, []);
+
+  const review = fixture({ drones: { bay: 3, otherBay: 7, fittingLight: 5 } });
+  review.run.setup.reviewOnly = true;
+  assert.match((await prepare(review)).readout.reason, /2 extra Acolyte I/);
+  assert.deepEqual(review.droneReturns, []);
+  assert.deepEqual(review.droneTransfers, []);
+
+  const disabled = fixture({ drones: { bay: 3, otherBay: 7, fittingLight: 5 } });
+  disabled.run.setup.preparation.replenishSupplies = false;
+  await prepare(disabled);
+  assert.deepEqual(disabled.droneReturns, []);
+  assert.deepEqual(disabled.droneTransfers, []);
+});
+
+test("MCC returns a split surplus stack while reserving space for controlled drones", async () => {
+  const f = fixture({ drones: {
+    bay: 3, otherBay: 4, fittingLight: 5, controlled: [{ typeID: lightDrone, quantity: 3 }], detached: 3,
+  } });
+  const report = await prepare(f);
+  assert.deepEqual(f.droneReturns, [{ itemID: 502, qty: 2 }]);
+  assert.deepEqual(f.droneTransfers, [{ itemID: 710, qty: 2 }]);
+  assert.equal(f.lightBay, 2);
+  assert.equal(f.droneBay, 5);
+  assert.equal(report.readout.targets.find((row: any) => row.typeID === lightDrone).current, 5);
+});
+
+test("MCC returns a bay drone whose type is absent from the complete saved fit", async () => {
+  const f = fixture({ drones: { bay: 0, fittingMining: 0, otherBay: 1 } });
+  assert.equal((await prepare(f)).readout.state, "VERIFIED");
+  assert.deepEqual(f.droneReturns, [{ itemID: 502, qty: 1 }]);
+  assert.deepEqual(f.droneTransfers, []);
+  assert.equal(f.lightBay, 0);
+});
+
+test("MCC reports a surplus still in space without taking a drone from another location", async () => {
+  const f = fixture({ drones: {
+    bay: 5, fittingLight: 1, controlled: [{ typeID: lightDrone, quantity: 2 }], detached: 3,
+  } });
+  const report = await prepare(f);
+  assert.match(report.readout.reason, /controls 1 extra Acolyte I still in space/);
+  assert.deepEqual(f.droneReturns, []);
+  assert.deepEqual(f.droneTransfers, []);
+});
+
+test("MCC confirms a lost return reply from both inventories and stops on a refused or uncertain return", async () => {
+  const completed = fixture({ drones: { bay: 3, otherBay: 7, fittingLight: 5, returnReply: "lost-after" } });
+  assert.equal((await prepare(completed)).readout.state, "VERIFIED");
+  assert.deepEqual(completed.droneReturns, [{ itemID: 502, qty: 2 }]);
+  assert.deepEqual(completed.droneTransfers, [{ itemID: 710, qty: 2 }]);
+
+  for (const [returnReply, reason] of [
+    ["refused", /inventory declined the return of 2 Acolyte I/],
+    ["lost-before", /could not be confirmed.*warehouse transfer reply was lost/],
+    ["missing-destination", /could not be confirmed/],
+  ] as const) {
+    const f = fixture({ drones: { bay: 3, otherBay: 7, fittingLight: 5, returnReply } });
+    const report = await prepare(f);
+    assert.equal(report.status, "error");
+    assert.match(report.why, reason);
+    assert.deepEqual(f.droneReturns, [{ itemID: 502, qty: 2 }]);
+    assert.deepEqual(f.droneTransfers, []);
+    assert.equal(f.droneBay, 3);
+  }
 });
 
 test("only drones controlled by the held ship count toward its fitting", async () => {
@@ -264,7 +472,7 @@ test("only drones controlled by the held ship count toward its fitting", async (
 
 test("a 35 m³ bay with four returning drones leaves no room at an effective 50 m³", async () => {
   const f = fixture({
-    drones: { otherBay: 5, controlled: [{ typeID: lightDrone, quantity: 4 }], reportedUsed: 35 },
+    drones: { otherBay: 5, fittingLight: 9, controlled: [{ typeID: lightDrone, quantity: 4 }], reportedUsed: 35 },
   });
   const report = await prepare(f);
   assert.deepEqual(f.droneTransfers, []);
@@ -277,6 +485,7 @@ test("the active hull's effective Dogma wins over a lower type capacity and coun
   const f = fixture({
     drones: {
       otherBay: 5,
+      fittingLight: 9,
       controlled: [{ typeID: lightDrone, quantity: 4 }],
       effectiveCapacity: 70,
       bayCapacity: 50,

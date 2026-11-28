@@ -56,6 +56,7 @@ export type MiningRoutesDeps = {
   ) => ArchivedDelivery | null;
   completedFleetResult?: (operationID: string, runID?: string) => FleetRunResult | null;
   resetDepletedBelt?: (key: string) => boolean;
+  launchRefused?: (operationID: string, runID: string, characterID: number) => void;
   requestStop?: (
     input: { operationID: string; operationRunID: string },
     mode: StopFreightMode,
@@ -268,7 +269,14 @@ export function createMiningOperationRoutes(
       const started = receipt.members.filter((member) => member.status !== "PREPARED");
       const physical = physicalState(identity, expected.operationID);
       const snapshot = physical.snapshot;
-      if (expected.closeOfflineStop === true) {
+      if (
+        expected.closeOfflineStop === true ||
+        (snapshot?.stoppedBeforeWork === true && snapshot.state !== "STOPPED" &&
+          started.some(m => !snapshot.settled?.includes(m.characterID) ||
+            (!snapshot.parked?.includes(m.characterID) && !snapshot.stayed?.includes(m.characterID))) &&
+          !snapshot.manifests?.length && !Object.keys(snapshot.haulClaims ?? {}).length &&
+          !Object.keys(snapshot.jetcanIntents ?? {}).length)
+      ) {
         if (!snapshot || !canCloseOfflineStop(identity, physical)) continue;
         const offline = observations
           ? started.every((member) =>
@@ -1042,16 +1050,13 @@ export function createMiningOperationRoutes(
     const v = req.body;
     if (!obj(v) || !Number.isSafeInteger(v.characterID) || !text(v.operationRunID))
       throw Error("Exact hosted refusal is required.");
-    return {
-      body: {
-        ok: true,
-        receipt: journal(req).launch.refuse(v.operationRunID, v.characterID, {
-          code: v.code,
-          status: v.status,
-          message: v.message,
-        }),
-      },
-    };
+    const receipt = journal(req).launch.refuse(v.operationRunID, v.characterID, {
+      code: v.code,
+      status: v.status,
+      message: v.message,
+    });
+    deps.launchRefused?.(receipt.operationID, receipt.operationRunID, v.characterID);
+    return { body: { ok: true, receipt } };
   });
   const accept: BackendRoute = wrap((req) => {
     const v = req.body;

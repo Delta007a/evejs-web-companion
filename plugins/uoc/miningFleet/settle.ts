@@ -12,12 +12,15 @@ import {
 import type { PluginRunContext } from "../../../web/src/plugin-api/backend.ts";
 import type { PilotSession } from "../../../web/src/plugin-api/pilotSession.ts";
 import type { FleetSetup } from "./runtime.ts";
-import { assertFleetDroneDeparture, recallFleetDrones } from "./droneRecall.ts";
+import { assertFleetDroneDeparture, fleetDronesInSpace, recallFleetDrones } from "./droneRecall.ts";
+import type { BeltDroneRecovery } from "./droneBayOverflow.ts";
+import { fleetReadFailed } from "./stopSignal.ts";
 export type FleetSettlementOptions = {
   expectedDrones?: readonly number[];
   report?: (message: string) => void;
   parkAfterRecallFailure?: () => Promise<void>;
   verifyRetainedModules?: () => Promise<void>;
+  beltRecovery?: BeltDroneRecovery;
 };
 import { decodeModuleObservation } from "../shared/moduleObservation.ts";
 /** Strict no-active-module/no-drones proof for the raw slice; unsafe flights pause for native recovery. */
@@ -32,19 +35,21 @@ export async function settleFleetMember(
   if (!member) throw Error("Fleet pilot is outside the operation roster.");
   const options = { ...session.flow.requestOptions(), baseUrl: run.baseUrl, fetch: run.fetch };
   current();
-  const flight = decodeFlightStatus((await getFlightStatus(options)).flight);
+  const flight = decodeFlightStatus((await getFlightStatus(options).catch(fleetReadFailed)).flight);
   current();
   const retained = droneOptions?.verifyRetainedModules;
   const observation =
-    retained && flight.inSpace ? await session.flow.flying.readObservation() : null;
-  const drones = observation ?? (await getDrones(options));
+    retained && flight.inSpace ? await session.flow.flying.readObservation().catch(fleetReadFailed) : null;
+  const drones = observation ?? (await getDrones(options).catch(fleetReadFailed));
   current();
+  const out = fleetDronesInSpace(drones.inSpace);
+  const controlled = out?.some((row) => row.controlled);
   if (
     flight.shipID !== member.shipID ||
     drones.activeShipID !== member.shipID ||
     !Array.isArray(drones.bay) ||
-    !Array.isArray(drones.inSpace) ||
-    (!droneOptions && drones.inSpace.length !== 0) ||
+    !out ||
+    (!droneOptions && controlled) ||
     ["bay", "shipInfo", "inSpace"].some(
       (key) => !Object.hasOwn(drones.errors, key) || drones.errors[key] !== null,
     )
@@ -69,20 +74,21 @@ export async function settleFleetMember(
       const noDroneCapacity =
         decodeDroneLimits(drones.shipInfo).droneBandwidth === 0 &&
         drones.bay.length === 0 &&
-        drones.inSpace.length === 0;
+        !controlled;
       if ((scene.stateValid === false || !scene.ship) && !noDroneCapacity)
         throw Object.assign(
           Error("The held ship's drone scene is not ready; drone disposition is unverified."),
           { code: "SESSION_CHANGE_IN_PROGRESS" },
         );
-    } else if (!flight.docked || !(flight.stationID ?? flight.structureID) || drones.inSpace.length)
+    } else if (!flight.docked || !(flight.stationID ?? flight.structureID) || controlled)
       throw Error("A stable native dock and no in-space drones are required to settle this ship.");
   }
   let parkAfterRecall = false;
-  if (droneOptions && (drones.inSpace.length > 0 || droneOptions.expectedDrones?.length)) {
+  if (droneOptions && (controlled || droneOptions.expectedDrones?.length)) {
     const result = await recallFleetDrones(run, session, member.shipID, current, {
       pendingLaunch: droneOptions.expectedDrones,
       onProgress: droneOptions.report,
+      beltRecovery: droneOptions.beltRecovery,
     });
     parkAfterRecall = result.stillControlled.length > 0 && !!droneOptions.parkAfterRecallFailure;
     const warning = parkAfterRecall
@@ -95,7 +101,7 @@ export async function settleFleetMember(
   if (retained) {
     await retained();
     current();
-    const after = decodeFlightStatus((await getFlightStatus(options)).flight);
+    const after = decodeFlightStatus((await getFlightStatus(options).catch(fleetReadFailed)).flight);
     current();
     if (
       after.shipID !== flight.shipID ||
@@ -111,7 +117,7 @@ export async function settleFleetMember(
         { code: "SESSION_CHANGE_IN_PROGRESS" },
       );
   } else if (flight.inSpace) {
-    const space = decodeSpaceSnapshot((await getSpaceSnapshot(options)).space);
+    const space = decodeSpaceSnapshot((await getSpaceSnapshot(options).catch(fleetReadFailed)).space);
     current();
     if (
       space.stateValid === false ||
@@ -124,7 +130,7 @@ export async function settleFleetMember(
       if (space.ship.activeModuleIDs.length)
         throw Error("Native module shutdown is unknown; settlement is required.");
     } else {
-      const fit = await loadFitting(options);
+      const fit = await loadFitting(options).catch(fleetReadFailed);
       current();
       if (fit.activeShipID !== member.shipID || Object.values(fit.errors).some((x) => x !== null))
         throw Error("Native module fitting is unknown.");
@@ -165,7 +171,7 @@ export async function settleFleetMember(
         const flagID = slotFlagOf(slot.family, slot.index);
         if (!flagID) throw Error("A fitted module slot is unknown.");
         const module = slot.module,
-          raw = await session.flow.flying.bridgeAsk("dogmaIM", "ItemGetInfo", [module.itemID]);
+          raw = await session.flow.flying.bridgeAsk("dogmaIM", "ItemGetInfo", [module.itemID]).catch(fleetReadFailed);
         current();
         const observed = decodeModuleObservation(raw, {
           moduleID: module.itemID,
@@ -183,7 +189,7 @@ export async function settleFleetMember(
   if (parkAfterRecall) {
     await droneOptions!.parkAfterRecallFailure!();
     current();
-    const [dock, after] = await Promise.all([getFlightStatus(options), getDrones(options)]);
+    const [dock, after] = await Promise.all([getFlightStatus(options), getDrones(options)]).catch(fleetReadFailed);
     current();
     const observed = decodeFlightStatus(dock.flight);
     if (

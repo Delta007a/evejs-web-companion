@@ -190,12 +190,14 @@ test("manual reset reopens only the chosen depleted belt and survives reloading 
  assert.deepEqual(board.snapshot(),before);
  const reply=await call(key);
  assert.equal(reply.status??200,200);
- assert.ok((reply.body as {targetBoard:{targetKey:string;state:string}[]}).targetBoard.some(row=>row.targetKey===key&&row.state==="AVAILABLE"));
+ assert.ok(!(reply.body as {targetBoard:{targetKey:string}[]}).targetBoard.some(row=>row.targetKey===key));
  assert.equal((await call(key)).status,400);
  board=createTargetBoard(store,now);
- assert.deepEqual(board.snapshot(),{...before,[key]:{...before[key],state:"AVAILABLE",depletion:null}});
+ const expected={...before};delete expected[key];
+ assert.deepEqual(board.snapshot(),expected);
  assert.ok(board.isDangerous(targetKey(dangerous)));
- assert.ok(board.availableForRelocation(key,true));
+ assert.equal(board.availableForRelocation(key,true),false,"Reset does not redirect a running operation back to a visited belt");
+ assert.ok(board.availableForRelocation(key,false));
  assert.ok(searchTargetAvailable(board,reset,"next","run",now()));
  deplete(board.reserve("next","run",reset)!);
  assert.equal(board.read(key)?.state,"DEPLETED");

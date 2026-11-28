@@ -5,6 +5,7 @@ import { readMiningReadiness } from "./nativeBelt.ts";
 import { createSiteDiscovery, type NativeSite } from "./siteDiscovery.ts";
 import { validSavedSiteClassification, sameSiteClassification } from "./siteSelection.ts";
 import type { SynchronousStore } from "./targetBoard.ts";
+import { fleetReadFailed } from "./stopSignal.ts";
 export type SiteSearchFamily = "ORE" | "MOON" | "ICE";
 export type SiteSearchResult =
   | NativeSite
@@ -142,7 +143,7 @@ export async function resolveMiningSite(
   const options = { ...session.flow.requestOptions(), baseUrl: run.baseUrl, fetch: run.fetch };
   const status = async () => {
     guard();
-    const x = decodeFlightStatus((await getFlightStatus(options)).flight);
+    const x = decodeFlightStatus((await getFlightStatus(options).catch(fleetReadFailed)).flight);
     guard();
     if (x.shipID !== shipID || x.solarSystemID !== systemID || (x.inSpace && x.docked))
       throw Error("Site search physical scope is uncertain.");
@@ -152,16 +153,19 @@ export async function resolveMiningSite(
     deadline = started + 120000;
   if (!Number.isFinite(started) || started <= 0) throw Error("Site search clock is invalid.");
   let flight = await status();
+  const stoppedAtDock = () =>
+    stopRequested() && flight.docked && !flight.inSpace &&
+    id(flight.stationID ?? flight.structureID) && flight.transition?.phase === "ready";
+  if (stoppedAtDock()) return { kind: "STOPPED", observedAt: now() };
   if (flight.docked && !state.pending) {
-    if (
-      state.history.some(
-        (h) => h.outcome === "undocked" || h.refusal?.code === "SESSION_CHANGE_IN_PROGRESS",
-      ) ||
-      state.site
-    )
+    if (state.history.some((h) => h.outcome === "undocked") || state.site)
       throw Error("Previously undocked search is docked; no undock replay.");
     if (stopRequested()) return { kind: "STOPPED", observedAt: now() };
     const fromID = flight.stationID ?? flight.structureID;
+    const last = state.history.at(-1);
+    if (last?.refusal && (fromID !== last.intent.fromID || flight.transition?.phase !== "ready" ||
+      now() - last.observedAt < 5000))
+      throw Error("Waiting for the original dock to be ready after the session change.");
     if (!id(fromID) || (flight.transition && flight.transition.phase !== "ready"))
       throw Error("Docked origin is not ready for site search.");
     const issuedAt = now();
@@ -229,6 +233,7 @@ export async function resolveMiningSite(
   while (true) {
     guard();
     flight = await status();
+    if (stoppedAtDock()) return { kind: "STOPPED", observedAt: now() };
     if (flight.inSpace) {
       let ready: Awaited<ReturnType<typeof readMiningReadiness>> | null = null;
       try {

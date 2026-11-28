@@ -8,6 +8,7 @@ import { decodeFlightStatus, getFlightStatus } from "../../../web/src/plugin-api
 import type { PluginRunContext } from "../../../web/src/plugin-api/backend.ts";
 import type { PilotSession } from "../../../web/src/plugin-api/pilotSession.ts";
 import type { SynchronousStore } from "./targetBoard.ts";
+import { FleetObservationUnavailable, fleetReadFailed } from "./stopSignal.ts";
 const positive = (x: unknown): x is number =>
   typeof x === "number" && Number.isSafeInteger(x) && x > 0;
 type Intent = { issuedAt: number; originSystemID: number; acknowledged: boolean };
@@ -100,7 +101,7 @@ export async function ensureMiningAnchor(
             baseUrl: run.baseUrl,
             fetch: run.fetch,
           }),
-        )
+        ).catch(fleetReadFailed)
       ).flight,
     );
     guard();
@@ -187,9 +188,8 @@ export async function ensureMiningAnchor(
       return "arrived" as const;
     }
     if (
-      progress?.status === "error" ||
-      progress?.status === "paused" ||
-      progress?.status === "aborted"
+      !stopRequested() &&
+      (progress?.status === "error" || progress?.status === "paused" || progress?.status === "aborted")
     )
       throw Error("Anchor route remains unresolved; no second route will be sent.");
     const snapshot = flight.inSpace ? session.store.space?.get().snapshot : null;
@@ -201,8 +201,10 @@ export async function ensureMiningAnchor(
       snapshot.ship.geometryAvailable
     )
       lastPosition = snapshot.ship.position;
-    if (!progressing(travelFacts(flight, progress, lastPosition)))
+    if (!progressing(travelFacts(flight, progress, lastPosition))) {
+      if (stopRequested()) throw new FleetObservationUnavailable("Waiting for the held ship to finish its anchor transit before Parking.");
       throw Error("Anchor route made no observable native progress; current state was rechecked.");
+    }
     await wait(1000);
   }
 }

@@ -609,6 +609,31 @@
   let deliveredUnits = $state<number | null>(null);
   let deliveryIssue = $state<string | null>(null);
   let visible = $state.raw<AbortSignal | null>(null);
+  const anchorNames = $derived(new Map(savedOperations.flatMap(({ definition: { area } }) =>
+    area.anchorSystemName ? [[area.anchorSystemID, area.anchorSystemName] as const] : [])));
+  let mapNames = $state<Record<number, string>>({});
+  const systemLabel = (id: number) => anchorNames.get(id) || mapNames[id] || "Unknown system";
+  const missingSystems = $derived([...new Set([
+    ...(payload?.targetBoard ?? []),
+    ...savedOperations.flatMap(({ runtime }) => runtime.currentTarget ?? []),
+    ...savedOperations.map(({ definition: { area } }) => ({
+      systemID: area.anchorSystemID, systemName: area.anchorSystemName,
+    })),
+  ].filter((target) => !target.systemName && !anchorNames.get(target.systemID))
+    .map((target) => target.systemID))].sort().join(","));
+  $effect(() => {
+    if (!visible || !missingSystems) return;
+    const request = new AbortController();
+    const signal = AbortSignal.any([visible, request.signal]);
+    for (const id of missingSystems.split(",").map(Number)) {
+      if (untrack(() => mapNames[id])) continue;
+      void resolveDestination(id, { ...opts(), signal }).then((place) => {
+        if (!signal.aborted && place.kind === "system" && place.solarSystemID === id && place.systemName)
+          mapNames[id] = place.systemName;
+      }).catch(() => { /* Keep the fallback if the public map is unavailable. */ });
+    }
+    return () => request.abort();
+  });
   $effect(() => {
     if (!visible) return;
     const run = activeRunID,
@@ -1600,7 +1625,7 @@
       <div class="editor-heading">
         <div>
           <h3 id={editorID + "-heading"}>{name.trim() || (operationID ? "Edit operation" : "New operation")}</h3>
-          <p>{anchorSystemName || (anchorSystemID ? "System " + anchorSystemID : "Choose a system")}</p>
+          <p>{anchorSystemName || (anchorSystemID ? systemLabel(anchorSystemID) : "Choose a system")}</p>
         </div>
         <div class="editor-summary">
           <CenterStatus state={editorStatus} label={stateLabel(editorStatus)} />
@@ -1944,7 +1969,7 @@
             onclick={() => void checkUnload(row.definition.operationID, member.accountName, member.botID!)}>Check and release</button>
         </p>
       {/each}
-      <MiningOperationOverview runtime={row.runtime} {deliveredUnits} {deliveryIssue} stale={disconnected || pollError !== null} />
+      <MiningOperationOverview runtime={row.runtime} {systemLabel} {deliveredUnits} {deliveryIssue} stale={disconnected || pollError !== null} />
       {#if row.runtime.stopFreight && row.runtime.stopFailures.length > 0}<div class="error"><p>Parking or release is pending for these pilots.</p>{#each row.runtime.stopFailures as failure}<p>{row.runtime.members.find(member => member.characterID === failure.characterID)?.characterName ?? "Pilot"}: {failure.message}</p>{/each}</div>{/if}
       {#if canStart(row.runtime.state)}
         <div class="readiness">
@@ -1960,7 +1985,7 @@
       {/if}
       <details class="operation-details" bind:this={fleetDetails}><summary>Fleet and readiness · {row.runtime.members.length} pilots</summary>
         <div class="table-wrap"><table>
-          <thead><tr><th>Pilot</th><th>Role</th><th>Assignment</th><th>Bot state</th><th>Phase</th></tr></thead>
+          <thead><tr><th>Pilot</th><th>Role</th><th>Assignment</th><th>Phase</th></tr></thead>
           <tbody>
             {#each row.runtime.members as member (member.characterID)}
               <tr>
@@ -1972,14 +1997,11 @@
                     : profileName(member, row.definition.area.targetClasses[0], row.definition.unloadPolicy)}
                 </td>
                 <td>
-                  {member.dockedForUnload ? "Docked at home" : member.parkingState ?? member.runtimeState}
-                </td>
-                <td>
                   {member.phase ?? member.reason ?? "—"}{#if typeof member.pendingUnloadUnits === "number"}
                     <br/><small>Last observed cargo · {member.pendingUnloadUnits.toLocaleString()} units</small>
                   {/if}{#if member.reason && member.reason !== member.phase && member.phase}
                     <br/><small>{member.reason}</small>
-                  {/if}{#if member.parkingSince && member.hosted}
+                  {/if}{#if member.dockedForUnload}<br/><small>Docked at home</small>{/if}{#if member.parkingSince && member.hosted}
                     <br/><small>Since {new Date(member.parkingSince).toLocaleTimeString()}</small>
                   {/if}
                 </td>
@@ -2011,7 +2033,7 @@
           {commandPreparation?.sourceLabel ? `Prepared from: ${commandPreparation.sourceLabel}.` : "Supply source not yet verified."}
         </p>
       {/if}
-      <p><strong>Area:</strong> {row.definition.area.anchorSystemName ?? "Unknown system"} · {row.definition.area.reach === "CURRENT_SYSTEM" ? "current system" : "adjacent mode (anchor-only execution in v0.1)"}</p>
+      <p><strong>Area:</strong> {row.definition.area.anchorSystemName || systemLabel(row.definition.area.anchorSystemID)} · {row.definition.area.reach === "CURRENT_SYSTEM" ? "current system" : "adjacent mode (anchor-only execution in v0.1)"}</p>
       <p><strong>Target class / unload:</strong> {row.definition.area.targetClasses.join(", ")} · {row.definition.unloadPolicy === "HAULER_SERVICE" ? "Hauler service" : "Self unload"}</p>
       <p><strong>Standard resources:</strong> {row.definition.policies?.resourcePolicy?.mode === "PREFER_LIST" ? row.definition.policies.resourcePolicy.typeIDs.map(id => catalog.find(resource => resource.typeID === id)?.name ?? `Type ${id}`).join(" → ") + " → any eligible" : "Any eligible"}</p>
       <p><strong>On Stop:</strong> {stopLabels[row.definition.policies?.parking.mode ?? "STAY_IN_PLACE"]}{row.definition.policies?.parking.destination ? ` · ${"kind" in row.definition.policies.parking.destination ? row.definition.policies.parking.destination.name : row.definition.policies.parking.destination.stationName}` : ""}</p>
@@ -2041,7 +2063,7 @@
         <tbody>
           {#each payload?.targetBoard ?? [] as target (target.targetKey)}
             <tr>
-              <td>{target.targetName}</td><td>{target.targetType}</td><td>{target.systemName ?? target.systemID}</td><td>{target.state}</td>
+              <td>{target.targetName}</td><td>{target.targetType}</td><td>{target.systemName || systemLabel(target.systemID)}</td><td>{target.state}</td>
               <td>
                 {#if target.state === "DANGEROUS"}
                   <button type="button" disabled={disconnected || busy !== null} onclick={() => updateTargetBoard(target.targetKey, markMiningBeltSafe)}>Mark safe</button>

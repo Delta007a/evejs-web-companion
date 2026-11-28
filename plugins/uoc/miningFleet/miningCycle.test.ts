@@ -286,10 +286,14 @@ async function cycleFixture(
     clockOffset = 0,
     stopOnApproach = false,
     targetVisible = true,
+    rockID = 777,
+    rockBeltID: number | null = null,
+    remainingQuantity: number | undefined,
     goto = false,
     interruptAfterEffect = false,
     failedHoldRead = false;
   const records: any[] = [];
+  const approachTargets: number[] = [];
   const list = (...items: any[]) => ({ type: "list", items }),
     dict = (value: any) => ({ type: "dict", entries: Object.entries(value) }),
     long = (value: string) => ({ type: "long", value });
@@ -516,11 +520,12 @@ async function cycleFixture(
             ...(targetVisible
               ? [
                   {
-                    itemID: 777,
+                    itemID: rockID,
                     typeID: 30,
                     groupID: 18,
                     categoryID: 25,
-                    beltID: null,
+                    beltID: rockBeltID,
+                    remainingQuantity,
                     position: { x: far ? 30000 : 100, y: 0, z: 0 },
                     radius: 10,
                   },
@@ -551,8 +556,9 @@ async function cycleFixture(
       requestOptions: () => ({ baseUrl: ctx.baseUrl, fetch: fetcher }),
       flying: {
         sessionGeneration: () => 1,
-        approachShip: async () => {
+        approachShip: async (targetID: number) => {
           approaches++;
+          approachTargets.push(targetID);
           if (approachFailure) throw approachFailure;
         },
         bridgeAsk: async (service: string, method: string, _args: any[], kwargs: any) => {
@@ -697,15 +703,17 @@ async function cycleFixture(
     },
     last: () => last,
     approaches: () => approaches,
-    setFar: () => {
+    approachTargets,
+    setFar: (beltID: number | null = null) => {
       far = true;
+      rockBeltID = beltID;
     },
     setNear: () => {
       far = false;
       sceneExtra = 2000;
     },
-    advanceApproach: () => {
-      clockOffset = 5000;
+    advanceApproach: (ms = 5000) => {
+      clockOffset = ms;
       sceneExtra = 2000;
     },
     setNativeSceneOffset: (ms: number) => {
@@ -716,6 +724,12 @@ async function cycleFixture(
     },
     hideTarget: () => {
       targetVisible = false;
+    },
+    replaceTarget: (id: number) => {
+      rockID = id;
+    },
+    depleteTarget: () => {
+      remainingQuantity = 0;
     },
     gotoLate: () => {
       follow = false;
@@ -1004,7 +1018,7 @@ test("exact native approach throttle is a durable negative, reconciled by own fr
   assert.equal(x.last().approach.status, "observed");
   assert.equal(x.approaches(), 1);
 });
-test("unknown approach and changed target authority never authorize a second movement or release", async () => {
+test("an unknown approach cannot authorize another movement under changed target authority", async () => {
   const x = await cycleFixture(false, false, true);
   x.setFar();
   x.failApproach(Error("connection lost"));
@@ -1013,8 +1027,6 @@ test("unknown approach and changed target authority never authorize a second mov
     x.controller.tick(anomaly, { ...anomalyClaim, generation: 2 }),
     /claim (changed|was lost)/,
   );
-  await assert.rejects(x.controller.stop(), /approach outcome remains unresolved/);
-  await assert.rejects(x.controller.release!(), /approach outcome remains unresolved/);
   assert.equal(x.approaches(), 1);
 });
 
@@ -1050,23 +1062,23 @@ test("fresh stopped ship within original target range resolves original approach
   assert.equal(x.last().approach.observedVia, "within-range");
   assert.equal(x.approaches(), 1);
 });
-test("acknowledged approach fresh STOP after stock settle allows Stop without claiming arrival", async () => {
+test("Stop of an acknowledged approach does not claim arrival from an old snapshot", async () => {
   const x = await cycleFixture(false, false, true);
   x.setFar();
   await x.controller.tick(anomaly, anomalyClaim);
-  await assert.rejects(x.controller.stop(), /approach outcome remains unresolved/);
-  x.advanceApproach();
+  x.requestStop();
   await x.controller.stop();
-  assert.equal(x.last().approach.observedVia, "stopped-after-settle");
+  assert.equal(x.last().approach.status, "acknowledged");
   assert.equal(x.approaches(), 1);
 });
-test("unknown approach cannot settle by elapsed time plus STOP alone", async () => {
+test("elapsed time and an old STOP snapshot cannot authorize another approach", async () => {
   const x = await cycleFixture(false, false, true);
   x.setFar();
   x.failApproach(Error("lost"));
   await assert.rejects(x.controller.tick(anomaly, anomalyClaim), /lost/);
   x.advanceApproach();
-  await assert.rejects(x.controller.stop(), /approach outcome remains unresolved/);
+  x.setNativeSceneOffset(-60_000);
+  assert.equal(await x.controller.tick(anomaly, anomalyClaim), "blocked");
   assert.equal(x.last().approach.status, "pending");
   assert.equal(x.approaches(), 1);
 });
@@ -1093,6 +1105,79 @@ test("missing original target cannot create a within-range approach proof", asyn
   assert.equal(x.last().approach.status, "acknowledged");
   assert.equal(x.approaches(), 1);
 });
+
+test("a missing asteroid retires its unknown Approach and lets the Miner choose another", async () => {
+  const x = await cycleFixture(false);
+  x.setFar(99);
+  x.failApproach(Error("response lost"));
+  await assert.rejects(x.controller.tick(belt, beltClaim), /response lost/);
+  assert.equal(x.last().approach.status, "pending");
+
+  x.replaceTarget(778);
+  x.failApproach(null);
+  x.advanceApproach();
+  const resumed = await x.reopen("reconnected");
+  assert.equal(await resumed.tick(belt, beltClaim), "blocked");
+  assert.deepEqual(x.approachTargets, [777, 778]);
+  assert.equal(x.last().approach.targetID, 778);
+  assert.equal(x.last().approach.status, "acknowledged");
+});
+
+test("a pending Approach to a depleted asteroid leaves module shutdown and release available", async () => {
+  const x = await cycleFixture(false, false, true);
+  x.setFar();
+  x.failApproach(Error("response lost"));
+  await assert.rejects(x.controller.tick(anomaly, anomalyClaim), /response lost/);
+  x.requestStop();
+  x.advanceApproach(31_000);
+  x.depleteTarget();
+  x.setNativeSceneOffset(-60_000);
+  await x.controller.stop();
+  assert.equal(x.last().approach.status, "pending");
+  await x.controller.release!();
+  assert.equal(x.last().approach, null);
+  assert.deepEqual(x.approachTargets, [777]);
+});
+
+test("a fresh idle ship and target permit replanning an unanswered Approach", async () => {
+  const x = await cycleFixture(false, false, true);
+  x.setFar();
+  x.failApproach(Error("response lost"));
+  await assert.rejects(x.controller.tick(anomaly, anomalyClaim), /response lost/);
+  x.failApproach(null);
+  x.advanceApproach(5_000);
+  x.setNativeSceneOffset(-60_000);
+  assert.equal(await x.controller.tick(anomaly, anomalyClaim), "blocked");
+  assert.deepEqual(x.approachTargets, [777]);
+
+  x.setNativeSceneOffset(2_000);
+  assert.equal(await x.controller.tick(anomaly, anomalyClaim), "blocked");
+  assert.deepEqual(x.approachTargets, [777, 777]);
+  assert.equal(x.last().approach.status, "acknowledged");
+});
+
+test("a temporary Gateway failure on Approach retries observations and preserves an already executed order", async () => {
+  const x = await cycleFixture(false, false, true);
+  x.setFar();
+  const error = Object.assign(Error("EveJS gateway is unreachable."), {
+    code: "EVE_GATEWAY_UNREACHABLE",
+    status: 502,
+  });
+  x.failApproach(error);
+  await assert.rejects(x.controller.tick(anomaly, anomalyClaim), (observed) =>
+    observed instanceof FleetObservationUnavailable && observed.cause === error,
+  );
+  assert.equal(x.last().approach.status, "pending");
+
+  x.failApproach(null);
+  x.follow();
+  assert.equal(await x.controller.tick(anomaly, anomalyClaim), "blocked");
+  assert.equal(x.last().approach.observedVia, "follow");
+  x.setNear();
+  assert.equal(await x.controller.tick(anomaly, anomalyClaim), "yield");
+  assert.deepEqual(x.approachTargets, [777]);
+});
+
 test("observed follow that later becomes unresolved GOTO is bounded without a repeat", async () => {
   const x = await cycleFixture(false, false, true);
   x.setFar();
@@ -1102,7 +1187,7 @@ test("observed follow that later becomes unresolved GOTO is bounded without a re
   x.gotoLate();
   await assert.rejects(
     x.controller.tick(anomaly, anomalyClaim),
-    /approach outcome remains unresolved/,
+    FleetObservationUnavailable,
   );
   assert.equal(x.approaches(), 1);
 });
@@ -1196,18 +1281,19 @@ test("freight status is a synchronous timestamped native hold observation", asyn
   assert.equal(status?.facility, null);
 });
 
-test("Stop accepts a fresh observed approach on a slower native scene clock", async () => {
+test("mining accepts a fresh Follow on a slower native scene clock", async () => {
   const x = await cycleFixture(false, false, true);
   x.setFar();
   x.setNativeSceneOffset(-45000);
   assert.equal(await x.controller.tick(anomaly, anomalyClaim), "blocked");
   assert.equal(x.last().approach.status, "acknowledged");
-  x.requestStop();
   x.follow();
   x.setNativeSceneOffset(-42000);
-  await x.controller.stop();
+  assert.equal(await x.controller.tick(anomaly, anomalyClaim), "blocked");
   assert.equal(x.last().approach.observedVia, "follow");
   assert.ok(x.last().approach.observedSampledAt < x.last().approach.issuedAt);
+  x.requestStop();
+  await x.controller.stop();
   await x.controller.release!();
   assert.equal(x.approaches(), 1);
 });
@@ -1345,7 +1431,6 @@ async function repeatingBelt(
     following: number | null = null;
   let hostileID = 90,
     droneRead: Promise<void> | null = null,
-    droneReconnect: Promise<void> | null = null,
     targetsRead: Promise<void> | null = null,
     holdRead: Promise<void> | null = null;
   const requests: string[] = [];
@@ -1734,17 +1819,6 @@ async function repeatingBelt(
         }
         return dict([]);
       }
-      if (method === "CmdReconnectToDrones") {
-        if (droneReconnect) await droneReconnect;
-        for (const id of args[0]) {
-          const drone = out.get(id)!;
-          assert.equal(drone.controlled, false);
-          drone.controlled = true;
-          drone.activity = "idle";
-          drone.targetID = null;
-        }
-        return dict([]);
-      }
       if (method === "CmdEngage" || method === "CmdMineRepeatedly") {
         if (method === "CmdEngage") {
           assert.equal(args[1], hostileID);
@@ -1910,16 +1984,6 @@ async function repeatingBelt(
       });
       return () => {
         droneRead = null;
-        release();
-      };
-    },
-    stallDroneReconnect: () => {
-      let release!: () => void;
-      droneReconnect = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      return () => {
-        droneReconnect = null;
         release();
       };
     },
@@ -2602,7 +2666,7 @@ test("a timed-out spare drone bay read leaves mining drones, lasers and Jettison
   }
 });
 
-test("a resumed Miner keeps both lasers and Jettison running during a delayed drone reconnect", async (t) => {
+test("a resumed Miner keeps both lasers and Jettison running with a detached drone on grid", async (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
   const x = await repeatingBelt(2, { rockIDs: [777], droneTypes: [101], freight: true });
   const op = createOperation(memoryOperationStore("op", "epoch"), createTargetBoard(store(null)), {
@@ -2635,24 +2699,14 @@ test("a resumed Miner keeps both lasers and Jettison running during a delayed dr
   });
   const loops = createRawMembers(op),
     count = (method: string) => x.writes.filter((w) => w.method === method).length;
-  const release = x.stallDroneReconnect();
-  try {
-    await x.tick();
-    assert.equal(count("CmdReconnectToDrones"), 1);
-    await flushFlight(t, 12001);
-    assert.ok(x.reports.some((r) => /Drone command is still in flight/.test(r.why)));
-    x.ore(135000);
-    assert.equal(await loops.miner(1, miner), "hold-full");
-    assert.equal(x.readCan()?.quantity, 135000);
-    assert.deepEqual([...x.active], lasers);
-    assert.equal(x.laserYield(), 200);
-    assert.equal(count("CmdReconnectToDrones"), 1);
-  } finally {
-    release();
-    await flushFlight(t);
-  }
+  x.ore(135000);
+  assert.equal(await loops.miner(1, miner), "hold-full");
+  assert.equal(x.readCan()?.quantity, 135000);
+  assert.deepEqual([...x.active], lasers);
+  assert.equal(x.laserYield(), 200);
   await x.tick();
-  assert.equal(drone.activity, "mining");
+  assert.equal(drone.controlled, false);
+  assert.equal(count("CmdReconnectToDrones"), 0);
   assert.equal(count("LaunchDrones"), 1);
   assert.equal(count("Deactivate"), 0);
 });
@@ -3319,6 +3373,13 @@ test("hosted Miners and Defenders resume after transient reads through two hosti
             },
             async bridgeDo(_service: string, method: string, args: any[]) {
               if (method === "invCache" || method === "InvalidateLocationCache") return;
+              if (["LaunchDrones", "CmdEngage", "Deactivate"].includes(method)) {
+                const response = await run.fetch(new URL("/api/bridge/call", run.baseUrl), {
+                  method: "POST",
+                  body: JSON.stringify({ service: _service, method, args }),
+                });
+                return (await response.json()).result;
+              }
               if (method === "CmdReturnBay") {
                 assert.deepEqual(args[0], [droneID]);
                 deployed = false;
@@ -3379,6 +3440,9 @@ test("hosted Miners and Defenders resume after transient reads through two hosti
             case "/api/bridge/targets":
               body = { targetIDs: [...locked], notifications };
               notifications = [];
+              break;
+            case "/api/bridge/fitting":
+              body = { activeShipID: shipID, slots: list(weaponIDs.map(module)) };
               break;
             case "/api/bridge/drones":
               body = {
@@ -3510,7 +3574,7 @@ test("hosted Miners and Defenders resume after transient reads through two hosti
   };
   const until = async (test: () => boolean) => {
     for (let i = 0; i < 36 && !test(); i++) await step();
-    assert.ok(test(), reports.slice(-28).join("\n") + " " + events.slice(-24).join(" "));
+    assert.ok(test(), JSON.stringify([...hostedReports.values()]) + " " + events.slice(-24).join(" "));
   };
   await until(() =>
     [1, 2].every((id) => hostedReports.get(id)?.phase === "Retrying native observation"),

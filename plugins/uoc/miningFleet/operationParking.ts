@@ -3,6 +3,7 @@ import type { PilotSession } from "../../../web/src/plugin-api/pilotSession.ts";
 import { decodeFlightStatus, getFlightStatus } from "../../../web/src/plugin-api/flying.ts";
 import { parkWithPolicy, type ParkingDestination, type ParkingOptions } from "../shared/parking.ts";
 import type { SynchronousStore } from "./targetBoard.ts";
+import { FleetObservationUnavailable, fleetReadFailed } from "./stopSignal.ts";
 
 /** WC74 miningOperationStop.js @ 213da333: manual STAY has no route; deadline still parks. */
 export type OperationParkingPolicy =
@@ -97,7 +98,8 @@ export async function observeSettledInPlace(
       document.write(structuredClone(next));
       state = next;
     },
-    deadline = clock() + 90000;
+    observationWindow = 90_000,
+    deadline = clock() + observationWindow;
   while (clock() < deadline) {
     current();
     const raw = (
@@ -105,7 +107,7 @@ export async function observeSettledInPlace(
         ...session.flow.requestOptions(),
         baseUrl: run.baseUrl,
         fetch: run.fetch,
-      })
+      }).catch(fleetReadFailed)
     ).flight;
     current();
     const f = decodeFlightStatus(raw);
@@ -137,7 +139,7 @@ export async function observeSettledInPlace(
       f.transition?.phase === "ready" &&
       f.shipMode &&
       f.shipMode.toUpperCase() !== "WARP" &&
-      state.pending === null
+      (!state.pending || clock() - state.pending.issuedAt >= observationWindow)
     ) {
       save({ ...state, pending: { issuedAt: clock(), acknowledged: false } });
       try {
@@ -146,13 +148,13 @@ export async function observeSettledInPlace(
         current();
         save({ ...state, pending: { ...state.pending!, acknowledged: true } });
       } catch {
-        /* Original dispatch remains fenced until physical STOP; no replay. */
+        // Wait for the ship's actual movement before deciding whether it still needs Stop.
       }
     }
     await wait(1000);
   }
-  throw Error(
-    "In-place movement remains unresolved; the original stop intent and pilot custody are retained.",
+  throw new FleetObservationUnavailable(
+    "In-place movement remains unresolved. Recheck the held ship's current movement.",
   );
 }
 export async function parkAtOperationHome(

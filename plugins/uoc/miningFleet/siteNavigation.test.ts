@@ -134,8 +134,8 @@ function fixture() {
       config.readSites = read;
     },
     warps: () => warps,
-    setFail: () => {
-      fail = true;
+    setFail: (value = true) => {
+      fail = value;
     },
     setReplaced: () => {
       replaced = true;
@@ -162,8 +162,8 @@ function fixture() {
     setPosition: (n: number) => {
       position = n;
     },
-    advance: () => {
-      clock += 10;
+    advance: (ms = 10) => {
+      clock += ms;
     },
     setMode: (s: string) => {
       mode = s;
@@ -241,6 +241,21 @@ test("coordinates during warp are not arrival proof", async () => {
   const nav = x.make();
   assert.equal(await nav.observeArrival(), false);
   assert.equal(x.warps(), 0);
+});
+
+test("a lost site warp gets a new route only after a fresh stopped ship remains outside the same site", async () => {
+  const x = fixture();
+  x.setFail();
+  await assert.rejects(x.make().navigate(), /reply lost/);
+  x.advance(101);
+  x.setMode("WARP");
+  await assert.rejects(x.make().navigate(), /unknown/);
+  assert.equal(x.warps(), 1);
+  x.setMode("STOP");
+  x.setFail(false);
+  await x.make().navigate();
+  assert.equal(x.warps(), 2);
+  assert.ok(x.make().snapshot().arrivedAt);
 });
 
 test("stale scanner data and a missing exact site cannot authorize movement", async () => {

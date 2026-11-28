@@ -46,6 +46,7 @@ import { createSiteDiscovery, claimedSiteRocks } from "./siteDiscovery.ts";
 import { targetKey } from "./targetBoard.ts";
 import { timed, type MccTiming } from "./timing.ts";
 import { deleteFleetCycles } from "./executionDocuments.ts";
+import { bridgeCallQueueTimeout, transientNativeRead } from "../shared/progressDeadline.ts";
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const valid = (n: unknown): n is number =>
   typeof n === "number" && Number.isSafeInteger(n) && n > 0;
@@ -316,17 +317,19 @@ export async function createFleetMiningCycle(
     : null;
   const get = async (url: string) => {
     current();
-    const response = await run.fetch(new URL(url, run.baseUrl)),
+    const response = await run.fetch(new URL(url, run.baseUrl)).catch(fleetReadFailed),
       body = await response.json().catch((error) => {
         if (response.ok) throw error;
         return null;
       });
     current();
     if (!response.ok || body?.ok !== true)
-      throw Object.assign(Error(body?.message ?? `Native mining read failed: ${url}`), {
-        code: body?.error,
-        status: response.status,
-      });
+      fleetReadFailed(
+        Object.assign(Error(body?.message ?? `Native mining read failed: ${url}`), {
+          code: body?.error,
+          status: response.status,
+        }),
+      );
     return body;
   };
   let freightStatus: FreightStatus | null = null;
@@ -512,7 +515,7 @@ export async function createFleetMiningCycle(
   }
   async function moduleState(m: { itemID: number; typeID: number; flagID: number }) {
     current();
-    const raw = await f.bridgeAsk("dogmaIM", "ItemGetInfo", [m.itemID]);
+    const raw = await f.bridgeAsk("dogmaIM", "ItemGetInfo", [m.itemID]).catch(fleetReadFailed);
     current();
     return decodeModuleObservation(raw, {
       moduleID: m.itemID,
@@ -701,7 +704,7 @@ export async function createFleetMiningCycle(
     const targetRead = await timed(
       timing,
       "mining-targets-read",
-      () => get("/api/bridge/targets").catch(fleetReadFailed),
+      () => get("/api/bridge/targets"),
       undefined,
       15000,
     );
@@ -921,11 +924,11 @@ export async function createFleetMiningCycle(
   };
   function observeApproach(
     space: Awaited<ReturnType<typeof readMiningReadiness>>["space"],
-    claim?: Claim,
+    claim: Claim,
   ) {
     const a = state.approach;
     if (!a) return true;
-    if (claim && (a.claimKey !== claim.key || a.claimGeneration !== claim.generation))
+    if (a.claimKey !== claim.key || a.claimGeneration !== claim.generation)
       throw Error("Fleet approach claim changed; reconciliation is required.");
     const own = space.entities.filter((e) => e.itemID === shipID),
       targets = space.entities.filter((e) => e.itemID === a.targetID);
@@ -935,16 +938,22 @@ export async function createFleetMiningCycle(
       !Number.isFinite(space.sampledAtMs)
     )
       return false;
+    if (targets.length > 1)
+      throw new FleetObservationUnavailable(
+        "The previous approach target is ambiguous in the current scene.",
+      );
     const ship = own[0]!,
       mode = ship.mode?.toUpperCase(),
-      matches =
-        mode === "FOLLOW" &&
-        ship.targetEntityID === a.targetID &&
-        space.ship?.followRange === a.range;
+      following = mode === "FOLLOW" && valid(ship.targetEntityID),
+      matchingTarget = following && ship.targetEntityID === a.targetID,
+      followRange = space.ship?.followRange,
+      matches = matchingTarget && followRange === a.range;
     // Native scene time can lag WC's wall clock. Compare snapshots from the
     // same clock; issuedAt is only for the local settle and watchdog windows.
-    const fresh = space.sampledAtMs! > a.beforeSampledAt;
-    const target = targets.length === 1 ? targets[0] : null,
+    const fresh = space.sampledAtMs! > a.beforeSampledAt,
+      now = approachNow();
+    const target = targets[0],
+      targetGone = !target || target.remainingQuantity === 0,
       physical =
         !!target &&
         target.geometryAvailable &&
@@ -959,7 +968,23 @@ export async function createFleetMiningCycle(
             target.radius -
             space.ship.radius,
         ) <= a.range;
-    if (fresh && (matches || (mode === "STOP" && physical))) {
+    // A settled ship or a different native follow is enough to replan from
+    // the current grid. Neither establishes what happened to the old order.
+    const idle =
+        mode === "STOP" &&
+        space.ship?.geometryAvailable &&
+        (targetGone || target?.geometryAvailable),
+      otherFollow =
+        following && (!matchingTarget || (typeof followRange === "number" && !matches));
+    if (
+      fresh &&
+      now >= a.settleUntil &&
+      ((idle && (targetGone || !physical)) || otherFollow || (matchingTarget && targetGone))
+    ) {
+      saveApproach(null);
+      return true;
+    }
+    if (fresh && !targetGone && (matches || (mode === "STOP" && physical))) {
       if (a.status !== "observed")
         saveApproach({
           ...a,
@@ -973,27 +998,10 @@ export async function createFleetMiningCycle(
       saveApproach(null);
       return true;
     }
-    if (
-      a.status !== "pending" &&
-      a.status !== "observed" &&
-      mode === "STOP" &&
-      fresh &&
-      approachNow() >= a.settleUntil
-    ) {
-      saveApproach({
-        ...a,
-        status: "observed",
-        observedVia: "stopped-after-settle",
-        observedSampledAt: space.sampledAtMs,
-      });
-      return true;
-    }
-    if (!setup.site && fresh && !target && a.status !== "pending" && (mode === "STOP" || matches)) {
-      saveApproach(null);
-      return true;
-    }
-    if (approachNow() - a.issuedAt > 30000)
-      throw Error("Fleet approach outcome remains unresolved; no replay.");
+    if (now - a.issuedAt > 30_000)
+      throw new FleetObservationUnavailable(
+        "Waiting for a fresh observation of the ship's current movement before approaching.",
+      );
     return false;
   }
 
@@ -1583,6 +1591,14 @@ export async function createFleetMiningCycle(
             });
             return "blocked" as const;
           }
+          const queueRejected = bridgeCallQueueTimeout(error);
+          if (queueRejected || transientNativeRead(error)) {
+            if (queueRejected) saveApproach(null);
+            throw new FleetObservationUnavailable(
+              error instanceof Error ? error.message : String(error),
+              { cause: error },
+            );
+          }
           throw error;
         }
         return "blocked" as const;
@@ -1777,11 +1793,8 @@ export async function createFleetMiningCycle(
       current();
       if (compression?.snapshot().pending && !(await compression.reconcile()))
         throw Error("Compression outcome remains unknown; Stop retains custody.");
-      if (state.approach && state.approach.status !== "observed") {
-        const scene = await readMiningReadiness(run, session, shipID, setup.systemID, current);
-        if (!scene.ready || !observeApproach(scene.space))
-          throw Error("Fleet approach outcome remains unresolved; Stop retains custody.");
-      }
+      // The caller verifies live flight before Warp or Parking. The previous
+      // steering order has no bearing on shutting down modules or recalling drones.
       if (state.pending?.kind === "mining-cycle") await reconcileMiningEffect();
       if (
         state.pending?.kind === "target-lock" &&
@@ -1833,10 +1846,9 @@ export async function createFleetMiningCycle(
       current();
       if (compression?.snapshot().pending && !(await compression.reconcile()))
         throw Error("Compression outcome remains unknown; release retains custody.");
-      if (state.approach && state.approach.status !== "observed")
-        throw Error("Fleet approach outcome remains unresolved; no release.");
       if (state.pending)
         throw Error("Fleet mining mutation requires reconciliation before release.");
+      state.approach = null;
       state.closed = true;
       save();
     },

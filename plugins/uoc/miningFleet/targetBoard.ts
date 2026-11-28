@@ -198,7 +198,7 @@ export function createTargetBoard(
     const entry = current(key);
     return !isDangerous(key) && (entry?.state === "AVAILABLE" || (!entry && !visited));
   }
-  function reopenDepletedBelt(key: string) {
+  function depletedBelt(key: string) {
     const entry = state.entries[key];
     if (
       entry?.target.kind !== "BELT" ||
@@ -206,7 +206,12 @@ export function createTargetBoard(
       entry.claim !== null ||
       entry.quarantinedClaim
     )
-      return false;
+      return null;
+    return entry;
+  }
+  function reopenDepletedBelt(key: string) {
+    const entry = depletedBelt(key);
+    if (!entry) return false;
     commit({
       ...state,
       entries: { ...state.entries, [key]: { ...entry, state: "AVAILABLE", depletion: null } },
@@ -214,7 +219,11 @@ export function createTargetBoard(
     return true;
   }
   function resetDepletedBelt(key: string) {
-    return !isDangerous(key) && reopenDepletedBelt(key);
+    if (isDangerous(key) || !depletedBelt(key)) return false;
+    const entries = { ...state.entries };
+    delete entries[key];
+    commit({ ...state, entries });
+    return true;
   }
   function observeRestoredBelt(target: BeltTarget, observedAt: number) {
     const key = targetKey(target),

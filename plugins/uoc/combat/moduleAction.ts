@@ -1,4 +1,5 @@
 import { targetNotLockedRefusal } from "../mining/activation.ts";
+import { bridgeCallQueueTimeout } from "../shared/progressDeadline.ts";
 import type { SecurityStorage } from "./journal.ts";
 
 /** One module command in one exact room and target generation. A new generation
@@ -37,7 +38,7 @@ export interface CombatModuleActionDeps {
   /** After an ACK only: same room, fresh absence and this module physically inactive. */
   targetAbsent?(action: CombatModuleAction, error: unknown): Promise<boolean>;
   /** Defender weapons reconcile on the next normal module observation. */
-  observeWeapon?(action: CombatModuleAction): Promise<"active" | "inactive" | null>;
+  observeWeapon?(action: CombatModuleAction, fresh: boolean): Promise<"active" | "inactive" | null>;
   /** Receipt writes after a native answer only require the original held owner. */
   receiptCurrent?(): void;
   reacquireLock?: boolean;
@@ -127,15 +128,15 @@ export async function executeCombatModuleAction(
     d.document.write(doc);
   };
   const settleWeapon = async (entry: Entry) => {
-    const effect = await observeWeapon!(entry.action);
+    const newTarget = entry.action.targetID !== action.targetID;
+    const effect = await observeWeapon!(entry.action, newTarget && entry.status === "DISPATCHED");
     d.current();
     if (effect === "active") {
       save({ ...entry, status: "CONFIRMED" });
       return;
     }
-    // The next native read may show that an acknowledged activation ended
-    // between samples. Inactivity alone cannot settle a lost write response.
-    if (effect === "inactive" && entry.status === "ACKNOWLEDGED") {
+    // A fresh inactive gun can serve a different target without replaying the old shot.
+    if (effect === "inactive" && (entry.status === "ACKNOWLEDGED" || newTarget)) {
       save({ ...entry, status: "SETTLED_INACTIVE" });
       return "inactive" as const;
     }
@@ -204,6 +205,19 @@ export async function executeCombatModuleAction(
     try {
       await d.activate(action);
     } catch (error) {
+      if (bridgeCallQueueTimeout(error)) {
+        // Admission failed before dispatch. Keep every other module's record.
+        receiptCurrent();
+        const { doc } = load();
+        doc.entries = doc.entries.filter(
+          (row) =>
+            row?.action?.key !== entry.action.key ||
+            row.status !== "DISPATCHED" ||
+            row.issuedAt !== entry.issuedAt,
+        );
+        d.document.write(doc);
+        throw error;
+      }
       if (alreadyActiveRefusal(error)) {
         receiptCurrent();
         save({ ...entry, status: "REFUSED" });

@@ -63,6 +63,7 @@ function fixture() {
     lose: () => {
       lose = true;
     },
+    restore: () => { lose = false; },
     commands: () => commands,
   };
 }
@@ -113,4 +114,17 @@ test("lost acknowledgement is never resent and a later native STOP reconciles", 
   );
   assert.equal(f.commands(), 1);
   assert.equal((f.doc.read() as any).history[0].acknowledged, false);
+});
+
+test("fresh FOLLOW after a lost Stop permits a new movement decision on the same ship", async () => {
+  const f = fixture();
+  const settle = () => observeSettledInPlace(f.run, f.session, 11, () => {}, f.doc,
+    { operationID: "op", runID: "run" }, f.now, f.wait);
+  f.lose();
+  await assert.rejects(settle(), /unresolved/);
+  f.restore();
+  const proof = await settle();
+  assert.equal(proof.inSpace, true);
+  assert.equal(f.commands(), 2);
+  assert.equal((f.doc.read() as any).pending, null);
 });

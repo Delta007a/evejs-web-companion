@@ -5,6 +5,8 @@ import {
   decodeDroneBay,
   decodeTargetIDs,
   getTargets,
+  isSlotFlag,
+  loadFitting,
   REPAIR_CAP_FLOOR,
 } from "../../../web/src/plugin-api/flying.ts";
 import { createSecurityFighter, type FighterFrame, type FighterTarget } from "./fighter.ts";
@@ -81,6 +83,7 @@ export interface PilotFighterDeps<I = Identity> {
   fenceRoomForAbsence?: () => Promise<void>;
   defender?: {
     protectedShips: readonly number[];
+    settling?(): boolean;
     recall?: (ids: readonly number[]) => Promise<boolean>;
     timing?: MccTiming;
     preparation: DefenderPreparation;
@@ -448,6 +451,7 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
     if (attempt) {
       attempt.confirmed = false;
       attempt.seenInStore = false;
+      attempt.unknown = false;
       attempt.retryAllowed = true;
     }
     if (destroyed || !view.entities.some((row) => row.itemID === target)) {
@@ -570,6 +574,7 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
       defenderWeaponRevision++;
     }
     attempt.confirmed = true;
+    attempt.unknown = false;
   };
   const observeLockedRoster = (ids: readonly number[], source: string) => {
     lockRoster = new Set(ids);
@@ -590,11 +595,12 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
           if (
             !attempt.work &&
             !attempt.confirmed &&
-            !attempt.unknown &&
             now >= attempt.retryAt &&
             acquiring?.includes(id) === false
-          )
+          ) {
+            attempt.unknown = false;
             attempt.retryAllowed = true;
+          }
       })
       .catch((error) => diagnostic("weapon-unavailable", { reason: String(error) }))
       .finally(() => {
@@ -702,6 +708,9 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
         current: guard,
         receiptCurrent: current,
         now,
+        superseded: (prior) =>
+          absentTargets.has(prior.targetID) || defenderLocks.get(prior.targetID)?.confirmed === true ||
+          (prior.targetID === target && existing?.retryAllowed === true && !existing.unknown),
         fence: async () => {
           await checkTarget(target, view);
           const rat = view.entities.find((e) => e.itemID === target);
@@ -1071,7 +1080,11 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
                 () => {},
               );
             } catch (error) {
-              if (!alreadyActiveRefusal(error) && !optionalRefusal(error))
+              if (
+                !bridgeCallQueueTimeout(error) &&
+                !alreadyActiveRefusal(error) &&
+                !optionalRefusal(error)
+              )
                 state.droneUnresolved = true;
               throw error;
             }
@@ -1368,7 +1381,11 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
       throw new FleetObservationUnavailable("Combat ship identity is unreadable.");
     const shipID = s.shipID;
     const deployed = s.entities.filter(
-      (e) => e.kind === "drone" && (e.ownerID === run.characterID || e.controllerID === shipID),
+      (e) =>
+        e.kind === "drone" &&
+        (env.defender
+          ? e.ownerID === run.characterID && e.controllerID === shipID
+          : e.ownerID === run.characterID || e.controllerID === shipID),
     );
     const drones = deployed.map((e) => fighterDrone(e, shipID));
     for (const drone of drones) droneCustody.add(drone.itemID);
@@ -1810,6 +1827,7 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
                 );
               } catch (error) {
                 current();
+                if (bridgeCallQueueTimeout(error)) retiringWeapons.delete(id);
                 diagnostic("weapon-unavailable", {
                   moduleID: id,
                   target,
@@ -1869,7 +1887,7 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
                 return info.targets.includes(target);
               },
               observeWeapon: before
-                ? async (prior) => {
+                ? async (prior, fresh) => {
                     if (
                       prior.characterID !== run.characterID ||
                       prior.shipID !== f.shipID ||
@@ -1879,7 +1897,7 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
                       throw Error("Combat weapon action identity changed.");
                     let info;
                     try {
-                      info = await readEffect();
+                      info = fresh ? await readNativeEffect() : await readEffect();
                     } catch (error) {
                       guard();
                       if (error instanceof FleetObservationUnavailable) return null;
@@ -2070,6 +2088,7 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
           "essential",
         );
       } catch (error) {
+        if (env.defender && bridgeCallQueueTimeout(error)) throw error;
         if (!env.defender || !definiteRefusal(error)) {
           launchUnknown = true;
           state.droneUnresolved = true;
@@ -2293,7 +2312,6 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
         sceneSampledAt: preEngage.sampledAtMs,
       });
       let result: unknown;
-      dispatched?.();
       const engageEvidence = {
         targetID: target,
         droneCount: ids.length,
@@ -2308,15 +2326,16 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
             boundedDroneWrite(
               () => ask("entity", "CmdEngage", [[...ids], target]),
               DRONE_NATIVE_IO_TIMEOUT_MS,
-              () => {
-                state.droneUnresolved = true;
-              },
+              () => {},
             ),
           engageEvidence,
           0,
           "essential",
         );
       } catch (error) {
+        if (env.defender && bridgeCallQueueTimeout(error)) throw error;
+        dispatched?.();
+        state.droneUnresolved = true;
         if (!env.defender || !definiteRefusal(error)) throw error;
         guard();
         diagnostic("drone-engage-refused", {
@@ -2325,6 +2344,7 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
         });
         return "unavailable" as const;
       }
+      dispatched?.();
       diagnostic("engage-response", { ids, target, result });
       const confirmAbsent = async (observed?: Scene) => {
         const id = state.currentIdentity;
@@ -2455,6 +2475,7 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
             );
           } catch (error) {
             guard();
+            if (bridgeCallQueueTimeout(error)) retiringWeapons.delete(id);
             if (!definiteRefusal(error) && !transientNativeRead(error)) throw error;
           }
         }
@@ -2469,8 +2490,8 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
         }
       } else if (state.droneUnresolved)
         throw new Error("A drone command remains in flight; custody is retained.");
-      // A pending target acquisition cannot activate a module. MCC still checks
-      // the ship's effects and drones before moving, even with an older lock record.
+      // Leaving the grid uses the ship's current effects and drones. No old command is reissued.
+      const settlingDefender = env.defender?.settling?.() === true;
       if (env.moduleDocuments) {
         const { locks, actions } = env.moduleDocuments;
         for (const document of env.defender ? [actions] : [locks, actions]) {
@@ -2484,7 +2505,7 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
               !Array.isArray(doc.entries) ||
               doc.entries.some((entry) => {
                 if (entry.status === "ACKNOWLEDGED") return document === actions && !env.defender;
-                return entry.status === "DISPATCHED";
+                return entry.status === "DISPATCHED" && !settlingDefender;
               }))
           )
             throw Error(
@@ -2496,7 +2517,7 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
       }
       const beforeStop = await boundedDroneRead(flight, DRONE_NATIVE_IO_TIMEOUT_MS);
       const reloads = env.moduleDocuments?.reloads;
-      if (reloads) {
+      if (reloads && !settlingDefender) {
         const unresolved = () => {
           const doc = reloads.read() as { version?: number; rows?: { status?: string }[] } | null;
           return (
@@ -2521,10 +2542,6 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
         if (unresolved())
           throw Error("A combat ammunition reload remains unresolved; custody is retained.");
       }
-      await boundedDroneRead(
-        () => ask("invCache", "InvalidateLocationCache", [beforeStop.shipID]),
-        DRONE_NATIVE_IO_TIMEOUT_MS,
-      );
       if (beforeStop.docked && droneCustody.size === 0) return;
       // Scene and fresh bay are independent of the panel's cached-bay filter.
       const recallDeadline = Date.now() + 90000;
@@ -2636,37 +2653,45 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
       if (f.docked) return;
       if (!f.inSpace) throw new Error("Security module settlement location is unreadable.");
       await ask("invCache", "InvalidateLocationCache", [f.shipID]);
-      const flags = [
-        ...Array.from({ length: 24 }, (_, i) => 11 + i),
-        ...Array.from({ length: 8 }, (_, i) => 92 + i),
-        ...Array.from({ length: 8 }, (_, i) => 125 + i),
-      ];
-      const fit = await Promise.all(
-        flags.map(async (flag) => ({
-          flag,
-          rows: checkedInventory(await ask("invbroker", "List", [flag], f.shipID)),
-        })),
+      const fit = await defenderRead(
+        boundedDroneRead(() => loadFitting(requestOptions()), DRONE_NATIVE_IO_TIMEOUT_MS),
       );
-      const modules: { itemID: number; typeID: number; flagID: number }[] = [],
-        seen = new Set<number>();
-      for (const { flag, rows } of fit) {
-        let count = 0;
-        for (const row of rows) {
+      current();
+      if (fit.activeShipID !== f.shipID)
+        throw new Error("Security fitted inventory is unreadable.");
+      if (fit.errors.slots !== null) {
+        const error = Object.assign(Error("Security fitted inventory: " + fit.errors.slots), {
+          code: fit.errors.slots,
+        });
+        if (env.defender) fleetReadFailed(error);
+        throw error;
+      }
+      const raw = fit.slots as any;
+      const list =
+        raw?.type === "objectex1" && raw.header?.[0]?.value === "__builtin__.set"
+          ? raw.header[1]?.[0]
+          : raw?.type === "object" && Array.isArray(raw.args)
+            ? raw.args[0]
+            : raw;
+      if (!isListValue(list)) throw new Error("Security fitted inventory is unreadable.");
+      const rows = checkedInventory({
+        type: "list",
+        items: list.items.filter((entry: any) => {
+          const row = entry?.type === "packedrow" ? entry.fields : entry;
           if (
-            row.ownerID !== run.characterID ||
+            row?.ownerID !== run.characterID ||
             row.locationID !== f.shipID ||
-            row.flagID !== flag ||
-            row.categoryID === null ||
-            seen.has(row.itemID)
+            !isSlotFlag(row.flagID) ||
+            !positive(row.categoryID)
           )
             throw new Error("Security fitted inventory is unreadable.");
-          seen.add(row.itemID);
-          if (row.categoryID === 7) {
-            if (++count > 1) throw new Error("Security fitting contains duplicate slot modules.");
-            modules.push(row);
-          }
-        }
-      }
+          // A loaded charge shares the module flag and may have a tuple ID.
+          return row.categoryID !== 8;
+        }),
+      });
+      const modules = rows.filter((row) => row.categoryID === 7).sort((a, b) => a.flagID - b.flagID);
+      if (new Set(modules.map((row) => row.flagID)).size !== modules.length)
+        throw new Error("Security fitting contains duplicate slot modules.");
       const deadline = Date.now() + 90000;
       for (;;) {
         current();
@@ -2695,7 +2720,12 @@ export function createPilotFighter<I = Identity>(env: PilotFighterDeps<I>) {
             );
             moduleStops.add(m.itemID);
             current();
-            await ask("dogmaIM", "Deactivate", [m.itemID, propulsion?.effect ?? null]);
+            try {
+              await ask("dogmaIM", "Deactivate", [m.itemID, propulsion?.effect ?? null]);
+            } catch (error) {
+              if (bridgeCallQueueTimeout(error)) moduleStops.delete(m.itemID);
+              throw error;
+            }
           }
         if (Date.now() >= deadline)
           throw new Error("Security modules did not settle before timeout.");

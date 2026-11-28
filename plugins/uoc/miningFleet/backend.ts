@@ -26,6 +26,7 @@ export function createMiningBackend() {
     {
       document: definitions.document,
       requestStop: fleet.requestOperationStop,
+      launchRefused: fleet.launchRefused,
       getWorldScope: worldForRequest,
       isOperationActive: operationHasController,
       canFinish: operationAllowsFinish,

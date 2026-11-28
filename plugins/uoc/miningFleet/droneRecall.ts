@@ -10,6 +10,7 @@ import type { PluginRunContext } from "../../../web/src/plugin-api/backend.ts";
 import type { PilotSession } from "../../../web/src/plugin-api/pilotSession.ts";
 import { boundedDroneRead, boundedDroneWrite, checkDroneEngage } from "../combat/droneAdapter.ts";
 import { fleetReadFailed } from "./stopSignal.ts";
+import { makeRoomForReturningDrones, type BeltDroneRecovery } from "./droneBayOverflow.ts";
 
 type Run = Pick<PluginRunContext, "baseUrl" | "fetch">;
 type RecallOptions = {
@@ -19,6 +20,7 @@ type RecallOptions = {
   now?: () => number;
   wait?: (ms: number) => Promise<void>;
   timeoutMs?: number;
+  beltRecovery?: BeltDroneRecovery;
 };
 
 function droneID(value: JsonValue | undefined): number | null {
@@ -106,11 +108,12 @@ export async function recallFleetDrones(
       12000,
     ).catch(fleetReadFailed);
     const { out, bay } = await readFleetDronePanel(run, session, shipID, current);
-    const selected = out.filter((row) => wanted === null || wanted.has(row.itemID));
-    for (const row of selected) expected.add(row.itemID);
+    const controlled = out.filter(
+      (row) => row.controlled && (wanted === null || wanted.has(row.itemID)),
+    );
+    for (const row of controlled) expected.add(row.itemID);
     const bayIDs = new Set(bay.map((row) => row.itemID));
     const remaining = [...expected].filter((id) => !bayIDs.has(id));
-    const controlled = selected.filter((row) => row.controlled);
     const unaccounted = remaining.filter((id) => !controlled.some((row) => row.itemID === id));
     if (!remaining.length && !controlled.length)
       return { unrecovered: [] as number[], stillControlled: [] as number[], refusal };
@@ -152,6 +155,30 @@ export async function recallFleetDrones(
           }
         }
       }
+    }
+    if (now() >= deadline && controlled.length && options.beltRecovery && wanted === null) {
+      let recovery;
+      try {
+        recovery = await makeRoomForReturningDrones(
+          run,
+          session,
+          shipID,
+          options.beltRecovery,
+          bay,
+          controlled,
+          () => readFleetDronePanel(run, session, shipID, current),
+        );
+      } catch (error) {
+        options.beltRecovery.beforeWrite();
+        refusal = error instanceof Error ? error.message : String(error);
+      }
+      if (recovery?.changed) {
+        if (recovery.notice) options.onProgress?.(recovery.notice);
+        deadline = now() + progressWindow;
+        asked.clear();
+        continue;
+      }
+      if (recovery?.notice) refusal = recovery.notice;
     }
     if (missingReads >= 2 || now() >= deadline)
       return {

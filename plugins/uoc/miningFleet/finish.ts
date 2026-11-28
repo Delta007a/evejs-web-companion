@@ -39,6 +39,7 @@ import { createHash } from "node:crypto";
 import { finishParking, retainedStopUnload, stopParkingSetup } from "./finishParking.ts";
 import { parkAtOperationHome } from "./operationParking.ts";
 import { transientNativeRead } from "../shared/progressDeadline.ts";
+import { FleetObservationUnavailable, fleetReadFailed } from "./stopSignal.ts";
 import type { FleetLaunchReceipt } from "../operations/miningLaunchJournal.ts";
 import { registerRun, runOwner } from "../runControl.ts";
 import type { Claim, SynchronousStore, createTargetBoard } from "./targetBoard.ts";
@@ -226,7 +227,7 @@ async function nativeQuiescence(
       identity = { moduleID, typeID, ownerID: run.characterID, shipID: member.shipID, flagID };
     const effects = async () => {
       current();
-      const raw = await session.flow.flying.bridgeAsk("dogmaIM", "ItemGetInfo", [moduleID]);
+      const raw = await session.flow.flying.bridgeAsk("dogmaIM", "ItemGetInfo", [moduleID]).catch(fleetReadFailed);
       current();
       return decodeModuleObservation(raw, identity).effects.filter(
         (effect) => effect.effectID !== 16,
@@ -235,7 +236,7 @@ async function nativeQuiescence(
     let active = await effects(),
       refusal = "";
     if (active.length === 1 && attemptedShutdowns && !attemptedShutdowns.has(moduleID)) {
-      const flight = decodeFlightStatus((await getFlightStatus(options)).flight);
+      const flight = decodeFlightStatus((await getFlightStatus(options).catch(fleetReadFailed)).flight);
       current();
       if (
         !flight.inSpace ||
@@ -860,7 +861,7 @@ export function createFleetFinishRun(deps: FleetFinishDependencies): BackendRun 
         options = { ...session.flow.requestOptions(), baseUrl: run.baseUrl, fetch: run.fetch };
       const heldSession = session;
       const flightNow = async () => {
-        const flight = decodeFlightStatus((await getFlightStatus(options)).flight);
+        const flight = decodeFlightStatus((await getFlightStatus(options).catch(fleetReadFailed)).flight);
         current();
         if (
           flight.shipID !== member.shipID ||
@@ -2183,12 +2184,10 @@ export function createFleetFinishRun(deps: FleetFinishDependencies): BackendRun 
           const why = [lastFlight, error instanceof Error ? error.message : String(error)]
             .filter(Boolean)
             .join(" ");
-          if (
-            !retryRequested &&
-            (transientNativeRead(error) ||
-              (error as { code?: string })?.code === "MCC_MODULE_SHUTDOWN_PENDING") &&
-            retries < 3
-          ) {
+          const retryable = error instanceof FleetObservationUnavailable ||
+            (retries < 3 && (transientNativeRead(error) ||
+              (error as { code?: string })?.code === "MCC_MODULE_SHUTDOWN_PENDING"));
+          if (!retryRequested && retryable) {
             publish({
               status: "paused",
               phase: "Retrying retained Parking",
@@ -2199,7 +2198,7 @@ export function createFleetFinishRun(deps: FleetFinishDependencies): BackendRun 
                 timer = null;
                 attempt();
               },
-              (deps.retryDelay ?? 3000) * ++retries,
+              (deps.retryDelay ?? 3000) * Math.min(++retries, 10),
             );
             timer.unref?.();
           } else

@@ -19,6 +19,7 @@ export async function executeCombatTargetLock(
     fence(): Promise<void>;
     lock(): Promise<unknown>;
     definiteRefusal?(error: unknown): boolean;
+    superseded?(prior: CombatTargetLock): boolean;
     now(): number;
   },
 ): Promise<void | "refused"> {
@@ -64,7 +65,7 @@ export async function executeCombatTargetLock(
         e.identity.key !== identity.key &&
         e.identity.characterID === identity.characterID &&
         e.identity.shipID === identity.shipID &&
-        e.status === "DISPATCHED",
+        e.status === "DISPATCHED" && !deps.superseded?.(e.identity),
     )
   )
     throw Error("Another combat target lock remains unresolved; custody retained.");

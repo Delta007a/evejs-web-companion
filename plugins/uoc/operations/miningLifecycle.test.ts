@@ -102,6 +102,42 @@ test("stock Retry Stop admits only unfinished home unloads and retires the verif
  assert.equal(runtime.stopUnload,undefined);
 });
 
+test("offline observations archive only the missing startup parking proof without requiring Retry Stop", async t => {
+  const operationID = "unverified-startup-parking", operationRunID = "partial";
+  const old = setup(operationID, operationRunID);
+  createMiningDefinitionStore(launchDocs.document("mining-definitions:" + namespace), () => "saved", () => operationID).save(definition);
+  const launchKey = "mining-launch:" + JSON.stringify([namespace, operationID]);
+  const receipt = { version: 1, revision: 1, operationID, operationRunID, planHash: "original", setupHash: setupHash(old),
+    members: members.map(m => ({ ...m, kind: "mcc-" + m.role.toLowerCase(), beforeIDs: [], status: "ACCEPTED", botID: "old-" + m.characterID })) };
+  launchDocs.document(launchKey).write(receipt);
+  const fleet = createMiningFleetRuntime({ storage: runtimeDocs, launchJournal,
+    createCycle: async () => assert.fail("No productive work during Stop"), settle: async () => assert.fail("No pilot held") });
+  t.after(() => fleet.shutdown());
+  const group = fleet.getOrCreate(old);
+  group.requestStop("RETURN_HOME");
+  group.op.requestStop();
+  assert.ok(group.op.settleMember(1, { source: "native-settlement", runID: operationRunID, shipID: 11,
+    dronesSafe: true, modulesInactive: true, observedAt: Date.now() }));
+  assert.ok(group.op.parkMember(1, { source: "native-flight", runID: operationRunID, shipID: 11,
+    docked: true, locationID: 600, observedAt: Date.now() }));
+  const routes = createMiningOperationRoutes({ document: launchDocs.document, getWorldScope: () => "world",
+    isOperationActive: () => false, operationSnapshot: fleet.operationSnapshot }, launchDocs,
+    { discardGeneration: fleet.discardGeneration });
+  const observe = async (pilotObservations: BackendPilotObservation[]) => {
+    const result = await routes["POST /mining-operations/observe"]!({ account: { accountID: 1, username: "operator" },
+      method: "POST", path: "", params: {}, query: {}, body: { generations: [{ operationID, operationRunID }] },
+      pilotObservations } as BackendRequest);
+    return (result.body as any).operations.find((r: any) => r.definition.operationID === operationID).runtime;
+  };
+  assert.equal((await observe([hostStatus(1, "OFF"), hostStatus(2, "OFF", -30000)])).operationRunID, operationRunID);
+  const archived = await observe([hostStatus(1, "OFF"), hostStatus(2, "OFF")]);
+  assert.equal(archived.state, "DRAFT");
+  assert.deepEqual(archived.unverifiedStop.unverifiedPilots, [2]);
+  assert.equal(archived.unverifiedStop.unconfirmedDeliveries, 0);
+  assert.deepEqual(fleet.operationSnapshot(operationID, operationRunID)?.parked, [1]);
+  assert.deepEqual(launchDocs.document("mining-launch-history:" + JSON.stringify([namespace, operationID, operationRunID])).read(), receipt);
+});
+
 test("an explicit Retry Stop closes an offline freight tail and retains the original unresolved transfer",async()=>{
  const operationID="offline-freight-stop",operationRunID="old",scope={operationID,operationRunID};
  const old=setup(operationID,operationRunID);

@@ -1962,12 +1962,12 @@ test("F11 held runner restart resumes persisted Stop, survives a GamePort outage
   x.holds.clear();
   x.deps.retryDelay = 1;
   const f = flightFixture(x, 1, "old-1", true);
-  f.failReads(1);
+  f.failReads(5);
   const handle = await x.run.resumeHeld(f.actor, { operationID: "op", operationRunID: "old" });
   const result = await waitTerminal(x, 1);
   assert.equal(result.status, "stopped");
   assert.equal(f.station(), 600);
-  assert.ok(x.reports.some((r) => r.phase === "Retrying retained Parking"));
+  assert.equal(x.reports.filter((r) => r.phase === "Retrying retained Parking").length, 5);
   assert.deepEqual(f.routes, [600]);
   assert.deepEqual(x.deposits, []);
   assert.deepEqual(x.released, [1]);
