@@ -1525,18 +1525,6 @@ export function createNativeMiningRun(
         if (!o) return;
         state.mission = o;
         save();
-        if (state.pending?.kind === "target-lock") {
-          const ids = decodeTargetIDs((await get("/api/bridge/targets")).targetIDs),
-            f = await flight();
-          if (ids?.includes(state.pending.details?.targetID) || (f.docked && ids?.length === 0)) {
-            state.lastLockSettlement = {
-              intent: state.pending,
-              outcome: "CURRENT_NATIVE_TARGET_STATE",
-              at: now(),
-            };
-            settled();
-          }
-        }
         if (
           state.pending?.kind === "mission-warp" &&
           state.pending.details?.mission !== identity(o)
@@ -1558,8 +1546,22 @@ export function createNativeMiningRun(
         if (continuation && state.pending?.kind === "unload") await bankCargo(o);
         if (!(await flight()).docked && (continuation || state.banked === undefined))
           await travel(o.stationID);
-        if ((await flight()).docked) {
-          if ((await flight()).stationID !== o.stationID) await travel(o.stationID);
+        const location = await flight();
+        if (state.pending?.kind === "target-lock") {
+          const { mission, targetID } = state.pending.details ?? {};
+          if (mission !== identity(o) || !Number.isSafeInteger(targetID) || targetID <= 0)
+            throw Error("The retained target lock does not match the accepted Mining mission.");
+          // Continue may just have returned from the old pocket. Read locks at the current location.
+          const { targetIDs } = await get("/api/bridge/targets");
+          if (Array.isArray(targetIDs) && targetIDs.every((id: unknown) => Number.isSafeInteger(id) && Number(id) > 0) &&
+            (targetIDs.includes(targetID) || (location.docked && !location.inSpace &&
+              (location.stationID || location.structureID) && targetIDs.length === 0))) {
+            state.lastLockSettlement = { intent: state.pending, outcome: "CURRENT_NATIVE_TARGET_STATE", at: now() };
+            settled();
+          }
+        }
+        if (location.docked) {
+          if (location.stationID !== o.stationID) await travel(o.stationID);
           state.banked = await hangar(o.content.typeID);
           save();
         }

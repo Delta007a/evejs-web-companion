@@ -15,6 +15,7 @@ type Handoff = {
   terminal?: boolean;
   replacement?: boolean;
   changedJournal?: boolean;
+  inPocket?: boolean;
 };
 type OtherMission = {
   state: 1 | 2;
@@ -914,6 +915,7 @@ async function missionScenario(
       continuation: { ...accepted, botID: saved.civilian.botID },
     });
     mission = handoff.absent ? 0 : 2;
+    if (handoff.inPocket) { docked = false; warped = true; }
     bank = Math.floor(content.quantity / 2);
     q = Math.floor(content.quantity / 4);
   }
@@ -1041,6 +1043,19 @@ test("Mining can Stop again during Continue and keeps the exact accepted mission
     [6],
   );
   assert.equal(second.reports.at(-1).phase, "Completed");
+});
+
+test("Mining Continue retires an old pocket lock at the verified dock and completes just its accepted mission", async () => {
+  const original = await handoffMining({ action: "stop", botID: "before-target-loss" });
+  const saved = structuredClone(original.saved);
+  const { miningIdentity } = await import("./history.ts");
+  saved.pending = { kind: "target-lock", details: { targetID: 876, mission: miningIdentity(saved.mission) },
+    issuedAt: Date.now() - 5000 };
+  const next = await handoffMining({ action: "continue", botID: "after-target-loss", inPocket: true }, saved);
+  assert.equal(next.saved.completed, true, JSON.stringify(next.reports.at(-1)));
+  assert.deepEqual(next.actions.filter(action => action !== null), [6]);
+  assert.ok(!next.lockIDs.includes(876));
+  assert.equal(next.saved.lastLockSettlement.intent.details.targetID, 876);
 });
 
 test("Mining Continue refuses an absent mission and reconciles a confirmed native Complete without replay", async () => {
