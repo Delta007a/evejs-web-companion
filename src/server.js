@@ -10166,24 +10166,6 @@ const MINING_HOLDS = Object.freeze([
   Object.freeze({ key: "cargo", flag: ITEM_FLAG_CARGO_HOLD, label: "Cargo hold", attributeID: null }),
 ]);
 
-// Which of the mining holds a hull HAS is written on its type, and the retail
-// client never asks the server: its inventory tree adds a hold node only when
-// the ship type's capacity attribute for it is non-zero (inventory/treeData.py,
-// GetChildren). Fitting can resize a hold but cannot give a hull one its type
-// lacks, so a hold the type does not carry is absent without a read. A type
-// the static data does not know (or no type at all) answers null: the caller
-// then reads the whole ladder, exactly as it did before it could tell.
-function miningHoldsCarriedByHull(shipTypeID) {
-  const typeID = Number(shipTypeID) || 0;
-  if (typeID <= 0 || typeof staticData.getTypeDogma !== "function" || !staticData.getTypeDogma(typeID)) {
-    return null;
-  }
-  return new Set(MINING_HOLDS
-    .filter((hold) => hold.attributeID === null ||
-      Number(staticData.getTypeDogmaAttribute(typeID, hold.attributeID, 0)) > 0)
-    .map((hold) => hold.key));
-}
-
 /** A util.KeyVal capacity reading ({capacity, used}) as plain numbers, or null. */
 function decodeCapacityReading(result) {
   const entries =
@@ -10191,43 +10173,27 @@ function decodeCapacityReading(result) {
   const read = (key) => {
     const entry = entries.find((pair) => Array.isArray(pair) && pair[0] === key);
     const value = entry ? entry[1] : undefined;
-    const numeric = Number(value && typeof value === "object" ? value.value : value);
-    return Number.isFinite(numeric) ? numeric : null;
+    const raw = value && typeof value === "object" ? value.value : value;
+    const numeric = raw == null ? NaN : Number(raw);
+    return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
   };
   const capacity = read("capacity");
   const used = read("used");
   return capacity === null && used === null ? null : { capacity, used };
 }
 
-/**
- * One hold's capacity as the retail client reckons it (shipHoldsAsTheClient):
- * its size by godma or the type, and what is used of it summed from its own
- * List. Where either cannot be had, the server is asked, as before.
- */
-async function reckonedHoldCapacity(own, flag, listed, asked) {
-  const size = await own.capacity(flag);
-  if (size === null) return asked();
-  let answer;
-  try {
-    answer = await listed;
-  } catch {
-    return asked();
-  }
-  const used = usedOfListed(answer.result, flag, own.packaged);
-  return used === null ? asked() : { result: capacityAnswer(Number(size), used) };
+// GetCapacity also supplies used volume when item volumes cannot be summed locally.
+// Its used volume must not replace a known effective ship capacity with a base size.
+function shipBayReading(result, effectiveSize, catalogSize) {
+  const native = decodeCapacityReading(result);
+  const capacity = effectiveSize ?? native?.capacity ?? catalogSize();
+  return capacity == null && !native ? null : { capacity: capacity ?? null, used: native?.used ?? null };
 }
 
-/**
- * Which of the mining holds a ship carries, and (on the game port) its holds as the client knows them. A hold the
- * hull's type does not carry is not read: it answers what the server would (nothing in it, no capacity), and costs
- * the server nothing. The hull's type only counts when flight status names THIS ship; the gateway reports a null
- * type while a ship change is still settling, and every hold is then read.
- */
-async function miningHoldsOfShip(held, webSessionID, shipID, status) {
-  const flight = (status && status.flight) || {};
-  const carried = Number(flight.shipID) === Number(shipID) ? miningHoldsCarriedByHull(flight.shipTypeID) : null;
+async function miningHoldsOfShip(held, webSessionID, shipID) {
   const own = await shipHoldsAsTheClient(held, webSessionID, Number(shipID));
-  return { own, carries: (hold) => (own ? own.has(hold.flag) !== false : carried === null || carried.has(hold.key)) };
+  const effective = new Map(await Promise.all(MINING_HOLDS.map(async ({ flag }) => [flag, await own?.capacity(flag)])));
+  return { own, effective, carries: ({ flag }) => effective.get(flag) !== 0 };
 }
 
 // Read the ship's mining holds. Every hold in the ladder is read independently
@@ -10247,16 +10213,37 @@ app.get("/api/bridge/ship/ore-hold", requireAuth, async (req, res, next) => {
       return;
     }
     const spec = cargoBindSpec(held, shipID);
-    // ⚠ THE RETAIL CLIENT NEVER ASKS HOW FULL A HOLD IS (invCache.py 1224,
-    // godma.py 871). On the game port a hold's capacity is reckoned as the
-    // client reckons it, and the server is asked for the hold's List alone.
-    const { own, carries } = await miningHoldsOfShip(held, req.webSessionID, shipID, status);
+    // Use effective Dogma when available. If the ship's current capacity is
+    // unknown, the inventory service can supply it alongside the contents.
+    const { own, effective, carries } = await miningHoldsOfShip(held, req.webSessionID, shipID);
+    const flight = status?.flight;
+    const typeID = Number(flight?.shipID) === Number(shipID) ? Number(flight.shipTypeID) : 0;
+    const catalogSize = (hold) => {
+      const size = own?.catalogCapacity(hold.flag);
+      if (size != null || !typeID) return size ?? null;
+      if (hold.attributeID == null) return staticData.getType(typeID)?.capacity ?? null;
+      return staticData.getTypeDogmaAttribute?.(typeID, hold.attributeID, null) ?? null;
+    };
+    const capacityOf = async (hold, listed) => {
+      const size = effective.get(hold.flag);
+      if (size != null && own?.packaged) {
+        const answer = await listed.catch(() => null);
+        const used = answer && usedOfListed(answer.result, hold.flag, own.packaged);
+        if (used != null) return { capacity: size, used };
+      }
+      const native = await boundCall(held, req.webSessionID, spec, "GetCapacity", [hold.flag], null);
+      const reading = shipBayReading(native.result, size, () => catalogSize(hold));
+      if (size == null && reading && reading.used == null && own?.packaged) {
+        const answer = await listed.catch(() => null);
+        if (answer) reading.used = usedOfListed(answer.result, hold.flag, own.packaged);
+      }
+      return reading;
+    };
     const settled = await Promise.allSettled(
       MINING_HOLDS.flatMap((hold) => {
         if (!carries(hold)) return [null, null];
         const listed = boundCall(held, req.webSessionID, spec, "List", [hold.flag], null);
-        const asked = () => boundCall(held, req.webSessionID, spec, "GetCapacity", [hold.flag], null);
-        return [listed, own ? reckonedHoldCapacity(own, hold.flag, listed, asked) : asked()];
+        return [listed, capacityOf(hold, listed)];
       }),
     );
     for (const entry of settled) {
@@ -10292,8 +10279,9 @@ app.get("/api/bridge/ship/ore-hold", requireAuth, async (req, res, next) => {
               quantity: row.quantity,
             }))
           : null;
-      const reading =
-        capacity.status === "fulfilled" ? decodeCapacityReading(capacity.value.result) : null;
+      const size = effective.get(hold.flag);
+      const reading = capacity.status === "fulfilled" ? capacity.value :
+        size != null ? { capacity: size, used: null } : null;
       return {
         // A NAME, never a flag number. The browser has no idea 134 exists.
         key: hold.key,
@@ -10671,44 +10659,31 @@ async function hangarShipTypeID(held, webSessionID, shipID) {
   return row ? row.typeID : 0;
 }
 
-/**
- * What it takes to know a ship's bays as the retail client knows them, or null
- * where that cannot be followed: off the game port, with no client to read its
- * tables from, with static tables that know no type's attributes, or for a
- * ship whose type cannot be found.
- *
- * ⚠ THE RETAIL CLIENT ASKS THE SERVER NONE OF THIS. Its inventory tree says
- * which bays a ship has from the ship's TYPE (treeData.py 300 to 363), and a
- * bay's size is godma's value of that bay's attribute for the ship being flown
- * (godma.py 871) and the type's own for any other, which its dogma has not
- * loaded (clientDogmaIM.GetCapacityForItem answers None; invCache.py 1268 on).
- * The ship being flown and its type are the transport's to say, from the
- * session and godma. A ship in the hangar has its type in the hangar's list,
- * which the client holds and this reads.
- */
+/** Effective Dogma belongs to the ship being flown. Keep its readings independent of the hull catalog. */
 async function shipHoldsAsTheClient(held, webSessionID, shipID) {
   if (!gamePortPilots || !isGamePortHandle(held.bridgeSessionID) || typeof gamePortPilots.ship !== "function") return null;
-  if (typeof staticData.getTypeDogmaAttributeOrDefault !== "function") return null;
   const [holds, packaged] = await Promise.all([clientConstants.holdAttributes(), clientConstants.packagedVolumes()]);
-  if (!holds || !packaged) return null;
+  if (!holds) return null;
   const sessionFields = { userid: held.accountID };
   const flown = await gamePortPilots.ship(sessionFields, held.bridgeSessionID);
   const active = Number(flown.shipID) === shipID;
   const typeID = active ? Number(flown.typeID) || 0 : await hangarShipTypeID(held, webSessionID, shipID);
   const type = typeID > 0 ? staticData.getType(typeID) : null;
-  if (!type) return null;
   return {
     packaged,
-    /** Whether the hull has the bay: true, false, or null for a flag the client's table has not. */
-    has: (flag) => shipHasHold(flag, (attributeID) => staticData.getTypeDogmaAttribute(typeID, attributeID, null), Number(type.groupID), holds),
-    /** How big the bay is, or null where neither godma nor the type says. */
     async capacity(flag) {
       const attributeID = holds.byFlag.get(flag);
-      const live = active ? await gamePortPilots.shipAttribute(attributeID, sessionFields, held.bridgeSessionID) : null;
-      if (live !== null) return live;
-      // evetypes.GetCapacity for the cargo; a type's attribute, or the attribute's own default, for any other.
-      const cargo = flag === holds.cargoFlag && type.capacity !== null && type.capacity !== undefined ? Number(type.capacity) : NaN;
-      return Number.isFinite(cargo) ? cargo : staticData.getTypeDogmaAttributeOrDefault(typeID, attributeID, null);
+      if (!active || attributeID === undefined) return null;
+      const size = await gamePortPilots.shipAttribute(attributeID, sessionFields, held.bridgeSessionID);
+      return Number.isFinite(size) && size >= 0 ? size : null;
+    },
+    catalogCapacity(flag) {
+      const attributeID = holds.byFlag.get(flag);
+      if (!type || attributeID === undefined) return null;
+      if (flag === holds.cargoFlag && type.capacity != null) return type.capacity;
+      if (typeof staticData.getTypeDogmaAttribute !== "function" || typeof staticData.getTypeDogmaAttributeOrDefault !== "function") return null;
+      const has = shipHasHold(flag, (id) => staticData.getTypeDogmaAttribute(typeID, id, null), Number(type.groupID), holds);
+      return has === false ? 0 : staticData.getTypeDogmaAttributeOrDefault(typeID, attributeID, null);
     },
   };
 }
@@ -10756,32 +10731,31 @@ app.get("/api/bridge/ship/:shipID/bays", requireAuth, async (req, res, next) => 
   try {
     // A bay as the SERVER answers it: one capacity read for its flag. Each is
     // independent: a hull that refuses one bay must not blank the others.
-    const asked = async (bay) => {
+    const own = await shipHoldsAsTheClient(held, req.webSessionID, shipID);
+    const asked = async (bay, effectiveSize = null) => {
       let outcome;
       try {
         outcome = await boundCall(held, req.webSessionID, spec, "GetCapacity", [bay.flag], null);
       } catch (error) {
         if (error && error.code === "SESSION_NOT_FOUND") throw error;
         // Could not look. NOT "the hull lacks this bay".
-        return { bay, capacity: null, present: null, error: String((error && error.code) || "READ_FAILED") };
+        return {
+          bay, capacity: effectiveSize == null ? null : { capacity: effectiveSize, used: null },
+          present: effectiveSize == null ? null : effectiveSize > 0, error: String(error?.code || "READ_FAILED"),
+        };
       }
-      const reading = decodeCapacityReading(outcome.result);
+      const reading = shipBayReading(outcome.result, effectiveSize, () => own?.catalogCapacity(bay.flag));
       if (reading === null || reading.capacity === null) {
         return { bay, capacity: reading, present: null, error: "NO_CAPACITY_REPORTED" };
       }
       return { bay, capacity: reading, present: Number(reading.capacity) > 0, error: null };
     };
-    // A bay as the CLIENT knows it (shipHoldsAsTheClient): there or not by the
-    // hull's type, its size by godma or the type. What is used of it comes with
-    // its contents, below. A bay that cannot be known so is asked about.
-    const own = await shipHoldsAsTheClient(held, req.webSessionID, shipID);
     const reckoned = async (bay) => {
-      const has = own.has(bay.flag);
-      if (has === null) return asked(bay);
-      if (!has) return { bay, capacity: { capacity: 0, used: 0 }, present: false, error: null };
-      const capacity = await own.capacity(bay.flag);
-      if (capacity === null) return asked(bay);
-      return { bay, capacity: { capacity: Number(capacity), used: null }, present: true, error: null, reckoned: true };
+      const size = await own.capacity(bay.flag);
+      if (size == null) return asked(bay);
+      if (size === 0) return { bay, capacity: { capacity: 0, used: 0 }, present: false, error: null };
+      if (!own.packaged) return asked(bay, size);
+      return { bay, capacity: { capacity: size, used: null }, present: true, error: null, reckoned: true };
     };
     const readings = await Promise.all(wanted.map((bay) => (own ? reckoned(bay) : asked(bay))));
 
@@ -10804,10 +10778,10 @@ app.get("/api/bridge/ship/:shipID/bays", requireAuth, async (req, res, next) => 
         // What is used of a bay the client's way: the volume of what this very list holds in its flag. A bay
         // with something in it whose volume is not known here has the server say how full it is.
         await Promise.all(readings.map(async (entry, index) => {
-          if (!entry.reckoned) return;
+          if (!entry.present || entry.capacity.used != null || !own?.packaged) return;
           const used = usedOfListed(listed.result, entry.bay.flag, own.packaged);
-          if (used === null) readings[index] = await asked(entry.bay);
-          else entry.capacity.used = used;
+          if (used != null) entry.capacity.used = used;
+          else if (entry.reckoned) readings[index] = await asked(entry.bay, entry.capacity.capacity);
         }));
         byFlag = new Map(presentReadings.map((entry) => [entry.bay.flag, []]));
         // Each stack's unit volume as the client's GetItemVolume has it (packaged where it is not assembled), as the
@@ -11140,7 +11114,7 @@ function decodeReprocessingQuotes(result) {
  * listings are read for them: the hangar's first, and the ship's holds down the ladder only while an item is still
  * to be found. An item that is in none of them, or whose row names no place, has no place here.
  */
-async function reprocessingPlacesOf(held, webSessionID, itemIDs, status) {
+async function reprocessingPlacesOf(held, webSessionID, itemIDs) {
   const wanted = new Set(itemIDs);
   const places = new Map();
   const allFoundIn = (listed) => {
@@ -11152,7 +11126,7 @@ async function reprocessingPlacesOf(held, webSessionID, itemIDs, status) {
   if (allFoundIn(await boundCall(held, webSessionID, hangarBindSpec(held), "List", [ITEM_FLAG_HANGAR], null))) return places;
   const shipID = Number(held.activeShipID) || 0;
   if (shipID <= 0) return places;
-  const { carries } = await miningHoldsOfShip(held, webSessionID, shipID, status);
+  const { carries } = await miningHoldsOfShip(held, webSessionID, shipID);
   const spec = cargoBindSpec(held, shipID);
   for (const hold of MINING_HOLDS.filter(carries)) {
     if (allFoundIn(await boundCall(held, webSessionID, spec, "List", [hold.flag], null))) break;
@@ -11198,7 +11172,7 @@ app.get("/api/bridge/reprocessing/quote", requireAuth, async (req, res, next) =>
     // each answered from what is held where it is. A listing that could not be read fails nothing: the quote is
     // then asked for the items by their IDs alone.
     if (heldOnTheGamePort(held)) {
-      await reprocessingPlacesOf(held, req.webSessionID, itemIDs, before).catch((error) => {
+      await reprocessingPlacesOf(held, req.webSessionID, itemIDs).catch((error) => {
         if (error && error.code === "SESSION_NOT_FOUND") throw error;
       });
     }

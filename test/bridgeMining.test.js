@@ -449,28 +449,27 @@ function hullStaticData() {
   };
 }
 
-test("a known hull reads only the holds its TYPE carries, as the retail client decides", async () => {
-  // The retail inventory tree adds a hold only when the ship type's capacity
-  // attribute for it is non-zero, without asking the server. Gas, ice and
-  // asteroid holds this hull's type lacks cost no List and no GetCapacity.
+test("on the gateway a hold added to a known hull is discovered by GetCapacity", async () => {
   const { gateway, baseUrl } = await docked(undefined, { staticData: hullStaticData() });
   gateway.state.shipTypeID = BARGE_TYPE_ID;
-
   const { response, payload } = await apiRequest(baseUrl, "/api/bridge/ship/ore-hold");
   assert.equal(response.status, 200, JSON.stringify(payload));
-  assert.deepEqual(boundOf(gateway, "invbroker", "List").map((c) => Number(c.args[0])), [FLAG_ORE_HOLD, FLAG_CARGO]);
-  assert.deepEqual(boundOf(gateway, "invbroker", "GetCapacity").map((c) => Number(c.args[0])), [FLAG_ORE_HOLD, FLAG_CARGO]);
-
-  // The answer keeps its shape: every rung is named, the unread ones absent.
-  assert.deepEqual(payload.holds.map((hold) => hold.key), ["ore", "gas", "ice", "asteroid", "cargo"]);
+  assert.deepEqual(boundOf(gateway, "invbroker", "GetCapacity").map((call) => call.args[0]),
+    [FLAG_ORE_HOLD, FLAG_GAS_HOLD, FLAG_ICE_HOLD, FLAG_ASTEROID_HOLD, FLAG_CARGO]);
   const byKey = new Map(payload.holds.map((hold) => [hold.key, hold]));
-  assert.equal(byKey.get("ore").present, true);
   assert.equal(byKey.get("ore").items.length, 1);
-  for (const key of ["gas", "ice", "asteroid"]) {
-    assert.equal(byKey.get(key).present, false, `${key} is absent`);
-    assert.deepEqual(byKey.get(key).items, [], `${key} is empty, not unknown`);
-    assert.equal(byKey.get(key).error, null);
+  assert.equal(byKey.get("ice").present, true);
+  assert.deepEqual(byKey.get("ice").capacity, { capacity: 1000, used: 40 });
+  assert.deepEqual(byKey.get("ice").items.map((item) => item.itemID), [ICE_STACK_ID]);
+  for (const key of ["gas", "asteroid"]) {
+    assert.equal(byKey.get(key).present, false);
+    assert.deepEqual(byKey.get(key).items, []);
   }
+
+  // When the inventory provides no size, use the type of the ship we actually bound.
+  gateway.state.capacities.set(FLAG_ORE_HOLD, { capacity: null, used: 120 });
+  const fallback = await apiRequest(baseUrl, "/api/bridge/ship/ore-hold");
+  assert.deepEqual(fallback.payload.holds.find((hold) => hold.key === "ore").capacity, { capacity: 27500, used: 120 });
 });
 
 test("a hull type the static data does not know still reads the whole ladder", async () => {
@@ -483,17 +482,12 @@ test("a hull type the static data does not know still reads the whole ladder", a
 test("a hull type reported for a different ship than the bound one is not trusted", async () => {
   // Flight status names the ship it typed; while a ship change settles that
   // can be another ship than the one the read binds, so every hold is read.
-  //
-  // (The boarding that sets this up waits for the ship change to settle, which with this stand-in it never does.
-  // The wait is on a clock of the test's own, which each wait moves on: on the server's it was forty real seconds.)
-  let clockMs = 0;
   const { gateway, baseUrl } = await docked({
     async readFlightStatus() {
       return { flight: { docked: true, stationID: ORIGIN_STATION_ID, solarSystemID: ORIGIN_SYSTEM_ID,
         shipID: SHIP_ID + 1, shipTypeID: BARGE_TYPE_ID }, notifications: [] };
     },
-  }, { staticData: hullStaticData(), transitionNow: () => clockMs, transitionSleep: async (ms) => { clockMs += ms; } });
-  assert.ok(clockMs > 0, "the boarding waited for the ship to change");
+  }, { staticData: hullStaticData() });
   await apiRequest(baseUrl, "/api/bridge/ship/ore-hold");
   assert.equal(boundOf(gateway, "invbroker", "List").length, 5);
 });

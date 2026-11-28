@@ -1789,7 +1789,12 @@ const HANGAR_SHIPS = [
 ];
 
 /** A game-port pilot flying ship 9001 of type 77002, asking the bays route. */
-async function baysOnGamePort(query, { shipID = 9001, constants = { ...holdConstants(), holdAttributes: async () => bayHolds() }, godma = { 3805: 410, 3887: 30 }, flying = { shipID: 9001, typeID: 77002 }, statics = bayStatics(), contents = SHIP_ROWS, hangar = HANGAR_SHIPS, transport = "gameport" } = {}) {
+async function baysOnGamePort(query, {
+  shipID = 9001, constants = { ...holdConstants(), holdAttributes: async () => bayHolds() },
+  godma = { ...Object.fromEntries(BAY_FLAGS.map((flag) => [3800 + flag, 0])), 3805: 410, 3887: 30, 3934: 5000 },
+  nativeCapacity = { 5: 777, 134: 5001 }, refuseCapacity = false, flying = { shipID: 9001, typeID: 77002 },
+  statics = bayStatics(), contents = SHIP_ROWS, hangar = HANGAR_SHIPS, transport = "gameport",
+} = {}) {
   const gamePort = gamePortWithQuestions(() => ({ answered: true }));
   const gateway = fakeGateway();
   // Whichever transport holds the pilot answers its inventories; the other is never asked.
@@ -1807,7 +1812,9 @@ async function baysOnGamePort(query, { shipID = 9001, constants = { ...holdConst
       return { service, method, result: { type: "list", items: contents.filter((row) => args[0].includes(row.fields.flagID)) }, notifications: [] };
     }
     // GetCapacity: the server's own, marked so that it is known for the server's.
-    return { service, method, result: { type: "object", name: "util.KeyVal", args: { type: "dict", entries: [["capacity", { 5: 777, 134: 5001 }[args[0]] ?? 0], ["used", 7]] } }, notifications: [] };
+    if (refuseCapacity) throw Object.assign(new Error("Refused"), { code: "CALL_REFUSED" });
+    const size = Object.hasOwn(nativeCapacity, args[0]) ? nativeCapacity[args[0]] : 0;
+    return { service, method, result: { type: "object", name: "util.KeyVal", args: { type: "dict", entries: [["capacity", size], ["used", 7]] } }, notifications: [] };
   };
   const asked = { ship: 0, attributes: [] };
   if (flying) gamePort.ship = async () => { asked.ship += 1; return flying; };
@@ -1822,9 +1829,9 @@ async function baysOnGamePort(query, { shipID = 9001, constants = { ...holdConst
 
 test("on the game port the bays of the ship being flown are known as the client knows them, and the server is asked for their contents alone", async () => {
   const { bays, calls, asked } = await baysOnGamePort("?keys=cargo,drone,ore,fleet,shipMaintenance");
-  // treeData.py 300 to 363, godma.py 871: which bays from the type, how big from godma, and one read of what is in them.
+  // Live Dogma already describes the requested bays, so only contents need a call.
   assert.deepEqual(calls.map((call) => [call.method, call.args]), [["ListByFlags", [[5, 87, 134]]]]);
-  // The cargo and the drone bay as godma has them now; the ore hold, which godma was not told of, as the type has it.
+  // The capacities are the held ship's effective values.
   assert.deepEqual([bays.cargo.present, bays.cargo.capacity], [true, { capacity: 410, used: 3 }]);
   assert.deepEqual([bays.drone.present, bays.drone.capacity], [true, { capacity: 30, used: 0 }]);
   assert.deepEqual([bays.ore.present, bays.ore.capacity], [true, { capacity: 5000, used: 85 }]);
@@ -1832,7 +1839,18 @@ test("on the game port the bays of the ship being flown are known as the client 
   for (const key of ["fleet", "shipMaintenance"]) assert.deepEqual([bays[key].present, bays[key].capacity, bays[key].items, bays[key].error], [false, { capacity: 0, used: 0 }, null, null], key);
   assert.deepEqual(bays.ore.items.map((item) => [item.itemID, item.typeID, item.quantity]), [[9102, 77011, 40], [9103, 77010, 500]]);
   assert.deepEqual([bays.cargo.error, bays.drone.items], [null, []]);
-  assert.deepEqual([asked.ship, asked.attributes.sort()], [1, [3805, 3887, 3934]]);
+  assert.deepEqual([asked.ship, asked.attributes.sort()], [1, [3805, 3887, 3890, 3934, 3955]]);
+});
+
+test("targeted bays use effective capacity and GetCapacity before the hull catalog", async () => {
+  const { bays, capacityCalls } = await baysOnGamePort("?keys=cargo,drone,ore,fleet", {
+    godma: { 3805: 410, 3934: 0, 3955: 30000 },
+    nativeCapacity: { 87: 80 },
+  });
+  assert.deepEqual(capacityCalls, [87]);
+  assert.deepEqual(bays.drone.capacity, { capacity: 80, used: 7 });
+  assert.equal(bays.ore.present, false);
+  assert.deepEqual(bays.fleet.capacity, { capacity: 30000, used: 0 });
 });
 
 test("every bay of the route is in the client's own table, and a whole reading asks the server for the contents and nothing else", async () => {
@@ -1843,24 +1861,31 @@ test("every bay of the route is in the client's own table, and a whole reading a
   assert.equal(Object.values(bays).every((bay) => bay.present === true || (bay.present === false && bay.capacity.capacity === 0)), true);
 });
 
-test("a ship in the hangar that is not the one being flown has its type from the hangar's list and its bays from the type alone", async () => {
-  const { bays, calls, asked } = await baysOnGamePort("?keys=cargo,drone,ore,fleet,shipMaintenance", { shipID: 9050, contents: [] });
-  // The client has the hangar's rows already; here they are one List. Its dogma has not that ship loaded, so a
-  // capacity is the type's own (clientDogmaIM.GetCapacityForItem answers None, invCache.py 1268 on).
-  assert.deepEqual(calls.map((call) => [call.method, call.args, call.handle]), [["List", [4], "GetInventory:60003760"], ["ListByFlags", [[5, 90, 155]], "GetInventoryFromId:9050"]]);
-  // The cargo by the type's own capacity (evetypes.GetCapacity), not by the attribute, where the two differ.
-  assert.deepEqual([bays.cargo.capacity, bays.shipMaintenance.capacity, bays.fleet.capacity], [{ capacity: 900, used: 0 }, { capacity: 1000000, used: 0 }, { capacity: 10000, used: 0 }]);
-  assert.deepEqual([bays.drone.present, bays.ore.present], [false, false]);
-  assert.deepEqual(asked.attributes, [], "godma holds the ship being flown, not this one");
+test("hangared ships use their own inventory and fall back to their own hull when it reports no size", async () => {
+  const query = "?keys=cargo,drone,ore,fleet,shipMaintenance";
+  const { bays, calls, asked } = await baysOnGamePort(query, { shipID: 9050, contents: [],
+    nativeCapacity: { 5: null, 87: 0, 134: 40, 90: null, 155: 70000 },
+  });
+  assert.deepEqual(asked.attributes, []);
+  assert.deepEqual(calls.filter((call) => call.method === "GetCapacity").map((call) => call.handle),
+    Array(5).fill("GetInventoryFromId:9050"));
+  assert.equal(bays.cargo.capacity.capacity, 900);
+  assert.equal(bays.shipMaintenance.capacity.capacity, 1000000);
+  assert.equal(bays.fleet.capacity.capacity, 70000);
+  assert.equal(bays.drone.present, false);
+  assert.equal(bays.ore.capacity.capacity, 40);
+});
 
-  // A ship built of parts has a drone bay whatever its type says, as big as the attribute is by default; and
-  // with no capacity among its type's fields, its cargo is the attribute's.
-  const parts = await baysOnGamePort("?keys=cargo,drone,ore", { shipID: 9051, contents: [] });
-  assert.deepEqual([parts.bays.cargo.capacity, parts.bays.drone.present, parts.bays.drone.capacity, parts.bays.ore.present], [{ capacity: 111, used: 0 }, true, { capacity: 0, used: 0 }, false]);
-  assert.deepEqual(parts.capacityCalls, []);
-  // A bay the hull has, with no size to be found for it: that bay is the server's to say.
-  const sizeless = await baysOnGamePort("?keys=cargo,shipMaintenance", { shipID: 9052, contents: [] });
-  assert.deepEqual([sizeless.capacityCalls, sizeless.bays.cargo.capacity, sizeless.bays.shipMaintenance.capacity], [[90], { capacity: 700, used: 0 }, { capacity: 0, used: 7 }]);
+test("a missing effective value probes the native bay in the whole list, then uses SDE only for missing sizes", async () => {
+  const { bays, capacityCalls } = await baysOnGamePort("", { godma: { 3805: 410 }, nativeCapacity: { 155: 6500, 87: null, 134: 0 } });
+  assert.ok(!capacityCalls.includes(5));
+  assert.ok(capacityCalls.includes(155));
+  assert.deepEqual(bays.fleet.capacity, { capacity: 6500, used: 7 });
+  assert.deepEqual(bays.drone.capacity, { capacity: 25, used: 7 });
+  assert.equal(bays.ore.present, false);
+  const refused = await baysOnGamePort("?keys=drone", { godma: {}, refuseCapacity: true });
+  assert.deepEqual([refused.bays.drone.present, refused.bays.drone.capacity, refused.bays.drone.error],
+    [null, null, "CALL_REFUSED"]);
 });
 
 test("where the client's way cannot be followed, a ship's bays are asked of the server as before", async () => {
@@ -1870,13 +1895,14 @@ test("where the client's way cannot be followed, a ship's bays are asked of the 
   // No client to read from: neither table, or either one.
   assert.deepEqual(asIs(await baysOnGamePort(keys, { constants: { packagedVolumes: async () => null, holdAttributes: async () => null } })), fromServer);
   assert.deepEqual(asIs(await baysOnGamePort(keys, { constants: { ...holdConstants(), holdAttributes: async () => null } })), fromServer);
-  assert.deepEqual(asIs(await baysOnGamePort(keys, { constants: { packagedVolumes: async () => null, holdAttributes: async () => bayHolds() } })), fromServer);
+  const withoutVolumes = await baysOnGamePort(keys, { constants: { packagedVolumes: async () => null, holdAttributes: async () => bayHolds() } });
+  assert.deepEqual([withoutVolumes.bays.cargo.capacity, withoutVolumes.bays.drone.capacity], [{ capacity: 410, used: 7 }, { capacity: 30, used: 7 }]);
   // A transport that cannot say what is being flown, or godma not knowing its type.
   assert.deepEqual(asIs(await baysOnGamePort(keys, { flying: null })), fromServer);
-  assert.deepEqual(asIs(await baysOnGamePort(keys, { flying: { shipID: 9001, typeID: null } })), fromServer);
+  assert.deepEqual((await baysOnGamePort(keys, { flying: { shipID: 9001, typeID: null } })).bays.cargo.capacity, { capacity: 410, used: 3 });
   // A type the static tables have not, or tables that know no type's attributes.
-  assert.deepEqual(asIs(await baysOnGamePort(keys, { flying: { shipID: 9001, typeID: 77999 } })), fromServer);
-  assert.deepEqual(asIs(await baysOnGamePort(keys, { statics: holdStatics() })), fromServer);
+  assert.deepEqual((await baysOnGamePort(keys, { flying: { shipID: 9001, typeID: 77999 } })).bays.cargo.capacity, { capacity: 410, used: 3 });
+  assert.deepEqual((await baysOnGamePort(keys, { statics: holdStatics() })).bays.cargo.capacity, { capacity: 410, used: 3 });
   // A ship that is neither flown nor in the hangar's list, or the hangar's list not answering.
   assert.deepEqual(asIs(await baysOnGamePort(keys, { shipID: 9099 })), fromServer);
   assert.deepEqual(asIs(await baysOnGamePort(keys, { shipID: 9050, hangar: null })), fromServer);
@@ -1896,10 +1922,10 @@ test("one bay that cannot be reckoned is asked about by itself, and the rest are
   // Something in a bay whose volume nobody here knows: what is used of that bay is the server's to say.
   const unknown = await baysOnGamePort("?keys=cargo,ore", { contents: [...SHIP_ROWS, holdRow({ itemID: 9104, flagID: 134, typeID: 77999 })] });
   assert.deepEqual(unknown.capacityCalls, [134]);
-  assert.deepEqual([unknown.bays.cargo.capacity, unknown.bays.ore.capacity, unknown.bays.ore.items.length], [{ capacity: 410, used: 3 }, { capacity: 5001, used: 7 }, 3]);
+  assert.deepEqual([unknown.bays.cargo.capacity, unknown.bays.ore.capacity, unknown.bays.ore.items.length], [{ capacity: 410, used: 3 }, { capacity: 5000, used: 7 }, 3]);
   // And so with something in the list that is not a row at all: no bay of that reading can be summed.
   const broken = await baysOnGamePort("?keys=cargo,ore", { contents: [...SHIP_ROWS, { type: "list", items: [], fields: { flagID: 5 } }] });
-  assert.deepEqual([broken.capacityCalls.sort(), broken.bays.cargo.capacity], [[134, 5], { capacity: 777, used: 7 }]);
+  assert.deepEqual([broken.capacityCalls.sort(), broken.bays.cargo.capacity], [[134, 5], { capacity: 410, used: 7 }]);
   // The contents not answering: each bay keeps its size, what is used is not known, and the bay says why.
   const dark = await baysOnGamePort("?keys=cargo,ore", { contents: null });
   assert.deepEqual(dark.capacityCalls, []);
@@ -1910,7 +1936,7 @@ test("one bay that cannot be reckoned is asked about by itself, and the rest are
 // ── The mining holds (GET /api/bridge/ship/ore-hold) ─────────────────────────
 
 /** A game-port pilot flying ship 9001 of type 77002 (cargo, drones, an ore hold), asking for its mining holds. */
-async function miningHoldsOnGamePort({ constants = { ...holdConstants(), holdAttributes: async () => bayHolds() }, godma = { 3805: 410 }, flying = { shipID: 9001, typeID: 77002 }, contents = SHIP_ROWS, failing = null, transport = "gameport" } = {}) {
+async function miningHoldsOnGamePort({ constants = { ...holdConstants(), holdAttributes: async () => bayHolds() }, godma = { 3805: 410, 3934: 5000, 3935: 0, 3981: 0, 3982: 0 }, nativeCapacity = { 5: 777, 134: 5001 }, flying = { shipID: 9001, typeID: 77002 }, contents = SHIP_ROWS, failing = null, transport = "gameport" } = {}) {
   const gamePort = gamePortWithQuestions(() => ({ answered: true }));
   const gateway = fakeGateway();
   const backend = transport === "gameport" ? gamePort : gateway;
@@ -1924,7 +1950,7 @@ async function miningHoldsOnGamePort({ constants = { ...holdConstants(), holdAtt
       return { service, method, result: { type: "list", items: contents.filter((row) => !row.fields || row.fields.flagID === args[0]) }, notifications: [] };
     }
     // GetCapacity: the server's own, marked.
-    return { service, method, result: { type: "object", name: "util.KeyVal", args: { type: "dict", entries: [["capacity", { 5: 777, 134: 5001 }[args[0]] ?? 0], ["used", 7]] } }, notifications: [] };
+    return { service, method, result: { type: "object", name: "util.KeyVal", args: { type: "dict", entries: [["capacity", Object.hasOwn(nativeCapacity, args[0]) ? nativeCapacity[args[0]] : 0], ["used", 7]] } }, notifications: [] };
   };
   const attributes = [];
   if (flying) gamePort.ship = async () => flying;
@@ -1942,31 +1968,40 @@ test("on the game port the mining holds are reckoned as the client reckons them:
   const { holds, lists, capacities, attributes } = await miningHoldsOnGamePort();
   // The hull's type has an ore hold and, as every ship, its cargo: those two are listed, and that is all that is asked.
   assert.deepEqual([lists, capacities], [[5, 134], []]);
-  // The cargo's size as godma has it; the ore hold's, which godma was not told of, as the type has it.
+  // The pilot's effective Cargo and Ore Hold sizes.
   assert.deepEqual([holds.cargo.present, holds.cargo.capacity, holds.cargo.error], [true, { capacity: 410, used: 3 }, null]);
   assert.deepEqual([holds.ore.present, holds.ore.capacity, holds.ore.error], [true, { capacity: 5000, used: 85 }, null]);
   assert.deepEqual(holds.ore.items.map((item) => [item.itemID, item.typeID, item.quantity]), [[9102, 77011, 40], [9103, 77010, 500]]);
   // The three this hull has not: not there, nothing in them, and nothing asked about them.
   for (const key of ["gas", "ice", "asteroid"]) assert.deepEqual([holds[key].present, holds[key].capacity, holds[key].items, holds[key].error], [false, { capacity: 0, used: 0 }, [], null], key);
-  assert.deepEqual(attributes.sort(), [3805, 3934]);
+  assert.deepEqual(attributes.sort(), [3805, 3934, 3935, 3981, 3982]);
+});
+
+test("mining holds discover effective specialized bays and read missing live sizes from inventory", async () => {
+  const { holds, lists, capacities } = await miningHoldsOnGamePort({ godma: { 3805: 410, 3981: 7500, 3982: 0 }, nativeCapacity: { 134: 5001, 135: 1600 } });
+  assert.deepEqual(lists, [5, 134, 135, 181]);
+  assert.deepEqual(capacities, [134, 135]);
+  assert.deepEqual(holds.gas.capacity, { capacity: 1600, used: 7 });
+  assert.deepEqual(holds.ore.capacity, { capacity: 5001, used: 7 });
+  assert.deepEqual(holds.ice.capacity, { capacity: 7500, used: 0 });
 });
 
 test("a mining hold that cannot be reckoned is asked about by itself, and where the client's way cannot be followed all are asked as before", async () => {
   // Something in the ore hold whose volume nobody here knows: the server says how full that one is.
   const unknown = await miningHoldsOnGamePort({ contents: [...SHIP_ROWS, holdRow({ itemID: 9104, flagID: 134, typeID: 77999 })] });
-  assert.deepEqual([unknown.capacities, unknown.holds.ore.capacity, unknown.holds.cargo.capacity], [[134], { capacity: 5001, used: 7 }, { capacity: 410, used: 3 }]);
+  assert.deepEqual([unknown.capacities, unknown.holds.ore.capacity, unknown.holds.cargo.capacity], [[134], { capacity: 5000, used: 7 }, { capacity: 410, used: 3 }]);
   // A hold's List not answering: its capacity is still the server's to give, and the hold says what went wrong.
   const dark = await miningHoldsOnGamePort({ failing: 134 });
-  assert.deepEqual([dark.capacities, dark.holds.ore.capacity, dark.holds.ore.items, dark.holds.ore.error, dark.holds.cargo.capacity], [[134], { capacity: 5001, used: 7 }, null, "CALL_REFUSED", { capacity: 410, used: 3 }]);
+  assert.deepEqual([dark.capacities, dark.holds.ore.capacity, dark.holds.ore.items, dark.holds.ore.error, dark.holds.cargo.capacity], [[134], { capacity: 5000, used: 7 }, null, "CALL_REFUSED", { capacity: 410, used: 3 }]);
   // A hold with no size to be found, in godma or on the type: that hold is the server's to say.
   const sizeless = await miningHoldsOnGamePort({ flying: { shipID: 9001, typeID: 77006 }, godma: {} });
-  assert.deepEqual([sizeless.lists, sizeless.capacities, sizeless.holds.cargo.capacity], [[5], [5], { capacity: 777, used: 7 }]);
+  assert.deepEqual([sizeless.lists, sizeless.capacities, sizeless.holds.cargo.capacity], [[5, 134, 135, 181, 182], [5, 134, 135, 181, 182], { capacity: 777, used: 7 }]);
   // A hold the client's own table has not is still read, and asked about.
   const partial = await miningHoldsOnGamePort({ constants: { ...holdConstants(), holdAttributes: async () => bayHolds([5, 135, 181, 182]) } });
   assert.deepEqual([partial.lists, partial.capacities, partial.holds.ore.capacity, partial.holds.cargo.capacity], [[5, 134], [134], { capacity: 5001, used: 7 }, { capacity: 410, used: 3 }]);
-  // No client to read from, a transport that cannot say what is flown, or the gateway: the holds the hull's type
-  // carries are each listed and asked about, as they were.
-  const fromServer = [[5, 134], [5, 134], { capacity: 777, used: 7 }, { capacity: 5001, used: 7 }];
+  // Where live Dogma is unavailable, the inventory can still report a modified hold.
+  const all = [5, 134, 135, 181, 182];
+  const fromServer = [all, all, { capacity: 777, used: 7 }, { capacity: 5001, used: 7 }];
   const asIs = (reading) => [reading.lists, reading.capacities, reading.holds.cargo.capacity, reading.holds.ore.capacity];
   assert.deepEqual(asIs(await miningHoldsOnGamePort({ constants: { packagedVolumes: async () => null, holdAttributes: async () => null } })), fromServer);
   assert.deepEqual(asIs(await miningHoldsOnGamePort({ flying: null })), fromServer);
@@ -2007,7 +2042,7 @@ test("on the game port a container's capacity is its type's, and what is in it i
   const { payload, calls, capacity } = await containerOnGamePort("?typeID=77020");
   assert.deepEqual(calls, [["List", [], "GetInventoryFromId:9200"]]);
   assert.deepEqual(capacity, { capacity: 1200, used: 10 + 80 + 5000 + 5 });
-  assert.deepEqual([payload.containerID, payload.list.items.length, payload.volumes], [9200, 4, { 77002: 16500, 77010: 0.01, 77011: 2 }]);
+  assert.deepEqual([payload.containerID, payload.list.items.length, payload.volumes], [9200, 4, { 77002: 16500, 77010: 0.01, 77011: 2, p77002: 2500 }]);
   // A plastic wrap is as big as what is in it.
   assert.deepEqual((await containerOnGamePort("?typeID=77099")).capacity, { capacity: 5095, used: 5095 });
   // The type is read as this file reads every whole number of a query: its leading digits.
