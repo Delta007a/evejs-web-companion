@@ -4,6 +4,7 @@ import {
   installTrainingAdapter,
   loginFactoryAccount,
   loadTrainingCharacters,
+  readTrainingCorporationName,
   loadTrainingSettingsContext,
   readTrainingFittingGoals,
   readTrainingHullGoals,
@@ -520,6 +521,38 @@ test("Verify HR reuses the pilot from the just verified account roster", async (
   } as any);
   assert.equal(result.authorities[0]?.name, "Pilot");
   assert.deepEqual([reads, runs], [0, 1]);
+});
+
+test("training resolves a roster corporation placeholder for the selected pilot and corporation", async () => {
+  const reads: string[] = [];
+  let currentCorporationID = 5;
+  installTrainingAdapter({
+    authenticatedJson: async (route, requestOptions) => {
+      reads.push(route);
+      assert.equal(requestOptions, options);
+      return {
+        authorities: [
+          { characterID: 3, corporationID: currentCorporationID, name: "Pilot", eligible: false },
+        ],
+        corporations: [
+          { corporationID: currentCorporationID, name: " Fixture Corporation ", divisions: [] },
+        ],
+      };
+    },
+    runHosted: async () => assert.fail("Reading a corporation name must not acquire a pilot"),
+  });
+  const pilot = { characterID: 3, name: "Pilot", corporationID: 5, corporationName: "Corporation 5" };
+  assert.equal(await readTrainingCorporationName(pilot, options), "Fixture Corporation");
+  assert.equal(
+    await readTrainingCorporationName({ ...pilot, corporationName: "Static NPC name" }, options),
+    "Static NPC name",
+  );
+  currentCorporationID = 9;
+  assert.equal(await readTrainingCorporationName(pilot, options), null);
+  assert.deepEqual(reads, [
+    "/api/pilot-training/settings-context",
+    "/api/pilot-training/settings-context",
+  ]);
 });
 
 test("fitting preview exposes native computed prerequisites and held pilot skill levels", async () => {
@@ -1151,6 +1184,20 @@ test("Provisioning roster opens with Farmer authorization without login or pilot
     authenticatedJson: async (path: string) => {
       paths.push(path);
       if (path.endsWith("/login")) throw Error("No re-login");
+      if (path === "/api/pilot-training/characters")
+        return {
+          account: "Pilot",
+          characters: [
+            { characterID: 3, name: "Pilot", corporationID: 5, corporationName: "Corporation 5" },
+            { characterID: 4, name: "Provider", corporationID: 5 },
+            { characterID: 5, name: "Other pilot", corporationID: 9 },
+          ],
+        };
+      if (path === "/api/pilot-training/settings-context")
+        return {
+          authorities: [{ characterID: 3, corporationID: 5 }, { characterID: 4, corporationID: 5 }],
+          corporations: [{ corporationID: 5, name: "Verified corporation" }],
+        };
       return auth(path);
     },
     runHosted: async () => {
@@ -1163,6 +1210,11 @@ test("Provisioning roster opens with Farmer authorization without login or pilot
   try {
     const r = await centerRoster((await ownerOptions("Pilot")).token!);
     assert.equal(r.pilots[0]?.characterID, 3);
+    assert.deepEqual(r.pilots.map((pilot) => pilot.corporationName), [
+      "Verified corporation", "Verified corporation", "Corporation 9",
+    ]);
+    assert.equal(r.providers[1]?.corporationName, "Verified corporation");
+    assert.equal(paths.filter((p) => p.endsWith("/settings-context")).length, 1);
     assert.ok(paths.includes("/api/plugins/uoc/center/account"));
     assert.equal(
       paths.some((p) => p.endsWith("/login")),
@@ -1314,6 +1366,156 @@ test("an incomplete hosted Apply shows the native blocked result", async () => {
     /already dispatched/,
   );
   assert.equal(applies, 1);
+});
+
+test("a fitted ship can apply checked supplies and shows a shortage as a partial result", async () => {
+  const status = {
+    equipment: "VERIFIED",
+    supplies: "MISSING",
+    targets: [
+      {
+        typeID: 242,
+        name: "Standard S",
+        target: 3,
+        current: 0,
+        deficit: 3,
+        mode: "CARRIED_SPARES",
+        state: "MISSING",
+      },
+    ],
+  };
+  installTrainingAdapter({
+    authenticatedJson: auth,
+    runHosted: async (id, kind, setup: any) => {
+      const r = await hosted(id, kind, setup);
+      if (kind === "provision-inspect")
+        return {
+          ...r,
+          readout: {
+            ...r.readout,
+            currentShipTypeID: 7,
+            plan: { ...r.readout.plan, mode: "ALREADY_SATISFIED" },
+            status,
+            nativeResources: {
+              state: "NATIVE",
+              fits: true,
+              allModulesOnline: true,
+              characterID: id,
+              shipTypeID: 7,
+            },
+          },
+        };
+      assert.equal(setup.savedFittingSupplies, true);
+      return {
+        ...r,
+        status: "error",
+        phase: "Saved supplies incomplete",
+        why: "Standard S 0/3",
+        readout: { ...r.readout, finalStatus: status, savedSuppliesReason: "Standard S 0/3" },
+      };
+    },
+  });
+  const token = "provision-supplies",
+    selection = {
+      characterID: 3,
+      providerCharacterID: 3,
+      sourceKind: "corp",
+      corporationID: 5,
+      division: 7,
+    };
+  await centerRoster(token);
+  await centerReview(token, { ...selection, fittingID: 0 });
+  const inspect = { ...selection, fittingID: 6, definitionFingerprint: fit.fingerprint };
+  assert.equal((await centerInspect(token, inspect)).hullReview?.ready, true);
+  const review = await centerInspect(token, { ...inspect, savedFittingSupplies: true });
+  assert.equal(review.hullReview?.ready, false);
+  assert.equal(review.applyReview.canApply, true);
+  const { outcome } = await centerApply(
+    token,
+    review.applyReview.reviewID,
+    review.applyReview.reviewHash!,
+  );
+  assert.equal(outcome.state, "PARTIAL");
+  assert.equal(outcome.reason, "Standard S 0/3");
+  assert.equal(outcome.finalReview?.status.targets[0]?.current, 0);
+});
+
+test("a fitted ship with its saved charges in cargo can still Apply to fill the modules", async () => {
+  const target = {
+    typeID: 242,
+    name: "Standard S",
+    target: 3,
+    current: 3,
+    deficit: 0,
+    eligibleFlags: [5, 143],
+    mode: "CARRIED_SPARES",
+    state: "FULL",
+  };
+  installTrainingAdapter({
+    authenticatedJson: auth,
+    runHosted: async (id, kind, setup: any) => {
+      const r = await hosted(id, kind, setup);
+      if (kind === "provision-inspect")
+        return {
+          ...r,
+          readout: {
+            ...r.readout,
+            currentShipTypeID: 7,
+            plan: { ...r.readout.plan, mode: "ALREADY_SATISFIED", supplies: [target] },
+            status: { equipment: "VERIFIED", supplies: "FULL", targets: [target] },
+            nativeResources: {
+              state: "NATIVE",
+              fits: true,
+              allModulesOnline: true,
+              characterID: id,
+              shipTypeID: 7,
+            },
+          },
+        };
+      assert.equal(setup.savedFittingSupplies, true);
+      return {
+        ...r,
+        readout: {
+          ...r.readout,
+          finalStatus: {
+            equipment: "VERIFIED",
+            supplies: "FULL",
+            targets: [{ ...target, mode: "TOTAL_ABOARD" }],
+            charges: [
+              { flagID: 27, typeID: 242, name: "Standard S", target: 1, current: 1, state: "FULL" },
+            ],
+          },
+        },
+      };
+    },
+  });
+  const token = "provision-full-cargo",
+    selection = {
+      characterID: 3,
+      providerCharacterID: 3,
+      sourceKind: "corp",
+      corporationID: 5,
+      division: 7,
+    };
+  await centerRoster(token);
+  await centerReview(token, { ...selection, fittingID: 0 });
+  const input = {
+    ...selection,
+    fittingID: 6,
+    definitionFingerprint: fit.fingerprint,
+    savedFittingSupplies: true,
+  };
+  const review = await centerInspect(token, input);
+  assert.equal(review.hullReview?.ready, false);
+  assert.equal(review.applyReview.canApply, true);
+  const { outcome } = await centerApply(
+    token,
+    review.applyReview.reviewID,
+    review.applyReview.reviewHash!,
+  );
+  assert.equal(outcome.state, "COMPLETE");
+  assert.equal(outcome.finalReview?.status.charges?.[0]?.current, 1);
+  assert.equal(outcome.finalReview?.status.targets[0]?.current, 3);
 });
 
 test("invalid catalogue diagnostics preserve native fitting IDs without guessing their identity", async () => {

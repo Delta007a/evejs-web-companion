@@ -1,7 +1,8 @@
 import { nextLocalID } from "../app/localID.ts";
 import { fittingNames } from "./fittingNames.ts";
 import type { ApiOptions, JsonValue } from "../../../../web/src/plugin-api/index.ts";
-import { trainingAdapterContext } from "./training.ts";
+import { readRosterCorporationNames, trainingAdapterContext } from "./training.ts";
+import type { TrainingCharacter } from "../training/types.ts";
 import { cockpitRequestOptions, cockpitSession } from "../app/context.ts";
 import {
   type Roster,
@@ -95,10 +96,12 @@ export async function centerRoster(
   const r = await c.authenticatedJson("/api/pilot-training/characters", options(token));
   if (r?.account !== account.username || !Array.isArray(r.characters))
     throw Error("Account roster is unavailable.");
+  if (r.characters.some((p: any) => !positive(p?.characterID) || typeof p.name !== "string"))
+    throw Error("Pilot roster is malformed.");
+  const names = readRosterCorporationNames(r.characters, options(token));
   const pilots = await Promise.all(
-    r.characters.map(async (p: any) => {
-      if (!positive(p.characterID) || typeof p.name !== "string")
-        throw Error("Pilot roster is malformed.");
+    r.characters.map(async (p: TrainingCharacter) => {
+      const corporationID = positive(p.corporationID) ? p.corporationID : null;
       let owner = "UNKNOWN",
         online: boolean | null = null;
       try {
@@ -132,8 +135,9 @@ export async function centerRoster(
         serviceAccess,
         characterID: p.characterID,
         name: p.name,
-        corporationID: positive(p.corporationID) ? p.corporationID : null,
-        corporationName: typeof p.corporationName === "string" ? p.corporationName : null,
+        corporationID,
+        corporationName: (await names).get(p.characterID) ??
+          (corporationID ? `Corporation ${corporationID}` : null),
         locationID: null,
         stationID: null,
         dockState: "UNKNOWN",
@@ -524,6 +528,13 @@ export async function centerInspect(
     r.plan.mode === "EXISTING_HULL" && positive(r.plan.targetHullID) ? r.plan.targetHullID : null;
   const replacesShip =
     r.plan.mode === "NEW_HULL" || (existingHullID !== null && existingHullID !== r.shipID);
+  const savedCharges = (r.plan.supplies ?? nativeStatus.targets).some((t: any) =>
+    t.eligibleFlags?.includes(143),
+  );
+  const ready =
+    r.plan.mode === "ALREADY_SATISFIED" &&
+    nativeStatus.equipment === "VERIFIED" &&
+    (!setup.savedFittingSupplies || (nativeStatus.supplies === "FULL" && !savedCharges));
   const hullReview = currentHullName
     ? {
         current: currentHullName,
@@ -538,7 +549,7 @@ export async function centerInspect(
                 .reduce((n: number, x: any) => n + x.quantity, 0))
             : null,
         preserveCurrentShip: replacesShip,
-        ready: r.plan.mode === "ALREADY_SATISFIED" && nativeStatus.equipment === "VERIFIED",
+        ready,
       }
     : undefined;
   reviews.set(reviewID, {
@@ -723,6 +734,7 @@ export async function centerApply(
       (r.existingHullID === null || existingVerified) &&
       (hosted.phase === "Provisioning verified" ||
         hosted.phase === "Previous ship storage incomplete" ||
+        hosted.phase === "Saved supplies incomplete" ||
         (hosted.phase === "Session release blocked" && (existingVerified || nativeVerified)))
     ) {
       const stored =
@@ -740,11 +752,16 @@ export async function centerApply(
           ? (value.previousShipStorageReason ??
             `Storage of previous ship #${r.replacedShipID} in corporation Division ${r.setup.oldShipDivision} could not be verified.`)
           : (value.previousShipStorageReason ?? null);
+      const suppliesReason =
+        typeof value.savedSuppliesReason === "string" ? value.savedSuppliesReason : null;
+      const reason =
+        [storageReason, suppliesReason].filter(Boolean).join(" ") ||
+        (hosted.phase === "Session release blocked" ? hosted.why : null);
       result = {
         ...base,
         operationID: value.operationID,
-        state: storageReason ? "PARTIAL" : "COMPLETE",
-        reason: storageReason ?? (hosted.phase === "Session release blocked" ? hosted.why : null),
+        state: storageReason || suppliesReason ? "PARTIAL" : "COMPLETE",
+        reason,
         provisioning: {
           operationID: value.operationID,
           state: "COMPLETE",

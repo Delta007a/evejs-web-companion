@@ -3,6 +3,7 @@ import {
   simulatePilotResources,
   decodeNativeFittingResources,
   nativeApplyBlockers,
+  verifyNativeFittedEquipment,
 } from "../../provisioning/resourceQualification.ts";
 import {
   reviewPreviousShipStorage,
@@ -16,8 +17,7 @@ import {
   type ExistingHull,
 } from "../../provisioning/existingHull.ts";
 import { trainingTargets } from "../../shared/trainingTargets.ts";
-import { decodeModuleObservation } from "../../shared/moduleObservation.ts";
-import { loadFitting, buildSlots, slotFlagOf } from "../../../../web/src/plugin-api/flying.ts";
+import { loadFitting } from "../../../../web/src/plugin-api/flying.ts";
 type Read = (path: string, options: ApiOptions, body?: unknown) => Promise<any>;
 const reviews = new Map<
   string,
@@ -102,23 +102,13 @@ export async function cockpitProvisioning(session: Session, kind: string, setup:
     if (!resources) throw Error("Actual pilot CPU/PG readback is unavailable.");
     const fitting = await loadFitting(options);
     current();
-    if (fitting.activeShipID !== shipID || Object.values(fitting.errors).some((e) => e !== null))
-      throw Error("Actual fitted module identities are unavailable.");
-    const slots = buildSlots(fitting.slots, fitting.shipInfo, fitting.online);
-    const rows = r.contract.structural as number[][];
-    const offline: number[] = [];
-    for (const [flagID, typeID] of rows) {
-      const module = slots.find((s) => slotFlagOf(s.family, s.index) === flagID)?.module;
-      if (!module || module.typeID !== typeID)
-        throw Error("The exact fitted module changed during verification.");
-      const m = decodeModuleObservation(
-        await session.flow.flying.bridgeAsk("dogmaIM", "ItemGetInfo", [module.itemID]),
-        { moduleID: module.itemID, typeID: typeID!, ownerID: characterID, shipID, flagID: flagID! },
-      );
-      current();
-      if (!m.online) offline.push(flagID!);
-    }
-    return { ...resources, allModulesOnline: offline.length === 0, offlineSlots: offline };
+    const equipment = await verifyNativeFittedEquipment(
+      fitting,
+      { shipID, characterID, structural: r.contract.structural },
+      json,
+    );
+    current();
+    return { ...resources, ...equipment };
   };
   const qualify = async (r: any) => {
     const shipTypeID = r.contract.shipTypeID;

@@ -15,6 +15,11 @@ const tuples = [
     .update(JSON.stringify([100, tuples]))
     .digest("hex");
 const setup = { corporationID: 98, fittingID: 5, goalTypeID: 100, fingerprint, division: 1 };
+const passiveRigs: [number, number, number][] = [
+  [92, 31718, 1],
+  [93, 31718, 1],
+  [94, 31754, 1],
+];
 const physical = (applied = false, ship = 9, stockID = 1000) => ({
   reviewID: "review",
   reviewHash: "hash",
@@ -79,6 +84,22 @@ type ShipStorageFixture = {
   requestedDivision: number;
   outcome?: "declined" | "lost" | "wrong-item" | "wrong-fit" | "no-office";
 };
+type SupplyFixture = {
+  checked: boolean;
+  outcome?: "short" | "lost" | "wrong-ship";
+  load?: boolean;
+};
+const savedTargets = [
+  { typeID: 242, name: "Standard S", target: 3 },
+  { typeID: 178, name: "Carbonized Lead S", target: 200 },
+  { typeID: 11283, name: "Cap Booster 150", target: 4 },
+  { typeID: 28668, name: "Nanite Repair Paste", target: 20 },
+  { typeID: 16272, name: "Heavy Water", target: 10 },
+].map((target) => ({
+  ...target,
+  mode: "CARRIED_SPARES",
+  eligibleFlags: target.typeID === 16272 ? [5, 133] : [5, 143],
+}));
 function fixture({
   lost = false,
   lostAfterCommit = false,
@@ -87,6 +108,9 @@ function fixture({
   wrongFit = false,
   missing = false,
   offline = false,
+  rigs,
+  overCPU = false,
+  wrongModuleOwner = false,
   personal = false,
   provider = false,
   largeStock = false,
@@ -96,6 +120,7 @@ function fixture({
   hullName = "Test Hull",
   fittingService = "AVAILABLE",
   shipStorage,
+  supplies,
   existing = false,
   resources = {
     state: "SIMULATED",
@@ -114,6 +139,9 @@ function fixture({
   wrongFit?: boolean;
   missing?: boolean;
   offline?: boolean;
+  rigs?: "installed" | "missing";
+  overCPU?: boolean;
+  wrongModuleOwner?: boolean;
   personal?: boolean;
   provider?: boolean;
   largeStock?: boolean;
@@ -123,11 +151,18 @@ function fixture({
   hullName?: string;
   fittingService?: "AVAILABLE" | "UNAVAILABLE" | null;
   shipStorage?: ShipStorageFixture;
+  supplies?: SupplyFixture;
   existing?: boolean;
   resources?: ResourceQualification;
 } = {}) {
+  let stocked = false,
+    loaded = 0;
   const makePhysical = (applied = false, ship = 9, stockID = 1000) => {
     const r = physical(applied, ship, stockID);
+    if (rigs) {
+      r.contract.structural.push(...passiveRigs);
+      r.contract.equipment.push(...passiveRigs);
+    }
     r.source.pin.descriptor.division = division;
     r.source.pin.flag = 114 + division;
     r.source.rows[0]!.flagID = r.source.pin.flag;
@@ -180,6 +215,29 @@ function fixture({
           { flag: 87, typeID: 30, quantity: 2, kind: "LOADED" },
         ],
       });
+    if (supplies) {
+      Object.assign(r.contract, {
+        definitionFingerprint: "b".repeat(64),
+        supplyPolicyFingerprint: "d".repeat(64),
+        supplies: savedTargets,
+      });
+      Object.assign(r.plan, { supplies: savedTargets });
+      const targets = savedTargets.map((t) => {
+        const current = stocked
+          ? t.target - (t.typeID === 242 ? loaded + (supplies.outcome === "short" ? 1 : 0) : 0)
+          : 0;
+        return {
+          ...t,
+          current,
+          deficit: t.target - current,
+          state: current === t.target ? "FULL" : current > 0 ? "LOW" : "MISSING",
+        };
+      });
+      Object.assign(r.status, {
+        targets,
+        supplies: targets.every((t) => t.state === "FULL") ? "FULL" : stocked ? "LOW" : "MISSING",
+      });
+    }
     return { ...r, fittingService: fittingService ?? undefined };
   };
   let applied = false,
@@ -190,6 +248,7 @@ function fixture({
     selectedPlan = reviewedPlanFingerprint(makePhysical());
   const reports: any[] = [],
     writes: string[] = [],
+    fittingReads: string[] = [],
     rechecked: string[] = [],
     reviews: any[] = [],
     transfers: any[] = [];
@@ -239,51 +298,29 @@ function fixture({
       const dict = (entries: any[]) => ({ type: "dict", entries }),
         long = (value: string) => ({ type: "long", value });
       if (body.method === "ItemGetInfo") {
-        if (body.args[0] === 55)
-          data = {
-            result: {
-              type: "object",
-              name: "util.KeyVal",
-              args: dict([
-                ["itemID", 55],
-                ["invItem", { type: "packedrow", fields: { itemID: 55, typeID: 100, ownerID: 7 } }],
-                ["time", long("134385165369180001")],
-                ["wallclockTime", long("134385165369179999")],
-                [
-                  "attributes",
-                  dict([
-                    [49, 20],
-                    [48, 100],
-                    [15, 10],
-                    [11, 50],
-                  ]),
-                ],
-              ]),
-            },
-          };
-        else {
-          assert.equal(body.args[0], 200);
-          const effect = [200, 7, 55, null, null, [], 16, long("134385165369120001"), -1, 1];
-          data = {
-            result: {
-              type: "object",
-              name: "util.KeyVal",
-              args: dict([
-                ["itemID", 200],
-                [
-                  "invItem",
-                  {
-                    type: "packedrow",
-                    fields: { itemID: 200, typeID: 20, ownerID: 7, locationID: 55, flagID: 27 },
-                  },
-                ],
-                ["activeEffects", dict(offline ? [] : [[16, effect]])],
-                ["time", long("134385165369180001")],
-                ["wallclockTime", long("134385165369179999")],
-              ]),
-            },
-          };
-        }
+        assert.deepEqual(body.args, [55], "only the active hull needs a dogma item read");
+        fittingReads.push("ItemGetInfo");
+        data = {
+          result: {
+            type: "object",
+            name: "util.KeyVal",
+            args: dict([
+              ["itemID", 55],
+              ["invItem", { type: "packedrow", fields: { itemID: 55, typeID: 100, ownerID: 7 } }],
+              ["time", long("134385165369180001")],
+              ["wallclockTime", long("134385165369179999")],
+              [
+                "attributes",
+                dict([
+                  [49, overCPU ? 101 : 20],
+                  [48, 100],
+                  [15, 10],
+                  [11, 50],
+                ]),
+              ],
+            ]),
+          },
+        };
       } else if (body.method === "GetMyCorporationsOffices") {
         data = {
           result: {
@@ -306,12 +343,62 @@ function fixture({
         writes.push("Board");
         applied = true;
         data = { result: null };
+      } else if (supplies?.load && body.method === "Add") {
+        assert.equal(body.of, 55);
+        assert.deepEqual(body.args, [1242, 55]);
+        assert.deepEqual(body.kwargs, { qty: 1, flag: 5 });
+        writes.push("Split");
+        data = { result: 1243 };
+      } else if (supplies?.load && body.method === "LoadAmmo") {
+        assert.equal(body.confirm, true);
+        assert.deepEqual(body.args, [55, 200, [1243], 55]);
+        writes.push("LoadAmmo");
+        loaded = 1;
+        data = { result: null };
       } else if (body.method === "List") {
         if (body.of === "hangar")
           data = { result: { type: "list", items: existing ? [existingHull()] : [] } };
-        else if (existing && body.of === 55)
+        else if (existing && body.of === 55 && body.args.length === 0)
           data = { result: { type: "list", items: existingFit() } };
-        else if (body.of === ship && applied)
+        else if (supplies?.checked && body.of === 55) {
+          const items =
+            stocked && body.args[0] === 5
+              ? savedTargets
+                  .filter((t) => t.typeID !== 16272)
+                  .map((t) => {
+                    const quantity =
+                      t.target -
+                      (t.typeID === 242
+                        ? loaded +
+                          (supplies.outcome === "short" ? 1 : 0) +
+                          (writes.includes("Split") && !loaded ? 1 : 0)
+                        : 0);
+                    return row({
+                      itemID: t.typeID + 1000,
+                      typeID: t.typeID,
+                      flagID: 5,
+                      ownerID: 7,
+                      locationID: 55,
+                      singleton: 0,
+                      quantity,
+                      stacksize: quantity,
+                      categoryID: 8,
+                    });
+                  })
+              : [];
+          if (body.args[0] === 5 && writes.includes("Split") && !loaded)
+            items.push(
+              row({
+                itemID: 1243,
+                typeID: 242,
+                flagID: 5,
+                ownerID: 7,
+                locationID: 55,
+                categoryID: 8,
+              }),
+            );
+          data = { result: { type: "list", items } };
+        } else if (body.of === ship && applied)
           data = { result: { type: "list", items: [oldFit(201), oldFit(202)] } };
         else {
           assert.equal(applied, true);
@@ -328,12 +415,25 @@ function fixture({
           data = { result: { type: "list", items: [decoy, ...(moved ? [oldHull()] : [])] } };
         }
       } else throw Error("Unexpected bridge method " + body.method);
-    } else if (u.pathname === "/api/bridge/fitting")
+    } else if (u.pathname === "/api/bridge/fitting") {
+      fittingReads.push("loadFitting");
       data = {
         activeShipID: 55,
         slots: {
           type: "list",
           items: [
+            ...(rigs === "installed"
+              ? passiveRigs.map(([flagID, typeID], index) =>
+                  row({
+                    itemID: 600 + index,
+                    typeID,
+                    flagID,
+                    ownerID: 7,
+                    locationID: 55,
+                    categoryID: 7,
+                  }),
+                )
+              : []),
             {
               type: "packedrow",
               fields: {
@@ -341,6 +441,8 @@ function fixture({
                 typeID: 20,
                 groupID: 54,
                 categoryID: 7,
+                ownerID: wrongModuleOwner ? 8 : 7,
+                locationID: 55,
                 flagID: 27,
                 quantity: 1,
                 singleton: 1,
@@ -378,14 +480,91 @@ function fixture({
             ],
           ],
         },
-        online: { type: "list", items: [200] },
+        online: { type: "list", items: offline ? [] : [200] },
         errors: { slots: null, shipInfo: null, online: null, chargeFits: null },
         chargeFits: null,
       };
-    else if (u.pathname === "/api/client-data/type-prices")
-      data = { available: true, categoryID: { 100: 6, 20: 7, 30: 18 }, published: { 100: true } };
+    } else if (u.pathname === "/api/bridge/bound-dogma" && supplies?.checked) {
+      const dict = (entries: any[] = []) => ({ type: "dict", entries });
+      const keyval = (value: Record<string, unknown>) => ({
+        type: "object",
+        name: "util.KeyVal",
+        args: dict(Object.entries(value)),
+      });
+      const tuple = [55, 27, 242];
+      const entries: any[] = [
+        [
+          200,
+          keyval({
+            itemID: 200,
+            invItem: row({
+              itemID: 200,
+              typeID: 20,
+              locationID: 55,
+              flagID: 27,
+              ownerID: 7,
+              categoryID: 7,
+            }),
+          }),
+        ],
+      ];
+      if (loaded)
+        entries.push([tuple, keyval({ itemID: tuple, attributes: dict([[805, loaded]]) })]);
+      data = {
+        reads: {
+          GetAllInfo: {
+            result: keyval({
+              activeShipID: 55,
+              charInfo: [dict([[7, keyval({ itemID: 7 })]]), null],
+              shipInfo: dict(entries),
+              shipState: [dict(), dict(), dict(), dict()],
+            }),
+          },
+        },
+      };
+    } else if (u.pathname === "/api/client-data/dogma-types" && !supplies?.checked) {
+      const ids = u.searchParams.get("typeIDs")?.split(",").map(Number) ?? [];
+      fittingReads.push(`type effects: ${ids.join(",")}`);
+      data = {
+        available: true,
+        types: Object.fromEntries(ids.map((id) => [id, { effects: id === 20 ? [12, 16] : [2663] }])),
+      };
+    } else if (u.pathname === "/api/client-data/dogma-types" && supplies?.checked) {
+      data = {
+        available: true,
+        types: {
+          20: {
+            categoryID: 7,
+            groupID: 53,
+            attributes: supplies.load
+              ? [
+                  [604, 86],
+                  [128, 1],
+                  [38, 1],
+                ]
+              : [],
+          },
+          242: {
+            categoryID: 8,
+            groupID: 86,
+            attributes: [
+              [128, 1],
+              [161, 1],
+            ],
+          },
+          178: { categoryID: 8, groupID: 83, attributes: [] },
+          11283: { categoryID: 8, groupID: 87, attributes: [] },
+          28668: { categoryID: 8, groupID: 916, attributes: [] },
+        },
+      };
+    } else if (u.pathname === "/api/client-data/type-prices")
+      data = {
+        available: true,
+        categoryID: { 100: 6, 20: 7, 30: 18, 31718: 7, 31754: 7 },
+        published: { 100: true },
+      };
     else if (u.pathname === "/api/client-data/required-skills")
-      data = { available: true, required: { 100: { 10: 1 }, 20: {}, 30: {}, 10: {} } };
+      data = { available: true, required: { 100: { 10: 1 }, 20: {}, 30: {}, 10: {}, 31718: {}, 31754: {} } };
     else if (u.pathname === "/api/bridge/skills")
       data = { skills: { characterID: 7, skills: missing ? [] : [{ typeID: 10, level: 1 }] } };
     else if (u.pathname === "/api/bridge/flight/status")
@@ -396,23 +575,48 @@ function fixture({
       assert.equal(body.oldShipDivision, undefined);
       reviews.push(body);
       data = makePhysical(applied, ship, stockID);
+    } else if (u.pathname === "/api/bridge/provisioning/review" && supplies?.checked) {
+      assert.equal(applied, true);
+      assert.deepEqual(body, reviews.at(-1));
+      data = {
+        ...makePhysical(true, ship, stockID),
+        reviewID: "saved-supplies",
+        reviewHash: "supply-hash",
+      };
+      if (supplies.outcome === "wrong-ship") data.context.shipID = 999;
+    } else if (u.pathname === "/api/bridge/provisioning/replenish" && supplies?.checked) {
+      assert.deepEqual(body, {
+        reviewID: "saved-supplies",
+        reviewHash: "supply-hash",
+        confirm: true,
+      });
+      writes.push(u.pathname);
+      stocked = true;
+      if (supplies.outcome === "lost") throw Error("Supply response lost after dispatch");
+      data = { operationID: "saved-supplies", state: "COMPLETE" };
     } else if (u.pathname === "/api/bridge/provisioning/reconcile") {
-      assert.deepEqual(body, { operationID: "review" });
-      rechecked.push(body.operationID);
-      if (lost) throw Error("Receipt temporarily unavailable");
-      data = applied
-        ? {
-            operationID: "review",
-            state: "COMPLETE",
-            result: { equipment: "VERIFIED" },
-            manifest: { targetHullID: 55, originalShipID: badReceipt ? 10 : 9 },
-          }
-        : {
-            operationID: "review",
-            state: "BLOCKED",
-            reason: "OUTCOME_AMBIGUOUS",
-            manifest: { originalShipID: 9 },
-          };
+      if (supplies?.outcome === "lost" && body.operationID === "saved-supplies") {
+        assert.equal(stocked, true);
+        rechecked.push(body.operationID);
+        data = { operationID: body.operationID, state: "RECONCILED" };
+      } else {
+        assert.deepEqual(body, { operationID: "review" });
+        rechecked.push(body.operationID);
+        if (lost) throw Error("Receipt temporarily unavailable");
+        data = applied
+          ? {
+              operationID: "review",
+              state: "COMPLETE",
+              result: { equipment: "VERIFIED" },
+              manifest: { targetHullID: 55, originalShipID: badReceipt ? 10 : 9 },
+            }
+          : {
+              operationID: "review",
+              state: "BLOCKED",
+              reason: "OUTCOME_AMBIGUOUS",
+              manifest: { originalShipID: 9 },
+            };
+      }
     } else if (u.pathname === "/api/bridge/provisioning/provision-ship") {
       writes.push(u.pathname);
       assert.deepEqual(body, { reviewID: "review", reviewHash: "hash", confirm: true });
@@ -478,6 +682,7 @@ function fixture({
     const input = {
       ...selected,
       ...(shipStorage?.requestedDivision ? { oldShipDivision: shipStorage.requestedDivision } : {}),
+      ...(supplies?.checked ? { savedFittingSupplies: true } : {}),
     };
     run.setup = mode === "inspect" ? input : { ...input, reviewedPlanFingerprint: selectedPlan };
     await createProvisioningRun(mode, { projection: async () => resources }).start(run);
@@ -489,6 +694,7 @@ function fixture({
   return {
     execute,
     writes,
+    fittingReads,
     rechecked,
     reviews,
     transfers,
@@ -510,6 +716,83 @@ test("inspection uses native exact fit and skill read, without applying", async 
   assert.match(r.readout.reviewedPlanFingerprint, /^[a-f0-9]{64}$/);
   assert.deepEqual(f.writes, []);
 });
+
+for (const existing of [false, true])
+  test(`saved supplies reach the reviewed quantities on the ${existing ? "assembled" : "new"} ship`, async () => {
+    const f = fixture({
+      existing,
+      supplies: { checked: true, ...(existing ? { outcome: "lost" as const } : {}) },
+    });
+    const review = await f.execute("inspect");
+    assert.ok(
+      review.readout.plan.steps.some((step: string) => step.includes("saved supply quantities")),
+    );
+    assert.match(review.readout.plan.steps.at(-1), /compatible fitted modules/);
+    assert.deepEqual(f.writes, []);
+    f.selectPlan(review.readout.reviewedPlanFingerprint);
+    const applied = await f.execute("apply");
+    assert.equal(applied.phase, "Provisioning verified", applied.why);
+    assert.deepEqual(
+      applied.readout.finalStatus.targets.map((t: any) => [t.typeID, t.current]),
+      savedTargets.map((t) => [t.typeID, t.target]),
+    );
+    assert.deepEqual(f.writes, [
+      existing ? "Board" : "/api/bridge/provisioning/provision-ship",
+      "/api/bridge/provisioning/replenish",
+    ]);
+    assert.deepEqual(f.rechecked, existing ? ["saved-supplies"] : []);
+  });
+
+test("checked Apply replenishes and charges the ship, counting the loaded unit towards the saved amount", async () => {
+  const f = fixture({ supplies: { checked: true, load: true } });
+  f.selectPlan((await f.execute("inspect")).readout.reviewedPlanFingerprint);
+  const result = await f.execute("apply");
+  assert.equal(result.phase, "Provisioning verified", result.why);
+  assert.equal(result.readout.finalStatus.targets.find((t: any) => t.typeID === 242).current, 3);
+  assert.deepEqual(result.readout.finalStatus.charges, [
+    { flagID: 27, typeID: 242, name: "Standard S", target: 1, current: 1, state: "FULL" },
+  ]);
+  assert.deepEqual(f.writes, [
+    "/api/bridge/provisioning/provision-ship",
+    "/api/bridge/provisioning/replenish",
+    "Split",
+    "LoadAmmo",
+  ]);
+});
+
+test("unchecked saved supplies preserve the ordinary Apply path and the option cannot change after Review", async () => {
+  const option = { checked: true };
+  const f = fixture({ supplies: option });
+  f.selectPlan((await f.execute("inspect")).readout.reviewedPlanFingerprint);
+  option.checked = false;
+  const changed = await f.execute("apply");
+  assert.match(changed.why, /ReviewChanged/);
+  assert.deepEqual(f.writes, []);
+  f.selectPlan((await f.execute("inspect")).readout.reviewedPlanFingerprint);
+  const applied = await f.execute("apply");
+  assert.equal(applied.phase, "Provisioning verified", applied.why);
+  assert.equal(applied.readout.finalStatus.supplies, "MISSING");
+  assert.deepEqual(f.writes, ["/api/bridge/provisioning/provision-ship"]);
+});
+
+test("a saved supply shortage or a changed ship cannot be reported as fully stocked", async () => {
+  for (const outcome of ["short", "wrong-ship"] as const) {
+    const f = fixture({ supplies: { checked: true, outcome } });
+    f.selectPlan((await f.execute("inspect")).readout.reviewedPlanFingerprint);
+    const applied = await f.execute("apply");
+    assert.equal(applied.phase, "Saved supplies incomplete", applied.why);
+    assert.equal(applied.readout.equipment, "VERIFIED");
+    assert.match(
+      applied.why,
+      outcome === "short" ? /Standard S 2\/3/ : /active ship, fitting or supply source changed/,
+    );
+    assert.equal(
+      f.writes.filter((w) => w.endsWith("/replenish")).length,
+      outcome === "short" ? 1 : 0,
+    );
+  }
+});
+
 test("applies one reviewed native operation and independently verifies the fitted new hull", async () => {
   const f = fixture(),
     r = await f.execute("apply");
@@ -675,6 +958,13 @@ test("plan digest does not contain session-specific review data", () => {
   assert.equal(reviewedPlanFingerprint(a), reviewedPlanFingerprint(b));
 });
 
+test("unrelated corporate inventory does not invalidate a reviewed fit", () => {
+  const initial = physical(),
+    updated = physical();
+  updated.source.rows.push({ ...updated.source.rows[0]!, itemID: 1001, typeID: 999 });
+  assert.equal(reviewedPlanFingerprint(initial), reviewedPlanFingerprint(updated));
+});
+
 for (const [label, cpu, powergrid] of [
   ["CPU", { used: 101, total: 100 }, { used: 10, total: 50 }],
   ["powergrid", { used: 20, total: 100 }, { used: 51, total: 50 }],
@@ -731,8 +1021,39 @@ test("native drone storage can block Apply without hiding verified candidate CPU
   assert.deepEqual(f.writes, []);
 });
 
+test("native Apply verifies the Procurer rig slots without requiring online effects or per-module RPCs", async () => {
+  const f = fixture({ rigs: "installed", division: 7 });
+  const r = await f.execute("apply");
+  assert.equal(r.phase, "Provisioning verified", r.why);
+  assert.equal(r.readout.nativeResources.allModulesOnline, true);
+  assert.deepEqual(r.readout.nativeResources.cpu, { used: 20, total: 100 });
+  assert.deepEqual(r.readout.nativeResources.powergrid, { used: 10, total: 50 });
+  assert.equal(f.writes.length, 1);
+  assert.deepEqual([...f.fittingReads].sort(), ["ItemGetInfo", "loadFitting", "type effects: 31718,31754"]);
+});
+
+test("missing rig identity and CPU over capacity still block the verified result", async () => {
+  for (const [options, reason] of [
+    [{ rigs: "missing" as const }, /physical module fit changed/],
+    [{ rigs: "installed" as const, overCPU: true }, /CPU.*101.*100/],
+  ] as const) {
+    const f = fixture(options);
+    const r = await f.execute("apply");
+    assert.match(r.why, reason);
+    assert.equal(f.writes.length, 1);
+  }
+});
+
 test("an offline final module prevents a verified result after the native Apply", async () => {
   const f = fixture({ offline: true }),
+    r = await f.execute("apply");
+  assert.match(r.why, /online equipment/);
+  assert.match(r.why, /slots? 27/i);
+  assert.equal(f.writes.length, 1);
+});
+
+test("an online module belonging to a different pilot cannot verify a fit", async () => {
+  const f = fixture({ wrongModuleOwner: true }),
     r = await f.execute("apply");
   assert.match(r.why, /online equipment/);
   assert.equal(f.writes.length, 1);

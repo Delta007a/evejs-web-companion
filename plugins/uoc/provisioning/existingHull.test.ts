@@ -172,6 +172,18 @@ test("a ready assembled ship in Division 7 is withdrawn by exact Item ID and boa
   assert.deepEqual(f.assembled.get(55)?.contents.map(row => row.itemID), before);
 });
 
+test("corporate Review reuses proven personal hull candidates and still inspects their fit", async () => {
+  const f = world([{ id: 55, fit: complete }], { corporate: true });
+  const { selection } = await reviewExistingHull((path, body) => {
+    assert.notEqual((body as { of?: unknown } | undefined)?.of, "hangar",
+      "the native review already read the personal hangar");
+    return f.read(path, body);
+  }, { ...f.native(), personalHullIDs: [55] });
+  assert.equal(selection?.itemID, 55);
+  assert.equal(selection.kind, "READY");
+  assert.deepEqual(f.writes, []);
+});
+
 test("complete the current partial fit with a missing rig and two drones while retaining installed items", async () => {
   const f = world([{ id: initialShip, fit: [[moduleType, 27], [droneType, 87, 3]] }, { id: 55, fit: [] }], { lost: "fit" });
   const { review, selection } = await reviewExistingHull(f.read, f.native());

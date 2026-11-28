@@ -1,6 +1,7 @@
 import { trainingTargets, trainingPlanTargets } from "../shared/trainingTargets.ts";
 export { trainingTargets } from "../shared/trainingTargets.ts";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { fittingItems, fittingRow } from "../shared/savedFitting.ts";
 import type { BackendRun, PluginRunContext } from "../../../web/src/plugin-api/backend.ts";
 import { reconcile, preDispatchRefusal } from "./reconcile.ts";
 import { trainingDocument } from "./hr.ts";
@@ -173,63 +174,6 @@ export function trainingSetup(input: unknown): Setup | null {
   };
 }
 
-function fittingRow(value: any, fittingID: number | undefined) {
-  if (
-    value?.type === "object" &&
-    String(scalar(value.name)).endsWith("objectCaching.CachedMethodCallResult")
-  )
-    value = value.args?.[1]?.value;
-  if (value?.type !== "dict" || !Array.isArray(value.entries))
-    throw Error("Corporation fitting library is unreadable.");
-  const matches = value.entries.filter(
-    (e: any) => Array.isArray(e) && Number(scalar(e[0])) === fittingID,
-  );
-  if (matches.length !== 1) throw Error("The selected corporation fitting is unavailable.");
-  return fields(matches[0][1]);
-}
-
-function fittingItems(value: any, setup: Setup): [number, number, number][] {
-  const f = fittingRow(value, setup.fittingID);
-  if (
-    Number(scalar(f.fittingID)) !== setup.fittingID ||
-    Number(scalar(f.ownerID)) !== setup.corporationID ||
-    Number(scalar(f.shipTypeID)) !== setup.goalTypeID ||
-    f.fitData?.type !== "list" ||
-    !Array.isArray(f.fitData.items) ||
-    !f.fitData.items.length
-  )
-    throw Error("The selected fitting identity changed.");
-  const tuples: [number, number, number][] = f.fitData.items.map((row: any) => {
-    const a = Array.isArray(row) ? row : row?.type === "tuple" ? row.items : null;
-    if (
-      !Array.isArray(a) ||
-      a.length !== 3 ||
-      !a.every(positive) ||
-      !(
-        [5, 87, 158].includes(a[1]!) ||
-        (
-          [
-            [11, 34],
-            [92, 99],
-            [125, 132],
-            [164, 171],
-          ] as [number, number][]
-        ).some(([lo, hi]) => a[1]! >= lo && a[1]! <= hi)
-      )
-    )
-      throw Error("Fitting contents are unreadable.");
-    return a as [number, number, number];
-  });
-  const canonical = [...tuples].sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
-  if (
-    createHash("sha256")
-      .update(JSON.stringify([setup.goalTypeID, canonical]))
-      .digest("hex") !== setup.fingerprint
-  )
-    throw Error("The selected fitting changed; review again.");
-  return tuples;
-}
-
 function fittingTypeIDs(hull: number, items: readonly [number, number, number][]): number[] {
   return [
     ...new Set([
@@ -264,6 +208,7 @@ type FitChoice = {
   fingerprint: string;
   estimatedCostISK: number | null;
   issue: string | null;
+  bookPricesCents?: Record<number, number>;
   prerequisites?: Entry[];
   items?: [number, number, number][];
 };
@@ -1064,21 +1009,28 @@ export const trainingInspectRun: BackendRun = {
         });
         return;
       }
-      const corporationID = Number(
-        scalar(fields(await ask("corpRegistry", "GetCorporation")).corporationID),
-      );
+      const [corporation, native] = await Promise.all([
+        ask("corpRegistry", "GetCorporation"),
+        json("/api/bridge/skills"),
+      ]);
+      const corp = fields(corporation);
+      const corporationID = Number(scalar(corp.corporationID));
       if (!positive(corporationID)) throw Error("The pilot's corporation is unavailable.");
-      const sheet = sheetOf((await json("/api/bridge/skills")).skills, run.characterID);
-      const review = await readTrainingReviewInputs(ask, run.characterID, corporationID);
+      const sheet = sheetOf(native.skills, run.characterID);
       const choices: FitChoice[] = [];
       const setup =
         object(run.setup) && Object.keys(run.setup).length
           ? trainingSetup({ ...run.setup, maxSpendISK: 0 })
           : null;
+      if (setup?.fittingID && setup.corporationID !== corporationID)
+        throw Error("The selected fitting corporation changed.");
+      const [review, raw] = await Promise.all([
+        readTrainingReviewInputs(ask, run.characterID, corporationID, corp),
+        setup?.fittingID && setup.fingerprint
+          ? ask("corpFittingMgr", "GetFittings", [corporationID])
+          : null,
+      ]);
       if (setup?.fittingID && setup.fingerprint) {
-        if (setup.corporationID !== corporationID)
-          throw Error("The selected fitting corporation changed.");
-        const raw = await ask("corpFittingMgr", "GetFittings", [corporationID]);
         const row = fittingRow(raw, setup.fittingID);
         const fit = {
           corporationID,
@@ -1114,6 +1066,7 @@ export const trainingInspectRun: BackendRun = {
           ];
           if (missing.length > 32) throw Error("The required skill list is too large to quote.");
           let total = 0;
+          const bookPricesCents: Record<number, number> = {};
           if (missing.length) {
             const [prices, lists] = await Promise.all([
               json(`/api/client-data/type-prices?typeIDs=${missing.join(",")}`),
@@ -1136,7 +1089,9 @@ export const trainingInspectRun: BackendRun = {
                 !lists.lists[id].includes(93)
               )
                 throw Error("A required book cannot be purchased directly.");
-              total += cents(base * 1.3);
+              const price = cents(base * 1.3);
+              total += price;
+              bookPricesCents[id] = price;
             }
             if (!Number.isSafeInteger(total)) throw Error("Skill price is not representable.");
           }
@@ -1149,6 +1104,7 @@ export const trainingInspectRun: BackendRun = {
             items,
             estimatedCostISK: total / 100,
             issue: null,
+            bookPricesCents,
             prerequisites: [...levels].map(([typeID, toLevel]) => ({ typeID, toLevel })),
           });
         } catch (error) {
@@ -1171,10 +1127,14 @@ export const trainingInspectRun: BackendRun = {
         ...compactTrainingInspection(sheet),
         choices,
       };
-      if (Buffer.byteLength(JSON.stringify(readout)) > 16 * 1024)
-        throw Error(
-          "The native training sheet and fitting exceed the hosted inspection response budget.",
-        );
+      if (Buffer.byteLength(JSON.stringify(readout)) > 16 * 1024) {
+        // Large sheets can still be inspected. The page reads its own prices in that case.
+        for (const fit of choices) delete fit.bookPricesCents;
+        if (Buffer.byteLength(JSON.stringify(readout)) > 16 * 1024)
+          throw Error(
+            "The native training sheet and fitting exceed the hosted inspection response budget.",
+          );
+      }
       run.report({
         status: "stopped",
         phase: "Training inspected",

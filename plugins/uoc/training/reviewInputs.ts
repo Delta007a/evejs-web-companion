@@ -5,10 +5,11 @@ export async function readTrainingReviewInputs(
   call: WalletCall,
   characterID: number,
   corporationID: number,
+  observedCorporation?: Readonly<Record<string, unknown>>,
 ) {
   const [cash, corporate, attributes, grade] = await Promise.allSettled([
     call("account", "GetCashBalance", [0]),
-    readTrainingWallet(call, characterID, corporationID),
+    readTrainingWallet(call, characterID, corporationID, observedCorporation),
     call("skillHandler", "GetAttributes"),
     call("subscriptionMgr", "GetCloneGrade"),
   ]);

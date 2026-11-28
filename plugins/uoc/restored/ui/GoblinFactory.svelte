@@ -12,7 +12,11 @@
     rememberSelectedTrainee,
     trainingWorldStorage,
   } from "../training/worldStorage.ts";
-  import { readTrainingActiveShip, readTrainingWorld } from "../adapters/training.ts";
+  import {
+    readTrainingActiveShip,
+    readTrainingCorporationName,
+    readTrainingWorld,
+  } from "../adapters/training.ts";
   import OperationPilotPicker from "./OperationPilotPicker.svelte";
   import type { VerifiedOperationPilot } from "../app/api.ts";
   import { loadTrainingSettingsContext, readSavedTrainingAuthority } from "../adapters/training.ts";
@@ -288,9 +292,21 @@
       row.enrollment?.state === "READY" && row.enrollment.corporationID === row.pilot.corporationID
     );
   }
-  function observeActiveShip(row: PilotRow) {
+  function observeTrainee(row: PilotRow) {
     const options = credentials.get(row.account);
     activeShip = options ? readTrainingActiveShip(row.pilot.characterID, options) : null;
+    if (!options) return;
+    void readTrainingCorporationName(row.pilot, options).then((name) => {
+      if (!name || selectedTrainee !== row.key || credentials.get(row.account) !== options) return;
+      const current = rows.find((candidate) => candidate.key === row.key);
+      if (
+        current &&
+        current.pilot.corporationID === row.pilot.corporationID &&
+        current.pilot.corporationName === row.pilot.corporationName &&
+        current.pilot.corporationName !== name
+      )
+        update(row.key, { pilot: { ...current.pilot, corporationName: name } });
+    });
   }
   function selectTrainee(row: PilotRow) {
     if (selectedTrainee && selectedTrainee !== row.key) onTraineeChange?.();
@@ -299,7 +315,7 @@
       account: row.account,
       characterID: row.pilot.characterID,
     });
-    observeActiveShip(row);
+    observeTrainee(row);
   }
   async function verifyMembership(row: PilotRow) {
     const options = credentials.get(row.account);
@@ -410,7 +426,7 @@
         const trainee = findPilot(remembered);
         if (trainee) selectTrainee(trainee);
       } else if (visible[0]) {
-        observeActiveShip(visible[0]);
+        observeTrainee(visible[0]);
       }
       if (savedHR) {
         const hr = findPilot(savedHR),
@@ -540,7 +556,10 @@
             />{/if}</header
         >
         <p class="eyebrow">{row.account}</p>
-        <p>Corporation: {row.pilot.corporationName ?? "Name unavailable"}</p>
+        <p>Corporation: {row.pilot.corporationName ??
+            (row.pilot.corporationID
+              ? `Corporation ${row.pilot.corporationID}`
+              : "Name unavailable")}</p>
         <p
           >Active ship: {#await activeShip}{knownShip ?? "Reading…"}{:then name}{name ??
               knownShip ??

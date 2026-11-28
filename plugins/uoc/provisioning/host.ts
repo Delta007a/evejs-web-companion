@@ -3,14 +3,14 @@ import { type BackendRun, type PluginRunContext } from "../../../web/src/plugin-
 import type { JsonValue } from "../../../web/src/plugin-api/index.ts";
 import { trainingTargets } from "../shared/trainingTargets.ts";
 import { createPilotSession } from "../../../web/src/plugin-api/pilotSession.ts";
-import { loadFitting, buildSlots, slotFlagOf } from "../../../web/src/plugin-api/flying.ts";
+import { loadFitting } from "../../../web/src/plugin-api/flying.ts";
 import {
   simulatePilotResources,
   decodeNativeFittingResources,
   nativeApplyBlockers,
+  verifyNativeFittedEquipment,
   type ResourceQualification,
 } from "./resourceQualification.ts";
-import { decodeModuleObservation } from "../shared/moduleObservation.ts";
 import { reviewPreviousShipStorage, storePreviousShip } from "./previousShip.ts";
 import {
   applyExistingHull,
@@ -18,6 +18,7 @@ import {
   verifyPersonalHull,
   type ExistingHull,
 } from "./existingHull.ts";
+import { applySavedSupplies } from "./savedSupplies.ts";
 
 type Setup = {
   corporationID: number;
@@ -102,6 +103,7 @@ export function reviewedPlanFingerprint(
   r: any,
   storage?: { officeID: number; division: number } | null,
   existing?: ExistingHull | null,
+  savedFittingSupplies = false,
 ): string {
   const pin = r?.source?.pin,
     plan = r?.plan;
@@ -165,6 +167,11 @@ export function reviewedPlanFingerprint(
     .sort((a: any[], b: any[]) => a[0] - b[0]);
   if (new Set(rows.map((row: any[]) => row[0])).size !== rows.length)
     throw Error("Physical provisioning source is ambiguous.");
+  const fitTypes = new Set([
+    plan.targetHullTypeID,
+    ...plan.requirements.map((row: any) => row.typeID),
+    ...plan.supplies.map((row: any) => row.typeID),
+  ]);
   const stable = {
     characterID: r.context.characterID,
     shipID: r.context.shipID,
@@ -179,12 +186,13 @@ export function reviewedPlanFingerprint(
       flag: pin.flag,
       office: pin.office,
       dockedLocationID: pin.dockedLocationID ?? null,
-      rows,
+      rows: pin.descriptor.kind === "corp" ? rows.filter((row: any[]) => fitTypes.has(row[1])) : rows,
     },
     ...(storage
       ? { previousShipStorage: { officeID: storage.officeID, division: storage.division } }
       : {}),
     ...(existing ? { existing } : {}),
+    ...(savedFittingSupplies ? { savedFittingSupplies: true } : {}),
     plan: {
       mode: plan.mode,
       targetHullTypeID: plan.targetHullTypeID,
@@ -207,7 +215,7 @@ export function reviewedPlanFingerprint(
 }
 
 // The full native snapshot remains the input to the review hash and executor.
-function reviewPresentation(r: any) {
+function reviewPresentation(r: any, savedFittingSupplies: boolean) {
   const {
     candidateEquipment,
     oldShipContents,
@@ -230,7 +238,20 @@ function reviewPresentation(r: any) {
   for (const hull of hullCandidates)
     if (visibleHulls.length < 24 && !visibleHulls.includes(hull)) visibleHulls.push(hull);
   return {
-    plan: { ...plan, hullCandidates: visibleHulls, hullCandidateCount: hullCandidates.length },
+    plan: {
+      ...plan,
+      hullCandidates: visibleHulls,
+      hullCandidateCount: hullCandidates.length,
+      ...(savedFittingSupplies && plan.supplies.length
+        ? {
+            steps: [
+              ...(plan.steps ?? []),
+              "Top up the saved supply quantities on the active ship",
+              "Load saved charges into compatible fitted modules",
+            ],
+          }
+        : {}),
+    },
     sourceRead: {
       pin: r.source.pin,
       access: r.source.access,
@@ -323,10 +344,8 @@ export function createProvisioningRun(
           setup.sourceKind === "hangar"
             ? { kind: "hangar" }
             : { kind: "corp", corporationID: sourceCorp, division: setup.division },
-        ...(setup.savedFittingSupplies === true
-          ? { supplyPolicy: { supplies: [], savedFittingSupplies: true } }
-          : {}),
       };
+      const savedFittingSupplies = setup.savedFittingSupplies === true;
       const verifyReview = (r: any) => {
         const context = r.context,
           definition = r.contract?.definition,
@@ -420,44 +439,26 @@ export function createProvisioningRun(
         if (r.context.shipTypeID !== setup.goalTypeID || r.status?.equipment !== "VERIFIED")
           return null;
         try {
-          const measured = decodeNativeFittingResources(
-            await ask("dogmaIM", "ItemGetInfo", [r.context.shipID]),
-            {
-              shipID: r.context.shipID,
-              shipTypeID: setup.goalTypeID,
-              characterID: run.characterID,
-            },
-          );
+          const [info, f] = await Promise.all([
+            ask("dogmaIM", "ItemGetInfo", [r.context.shipID]),
+            loadFitting({ baseUrl: run.baseUrl, fetch: run.fetch }),
+          ]);
+          const measured = decodeNativeFittingResources(info, {
+            shipID: r.context.shipID,
+            shipTypeID: setup.goalTypeID,
+            characterID: run.characterID,
+          });
           if (!measured)
             return {
               state: "UNKNOWN" as const,
               reason: "Native CPU and Powergrid are unreadable.",
             };
-          const f = await loadFitting({ baseUrl: run.baseUrl, fetch: run.fetch });
-          if (
-            f.activeShipID !== r.context.shipID ||
-            Object.values(f.errors).some((e) => e !== null)
-          )
-            throw Error("Native fitted module identities are unreadable.");
-          const slots = buildSlots(f.slots, f.shipInfo, f.online),
-            offlineSlots: number[] = [];
-          for (const [flagID, typeID] of r.contract.structural) {
-            const slot = slots.find((s) => slotFlagOf(s.family, s.index) === flagID);
-            if (!slot?.module || slot.module.typeID !== typeID)
-              throw Error("The physical module fit changed during CPU/PG verification.");
-            const state = decodeModuleObservation(
-              await ask("dogmaIM", "ItemGetInfo", [slot.module.itemID]),
-              {
-                moduleID: slot.module.itemID,
-                typeID,
-                ownerID: run.characterID,
-                shipID: r.context.shipID,
-                flagID,
-              },
-            );
-            if (!state.online) offlineSlots.push(flagID);
-          }
-          return { ...measured, allModulesOnline: offlineSlots.length === 0, offlineSlots };
+          const equipment = await verifyNativeFittedEquipment(
+            f,
+            { shipID: r.context.shipID, characterID: run.characterID, structural: r.contract.structural },
+            json,
+          );
+          return { ...measured, ...equipment };
         } catch (error) {
           return {
             state: "UNKNOWN" as const,
@@ -542,7 +543,12 @@ export function createProvisioningRun(
           setup.oldShipDivision,
         );
         const skills = await qualify(r),
-          planFingerprint = reviewedPlanFingerprint(r, storage.plan, selection),
+          planFingerprint = reviewedPlanFingerprint(
+            r,
+            storage.plan,
+            selection,
+            savedFittingSupplies,
+          ),
           resources = await projection(r),
           nativeResources = await physicalResources(r);
         const candidateReady =
@@ -576,7 +582,7 @@ export function createProvisioningRun(
           stationID: r.context.locationID,
           fittingService: r.fittingService ?? "UNKNOWN",
           skills,
-          ...reviewPresentation(r),
+          ...reviewPresentation(r, savedFittingSupplies),
           reviewedPlanFingerprint: planFingerprint,
           resources,
           nativeResources,
@@ -673,23 +679,39 @@ export function createProvisioningRun(
             );
           targetHullID = result.manifest.targetHullID;
         }
-        const final = await review(true);
-        if (
-          final.context.shipID !== targetHullID ||
-          final.context.locationID !== r.context.locationID ||
-          final.status?.equipment !== "VERIFIED" ||
-          final.plan?.mode !== "ALREADY_SATISFIED"
-        )
-          throw Error("PROVISIONING_RECOVERY_REQUIRED: Final equipment readback is not verified.");
+        const readFinal = async () => {
+          const verified = await review(true);
+          if (
+            verified.context.shipID !== targetHullID ||
+            verified.context.locationID !== r.context.locationID ||
+            verified.status?.equipment !== "VERIFIED" ||
+            verified.plan?.mode !== "ALREADY_SATISFIED"
+          )
+            throw Error(
+              "PROVISIONING_RECOVERY_REQUIRED: Final equipment readback is not verified.",
+            );
+          return verified;
+        };
+        const final = await readFinal();
         const finalResources = await physicalResources(final);
         if (
           finalResources?.state !== "NATIVE" ||
           !finalResources.fits ||
           !finalResources.allModulesOnline
-        )
+        ) {
+          let detail = finalResources?.state === "UNKNOWN" ? finalResources.reason : "";
+          if (finalResources?.state === "NATIVE")
+            detail = finalResources.fits
+              ? `Offline module slots ${finalResources.offlineSlots.join(", ")}.`
+              : `CPU ${finalResources.cpu.used} / ${finalResources.cpu.total} tf. Powergrid ${finalResources.powergrid.used} / ${finalResources.powergrid.total} MW.`;
           throw Error(
-            "PROVISIONING_RECOVERY_REQUIRED: Exact final native CPU/PG and online equipment are not verified. No Apply replay.",
+            [
+              "PROVISIONING_RECOVERY_REQUIRED: Exact final native CPU/PG and online equipment are not verified.",
+              detail,
+              "No Apply replay.",
+            ].filter(Boolean).join(" "),
           );
+        }
         const completed = {
           characterID: run.characterID,
           shipID: final.context.shipID,
@@ -722,12 +744,34 @@ export function createProvisioningRun(
                 (error) => ({ proof: null, reason: String(error?.message ?? error) }),
               )
             : null;
+        let finalStatus = final.status,
+          savedSuppliesReason: string | null = null;
+        if (savedFittingSupplies) {
+          try {
+            const supplies = await applySavedSupplies(run, json, input, final, readFinal, () => {
+              current();
+              if (stopping) throw Error("Provisioning stopped before loading saved supplies.");
+            });
+            finalStatus = supplies.finalStatus;
+            savedSuppliesReason = supplies.reason;
+          } catch (error) {
+            savedSuppliesReason = String((error as Error)?.message ?? error);
+            finalStatus = { equipment: "VERIFIED", supplies: "UNKNOWN", targets: [] };
+          }
+        }
+        const why = [stored?.reason, savedSuppliesReason].filter(Boolean).join(" ");
         run.report({
-          status: stored?.reason ? "error" : "stopped",
-          phase: stored?.reason ? "Previous ship storage incomplete" : "Provisioning verified",
-          ...(stored?.reason ? { why: stored.reason } : {}),
+          status: why ? "error" : "stopped",
+          phase: savedSuppliesReason
+            ? "Saved supplies incomplete"
+            : stored?.reason
+              ? "Previous ship storage incomplete"
+              : "Provisioning verified",
+          ...(why ? { why } : {}),
           readout: {
             ...completed,
+            finalStatus,
+            ...(savedSuppliesReason ? { savedSuppliesReason } : {}),
             previousShipStorage: stored?.proof ?? null,
             previousShipStorageReason: stored?.reason ?? null,
           } as unknown as JsonValue,

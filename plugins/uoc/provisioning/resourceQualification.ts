@@ -1,7 +1,9 @@
-import { getShipBays, slotFlagOf, isSlotFlag } from "../../../web/src/plugin-api/flying.ts";
+import { getShipBays, slotFlagOf, isSlotFlag, type loadFitting } from "../../../web/src/plugin-api/flying.ts";
 import type { PilotSession } from "../../../web/src/plugin-api/pilotSession.ts";
-import { readKeyVal, readRowField, unwrapReal, type JsonValue } from "../shared/wire.ts";
+import { isListValue, readKeyVal, readRowField, unwrapLong, unwrapReal, type JsonValue } from "../shared/wire.ts";
 import { exactInt } from "../shared/dogma.ts";
+import { checkedInventory } from "../shared/nativeInventory.ts";
+import { inventoryItems } from "./existingHull.ts";
 
 type FitItem = { typeID: number; flagID: number; quantity: number };
 type Pair = { used: number; total: number };
@@ -402,4 +404,52 @@ export function decodeNativeFittingResources(
     powergrid: { used: gridUsed, total: gridTotal },
     fits: cpuUsed <= cpuTotal + 1e-6 && gridUsed <= gridTotal + 1e-6,
   };
+}
+
+/** Match every fitted item, then require the online effect where its type supports it. */
+export async function verifyNativeFittedEquipment(
+  fitting: Awaited<ReturnType<typeof loadFitting>>,
+  expected: { shipID: number; characterID: number; structural: readonly (readonly number[])[] },
+  read: (path: string) => Promise<any>,
+) {
+  if (fitting.activeShipID !== expected.shipID || fitting.errors.slots !== null)
+    throw Error("Native fitted module identities are unreadable.");
+  if (fitting.errors.online !== null || !isListValue(fitting.online))
+    throw Error("Native online module states are unreadable.");
+  const online = new Set(fitting.online.items.map((id) => Number(unwrapLong(id))));
+  if ([...online].some((id) => !positive(id)))
+    throw Error("Native online module states are unreadable.");
+  const installed = checkedInventory({
+    type: "list",
+    items: inventoryItems(fitting.slots).filter((entry) => {
+      const row = entry?.type === "packedrow" ? entry.fields : entry;
+      // Loaded charges share a fitting flag and may have tuple IDs.
+      return Number(unwrapLong(row?.categoryID)) !== 8;
+    }),
+  });
+  if (installed.some((item) => item.ownerID !== expected.characterID || item.locationID !== expected.shipID))
+    throw Error("Native fitted module identities are unreadable.");
+  if (installed.length !== expected.structural.length)
+    throw Error("The physical module fit changed during CPU/PG verification.");
+  for (const [flagID, typeID] of expected.structural) {
+    const rows = installed.filter((item) => item.flagID === flagID);
+    if (rows.length !== 1 || rows[0]?.quantity !== 1 || rows[0].typeID !== typeID)
+      throw Error("The physical module fit changed during CPU/PG verification.");
+  }
+
+  const unlisted = installed.filter((item) => !online.has(item.itemID));
+  const offlineSlots: number[] = [];
+  if (unlisted.length) {
+    // A successful game snapshot can omit rigs and other equipment without effectOnline (16).
+    // Resolve the unlisted types in one catalog read without re-reading modules from EveJS.
+    const typeIDs = [...new Set(unlisted.map((item) => item.typeID))];
+    const metadata = await read(`/api/client-data/dogma-types?typeIDs=${typeIDs.join(",")}`);
+    for (const item of unlisted) {
+      const effects = metadata?.types?.[item.typeID]?.effects;
+      if (metadata?.available !== true || !Array.isArray(effects) || !effects.length || !effects.every(positive))
+        throw Error(`Native online applicability is unreadable for type ${item.typeID}.`);
+      if (effects.includes(16)) offlineSlots.push(item.flagID);
+    }
+  }
+  return { allModulesOnline: offlineSlots.length === 0, offlineSlots };
 }

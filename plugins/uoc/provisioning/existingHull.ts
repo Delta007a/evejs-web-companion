@@ -76,7 +76,7 @@ function required(review: any): Requirement[] {
   return rows;
 }
 
-function inventoryItems(raw: any): any[] {
+export function inventoryItems(raw: any): any[] {
   const list =
     raw?.type === "objectex1" &&
     raw.header?.[0]?.value === "__builtin__.set" &&
@@ -102,7 +102,7 @@ function atHangar(row: NativeInventoryRow, scope: Scope) {
   );
 }
 
-function stockRows(review: any): Stock[] {
+export function stockRows(review: any): Stock[] {
   const { pin, rows } = review.source;
   if (
     !Array.isArray(rows) ||
@@ -283,21 +283,32 @@ export async function reviewExistingHull(
   if (scope.shipTypeID === typeID) candidates.push({ itemID: scope.shipID, origin: "active" });
   let unreadable = false;
   try {
-    let personal: Stock[] = stock;
-    if (source.kind === "corp") {
+    let personalIDs: number[];
+    if (source.kind === "corp" && native.personalHullIDs !== undefined) {
+      if (
+        !Array.isArray(native.personalHullIDs) ||
+        !native.personalHullIDs.every(positive) ||
+        new Set(native.personalHullIDs).size !== native.personalHullIDs.length
+      )
+        throw Error("The personal hangar identity is uncertain.");
+      personalIDs = native.personalHullIDs;
+    } else if (source.kind === "corp") {
       const items = inventoryItems(await ask(read, "invbroker", "List", [4], "hangar"));
-      personal = checkedInventory({ type: "list", items }).map((row, i) => ({
+      const personal = checkedInventory({ type: "list", items }).map((row, i) => ({
         ...row,
         singleton: singleton(items[i]?.fields ?? items[i]),
       }));
       if (personal.some((row) => !atHangar(row, scope)))
         throw Error("The personal hangar identity is uncertain.");
+      personalIDs = personal.filter((row) => row.typeID === typeID && row.singleton).map((row) => row.itemID);
+    } else {
+      personalIDs = stock.filter((row) => row.typeID === typeID && row.singleton).map((row) => row.itemID);
     }
     candidates.push(
-      ...personal
-        .filter((row) => row.typeID === typeID && row.singleton && row.itemID !== scope.shipID)
-        .sort((a, b) => a.itemID - b.itemID)
-        .map((row) => ({ itemID: row.itemID, origin: "hangar" as const })),
+      ...personalIDs
+        .filter((itemID) => itemID !== scope.shipID)
+        .sort((a, b) => a - b)
+        .map((itemID) => ({ itemID, origin: "hangar" as const })),
     );
   } catch {
     unreadable = true;

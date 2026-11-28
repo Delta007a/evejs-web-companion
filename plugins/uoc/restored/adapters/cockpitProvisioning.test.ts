@@ -41,9 +41,9 @@ for(const [existing,corporate] of [[false,false],[false,true],[true,false],[true
    if(url==='http://test/api/bridge/ship/55/bays?keys=drone')return Response.json({ok:true,shipID:55,bays:[]});
    assert.equal(url,'http://test/api/bridge/fitting');
    return Response.json({ok:true,activeShipID:55,
-    slots:{type:'list',items:modules.map(module=>({type:'packedrow',fields:{...module,quantity:1,singleton:1,categoryID:7}}))},
+    slots:{type:'list',items:modules.map(module=>({type:'packedrow',fields:{...module,quantity:1,singleton:1,categoryID:7,ownerID:7,locationID:55}}))},
     shipInfo:dict([[55,keyval([['itemID',55],['attributes',dict([[14,1],[13,0],[12,0],[1137,1]])]])]]),
-    online:{type:'list',items:modules.map(module=>module.itemID)},errors:{slots:null,shipInfo:null,online:null,chargeFits:null},
+    online:{type:'list',items:[501]},errors:{slots:null,shipInfo:null,online:null,chargeFits:null},
    });
   },
  });
@@ -57,15 +57,10 @@ for(const [existing,corporate] of [[false,false],[false,true],[true,false],[true
   flying:{bridgeAsk:async(service:string,method:string,[itemID]:number[])=>{
    assert.deepEqual([service,method],['dogmaIM','ItemGetInfo']);
    assert.equal(applied,true);
-   const module=modules.find(row=>row.itemID===itemID);
-   if(itemID===55)return keyval([
+   assert.equal(itemID,55,'only the hull needs a fresh ItemGetInfo');
+   return keyval([
     ['itemID',55],['invItem',{type:'packedrow',fields:{itemID:55,typeID:17476,ownerID:7}}],
     ['time',time],['wallclockTime',time],['attributes',dict([[49,10],[48,20],[15,1],[11,3]])],
-   ]);
-   assert.ok(module);
-   return keyval([
-    ['itemID',itemID],['invItem',{type:'packedrow',fields:{...module,ownerID:7,locationID:55}}],
-    ['time',time],['wallclockTime',time],['activeEffects',dict([[16,[itemID,7,55,null,null,[],16,time,-1,1]]])],
    ]);
   }},
   simulateFitting:async(fit:{shipTypeID:number;fitData:unknown[]})=>{
@@ -133,6 +128,7 @@ for(const [existing,corporate] of [[false,false],[false,true],[true,false],[true
   if(path==='/api/bridge/skills')return {skills:{characterID:7,skills:[]}};
   if(path==='/api/client-data/required-skills?typeIDs=17476,20,21,2203')return {available:true,required:{17476:{},20:{},21:{},2203:{}}};
   if(path==='/api/types/volumes?typeIDs=2203')return {volumes:{2203:5}};
+  if(path==='/api/client-data/dogma-types?typeIDs=21')return {available:true,types:{21:{effects:[2663]}}};
   if(path==='/api/client-data/dogma-types?typeIDs=17476,1373,20,21')return {
    available:true,types:Object.fromEntries([17476,1373,20,21].map(id=>[id,{attributes:[],effects:[]}])),effects:{},
   };

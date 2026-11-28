@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {readFactoryAccount,readFactoryWorld} from './factoryClient.ts';
 import {continueNewTrainee,pendingTraineeKey} from './newTrainee.ts';
 import {authenticatedJson,installPageContext,worldID} from '../app/context.ts';
@@ -84,9 +87,10 @@ test('Training reads the selected offline pilot’s ship from character selectio
  }finally{installTrainingAdapter(null);}
 });
 
-test("Training accepts the authenticated WC76 installation identity from the backend world route", async () => {
+test("Training accepts the authenticated installation identity from the backend world route", async () => {
  const savedDirectory = process.env.EVEJS_PLUGIN_DATA_DIR;
- process.env.EVEJS_PLUGIN_DATA_DIR = "fixture/wc76/plugins/uoc";
+ const directory = mkdtempSync(path.join(tmpdir(), "uoc-training-world-"));
+ process.env.EVEJS_PLUGIN_DATA_DIR = directory;
  const request = { account:{accountID:1,username:"West"}, method:"GET", path:"/world", query:{}, params:{}, body:null };
  try {
   const reply=await worldRoute(request);
@@ -111,6 +115,7 @@ test("Training accepts the authenticated WC76 installation identity from the bac
  } finally {
   if(savedDirectory===undefined)delete process.env.EVEJS_PLUGIN_DATA_DIR;
   else process.env.EVEJS_PLUGIN_DATA_DIR=savedDirectory;
+  rmSync(directory, { recursive: true, force: true });
   installTrainingAdapter(null);
   installPageContext({});
  }

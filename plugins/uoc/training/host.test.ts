@@ -12,8 +12,10 @@ import {
   trainingTargets,
   fitTypes,
 } from "./host.ts";
+import { fields } from "./funding.ts";
 import { expandTrainingInspection, skillReviewKey, trainingSheetFromProof } from "./queue.ts";
 import type { PluginRunContext } from "../../../web/src/plugin-api/backend.ts";
+import { installTrainingAdapter, runTrainingGoal } from "../restored/adapters/training.ts";
 
 function fixture(
   failPurchase = false,
@@ -871,9 +873,11 @@ test("lost queue read verifies original submission without replay", async () => 
   assert.equal(f.reports[0].phase, "Training queued");
   assert.equal(f.calls.filter((x) => x === "SaveNewQueue").length, 1);
 });
-test("inspection reads the real corp fitting and quotes missing books without writes", async () => {
+test("inspection reads the current corporation row and fitting and quotes missing books without writes", async () => {
   const reports: any[] = [],
-    writes: string[] = [];
+    writes: string[] = [],
+    reads: string[] = [],
+    bridgeMethods: string[] = [];
   let libraryReads = 0;
   const sheet = {
     characterID: 7,
@@ -920,10 +924,20 @@ test("inspection reads the real corp fitting and quotes missing books without wr
     const u = new URL(String(url)),
       body = init?.body ? JSON.parse(String(init.body)) : null;
     const ok = (data: any) => Response.json({ ok: true, ...data });
+    reads.push(u.pathname + u.search);
     if (u.pathname === "/api/bridge/call") {
+      bridgeMethods.push(body.method);
       if (body.confirm) writes.push(body.method);
       if (body.method === "GetCorporation")
-        return ok({ result: { type: "packedrow", fields: { corporationID: 98 } } });
+        return ok({
+          result: {
+            type: "objectex2",
+            header: [
+              [{ type: "token", value: "carbon.common.script.sys.row.Row" }],
+              [["corporationID"], [98]],
+            ],
+          },
+        });
       if (body.method === "GetFittings") {
         libraryReads++;
         return ok({
@@ -933,7 +947,14 @@ test("inspection reads the real corp fitting and quotes missing books without wr
           },
         });
       }
-      if (body.method === "GetCashBalance") return ok({ result: 200 });
+      if (body.method === "GetMember")
+        return ok({
+          result: { type: "packedrow", fields: { characterID: 7, corporationID: 98, roles: 1 } },
+        });
+      if (body.method === "GetCashBalance") return ok({ result: body.args[0] === 1 ? 200 : 30 });
+      if (body.method === "GetAttributes")
+        return ok({ result: { type: "dict", entries: [[165, 24], [166, 20]] } });
+      if (body.method === "GetCloneGrade") return ok({ result: 1 });
     }
     if (u.pathname === "/api/bridge/skills") return ok({ skills: sheet });
     if (u.pathname === "/api/client-data/type-prices")
@@ -943,6 +964,9 @@ test("inspection reads the real corp fitting and quotes missing books without wr
     if (u.pathname === "/api/client-data/required-skills")
       return ok({ available: true, required: { 100: { 10: 1 }, 20: {}, 10: {} } });
     if (u.pathname === "/api/types/type-lists") return ok({ lists: { 10: [93] } });
+    if (u.pathname === "/api/names") return ok({ names: { "type:10": "Mining skill" } });
+    if (u.pathname === "/api/types/dogma")
+      return ok({ attributes: { 10: { 275: 1, 180: 165, 181: 166 } } });
     throw Error(`Unexpected ${u.pathname}`);
   };
   const run = {
@@ -957,24 +981,50 @@ test("inspection reads the real corp fitting and quotes missing books without wr
   } as unknown as PluginRunContext;
   await trainingInspectRun.start(run);
   await finish(reports);
-  assert.equal(reports[0].phase, "Training inspected");
+  assert.equal(reports[0].phase, "Training inspected", reports[0].why);
   assert.deepEqual(reports[0].readout.choices, []);
   assert.equal(libraryReads, 0);
   const fingerprint = createHash("sha256")
     .update(JSON.stringify([100, [[20, 27, 1]]]))
     .digest("hex");
-  const checked = await trainingInspectRun.check({
-    corporationID: 98,
-    fittingID: 5,
-    goalTypeID: 100,
-    fingerprint,
+  reads.length = 0;
+  bridgeMethods.length = 0;
+  installTrainingAdapter({
+    authenticatedJson: async (route, _options, body) =>
+      (await fetcher(`http://local${route}`, { body: JSON.stringify(body) })).json(),
+    runHosted: async (characterID, kind, setup) => {
+      assert.equal(characterID, run.characterID);
+      assert.equal(kind, "training-inspect");
+      const checked = await trainingInspectRun.check(setup);
+      assert.equal(checked.ok, true);
+      if (!checked.ok) throw Error("Exact inspection refused.");
+      reports.length = 0;
+      await trainingInspectRun.start({ ...run, setup: checked.setup });
+      await finish(reports);
+      return { botID: run.botID, ...reports[0] };
+    },
   });
-  assert.equal(checked.ok, true);
-  if (!checked.ok) throw Error("Exact inspection refused.");
-  reports.length = 0;
-  await trainingInspectRun.start({ ...run, setup: checked.setup });
-  await finish(reports);
-  assert.equal(reports[0].phase, "Training inspected");
+  const { outcome } = await runTrainingGoal(
+    {
+      characterID: 7,
+      goalTypeID: 100,
+      goalFitting: { corporationID: 98, fittingID: 5, fingerprint },
+      mode: "PREVIEW",
+      planDepth: "FAST",
+      fundingPolicy: "CORPORATION_WALLET_ONLY",
+    },
+    {},
+  );
+  assert.equal(outcome.totalISK, "130");
+  assert.equal(outcome.requirements[0]?.name, "Mining skill");
+  assert.equal(outcome.requirements[0]?.bookCostISK, 130);
+  assert.deepEqual(outcome.fundingEstimate, {
+    personalISK: 0,
+    corporateISK: 130,
+    shortfallISK: 0,
+    reason: null,
+  });
+  assert.equal(reports[0].phase, "Training inspected", reports[0].why);
   assert.equal(reports[0].readout.choices.length, 1);
   assert.ok(Buffer.byteLength(JSON.stringify(reports[0].readout)) <= 16 * 1024);
   const expanded = expandTrainingInspection(reports[0].readout);
@@ -985,6 +1035,33 @@ test("inspection reads the real corp fitting and quotes missing books without wr
   assert.deepEqual(reports[0].readout.choices[0].prerequisites, [{ typeID: 10, toLevel: 1 }]);
   assert.deepEqual(writes, []);
   assert.equal(libraryReads, 1);
+  assert.deepEqual(
+    {
+      total: reads.length,
+      bridge: bridgeMethods.length,
+      corporation: bridgeMethods.filter((method) => method === "GetCorporation").length,
+      bookPrices: reads.filter((route) => route === "/api/client-data/type-prices?typeIDs=10").length,
+      bookAvailability: reads.filter((route) => route.startsWith("/api/types/type-lists?")).length,
+    },
+    { total: 15, bridge: 8, corporation: 2, bookPrices: 1, bookAvailability: 1 },
+  );
+});
+
+test("native corporation records reject unknown classes, missing cells and duplicate fields", () => {
+  const row = { type: "token", value: "carbon.common.script.sys.row.Row" };
+  for (const header of [
+    [[{ ...row, value: "util.KeyVal" }], [["corporationID"], [98]]],
+    [[row], [["corporationID", "ceoID"], [98]]],
+    [
+      [row],
+      [
+        ["corporationID", "corporationID"],
+        [98, 99],
+      ],
+    ],
+  ]) {
+    assert.throws(() => fields({ type: "objectex2", header }), /Native identity is unreadable/);
+  }
 });
 
 test("the hosted skills panel reads the held native queue without funding or fitting RPCs", async () => {

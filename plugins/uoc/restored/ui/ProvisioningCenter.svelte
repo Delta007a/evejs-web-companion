@@ -340,11 +340,12 @@
                 {/if}
               </select>
             </label>
-            <label><input type="checkbox" bind:checked={savedFittingSupplies} onchange={invalidate} disabled={!!busy} /> Load saved charges and supplies on the new ship</label>
+            <label><input type="checkbox" bind:checked={savedFittingSupplies} onchange={invalidate} disabled={!!busy} /> Load saved fitting supplies</label>
             <button class="primary" disabled={!!busy || !fit || !canCheck} onclick={() => void run("Checking ship and available equipment…", check)}>
               Check ship and available equipment
             </button>
           </div>
+          {#if savedFittingSupplies}<p>Apply tops up the saved quantities, loads compatible modules, and leaves the remaining supplies in the ship’s holds.</p>{/if}
           {#if !fit}<p>Choose a saved fitting to check its requirements.</p>
           {:else if !canCheck && pilot.control.owner === "BROWSER"}
             <p>Use Fitting and Inventory in this pilot's Cockpit. To inspect the ship here, select the pilot again once offline.</p>
@@ -481,7 +482,7 @@
         {/if}
         {#if plan}
           {#if plan.mode === "ALREADY_SATISFIED"}
-            <p>The current ship already matches. Apply will verify it without fitting or replenishing supplies.</p>
+            <p>{savedFittingSupplies ? "The current ship already matches. Apply checks saved supplies and loads compatible modules." : "The current ship already matches. Apply verifies the fitted equipment."}</p>
           {:else}
             <details><summary>Steps in the reviewed plan</summary><ol>{#each plan.steps as step}<li>{step}</li>{/each}</ol></details>
           {/if}
@@ -529,7 +530,7 @@
   {#if outcome}
     <section class="center-panel" aria-label="Apply outcome">
       <h2>{outcome.state === "COMPLETE" || outcome.state === "ALREADY_SATISFIED" ? "Finished ship verified"
-        : outcome.state === "PARTIAL" ? "Fitted ship verified · previous ship storage incomplete"
+        : outcome.state === "PARTIAL" ? "Fitted ship verified · Apply incomplete"
         : applying ? "Applying plan" : "Apply needs review"}</h2>
       {#if outcome.reason}<p>{words(outcome.reason)}</p>{/if}
       {#if outcome.state === "REFUSED" && outcome.provisioning?.manifest?.targetHullID}
@@ -547,7 +548,7 @@
               <li>{charge.name} in fitting slot {charge.flagID} · {charge.current ?? "not verified"} / {charge.target}</li>
             {/each}
             {#each outcome.finalReview.status.targets as supply}
-              <li>{supply.name} carried · {supply.current ?? "not verified"} / {supply.target}</li>
+              <li>{supply.name} {supply.mode === "TOTAL_ABOARD" ? "aboard" : "carried"} · {supply.current ?? "not verified"} / {supply.target}</li>
             {/each}
           </ul>
         {/if}

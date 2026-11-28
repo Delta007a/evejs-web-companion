@@ -238,17 +238,21 @@ export async function readTrainingActiveShip(
   const typeName = names?.[`type:${typeID}`];
   return typeof typeName === "string" && typeName.trim() ? typeName.trim() : null;
 }
-/** Restore the saved HR picker from account-level observations without a pilot session. */
-export async function readSavedTrainingAuthority(
-  options: ApiOptions,
-  authorityID: number,
-): Promise<TrainingSettingsContext> {
+async function readTrainingSettingsRoster(options: ApiOptions) {
   const result = await trainingAdapterContext().authenticatedJson(
     "/api/pilot-training/settings-context",
     options,
   );
   if (!Array.isArray(result?.authorities) || !Array.isArray(result?.corporations))
     throw Error("Corporation authority is unreadable.");
+  return { authorities: result.authorities, corporations: result.corporations };
+}
+/** Restore the saved HR picker from account-level observations without a pilot session. */
+export async function readSavedTrainingAuthority(
+  options: ApiOptions,
+  authorityID: number,
+): Promise<TrainingSettingsContext> {
+  const result = await readTrainingSettingsRoster(options);
   const authority = result.authorities.find((row: any) => row?.characterID === authorityID);
   const corporation = result.corporations.find(
     (row: any) => row?.corporationID === authority?.corporationID,
@@ -264,6 +268,40 @@ export async function readSavedTrainingAuthority(
   )
     throw Error("The saved HR pilot is missing from the verified corporation roster.");
   return { authorities: [authority], corporations: [corporation] };
+}
+function knownCorporationName(value: unknown, corporationID: TrainingCharacter["corporationID"]) {
+  const name = typeof value === "string" ? value.trim() : null;
+  return name && name !== `Corporation ${corporationID}` ? name : null;
+}
+export async function readRosterCorporationNames(
+  pilots: readonly TrainingCharacter[],
+  options: ApiOptions,
+): Promise<ReadonlyMap<number, string>> {
+  const names = new Map<number, string>();
+  const unresolved = pilots.filter((pilot) => {
+    const name = knownCorporationName(pilot.corporationName, pilot.corporationID);
+    if (name) names.set(pilot.characterID, name);
+    return !name && positive(pilot.corporationID);
+  });
+  if (!unresolved.length) return names;
+  const roster = await readTrainingSettingsRoster(options).catch(() => null);
+  if (!roster) return names;
+  for (const { characterID, corporationID } of unresolved) {
+    const verified = roster.authorities.some(
+      (row: any) => row?.characterID === characterID && row.corporationID === corporationID,
+    );
+    if (!verified) continue;
+    const corporation = roster.corporations.find((row: any) => row?.corporationID === corporationID);
+    const name = knownCorporationName(corporation?.name, corporationID);
+    if (name) names.set(characterID, name);
+  }
+  return names;
+}
+export async function readTrainingCorporationName(
+  pilot: TrainingCharacter,
+  options: ApiOptions,
+): Promise<string | null> {
+  return (await readRosterCorporationNames([pilot], options)).get(pilot.characterID) ?? null;
 }
 export async function loadTrainingSettingsContext(
   options: ApiOptions,
@@ -566,14 +604,22 @@ async function quoteTrainingTargets(
   r: any,
   options: ApiOptions,
   allowUnquoted = false,
+  inspectedBookPricesCents?: Readonly<Record<number, number>>,
 ) {
   const requirements = fittingRequirements({ prerequisites: targets }, r);
   if (requirements === null) throw Error("Pilot skill sheet is unreadable.");
   const missing = requirements.filter((x) => x.bookMissing).map((x) => x.typeID);
   if (!allowUnquoted && missing.length > 32)
     throw Error("The required skill list is too large to quote.");
-  const pricesByType = await directBookPrices(missing, options),
-    unpriced = missing.filter((id) => pricesByType[id] === undefined);
+  const pricesByType: Record<number, number> = {};
+  const unquoted = missing.filter((id) => {
+    const price = inspectedBookPricesCents?.[id];
+    if (typeof price !== "number" || price < 0 || !Number.isSafeInteger(price)) return true;
+    pricesByType[id] = price / 100;
+    return false;
+  });
+  Object.assign(pricesByType, await directBookPrices(unquoted, options));
+  const unpriced = missing.filter((id) => pricesByType[id] === undefined);
   if (!allowUnquoted && unpriced.length)
     throw Error(`Required skillbook ${unpriced[0]} cannot be quoted for direct purchase.`);
   let total = 0;
@@ -1534,6 +1580,7 @@ async function fittingDepthQuote(
     prior,
     options,
     depth !== "MASTERY",
+    fit.bookPricesCents,
   );
   const outcome = await planOutcome(quote, options, policy, wallet);
   const floors = new Map<number, number>();
