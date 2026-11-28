@@ -5,9 +5,12 @@ const { createReplenishment } = require("./replenishment");
 const { createPilotMutationFence } = require("./pilotMutationFence");
 const types = { 1: { categoryID: 6, groupID: 25 }, 2: { categoryID: 7 }, 3: { categoryID: 8, groupID: 83, volume: .01 },
   4: { categoryID: 2, groupID: 12 }, 5: { categoryID: 18, volume: 5 }, 6: { categoryID: 4, groupID: 1136 },
-  7: { categoryID: 7 }, 8: { categoryID: 32 } };
+  7: { categoryID: 7 }, 8: { categoryID: 32 },
+  1403: { categoryID: 7 }, 1317: { categoryID: 7 }, 12056: { categoryID: 7 } };
 const wireList = items => ({ type: "list", items });
 const wireObject = fields => ({ type: "object", args: { type: "dict", entries: Object.entries(fields) } });
+const bestower = { name: "Bestower", typeID: 1944, groupID: 28,
+  fitItems: [[1403, 11, 1], [1317, 12, 1], [1317, 13, 1], [1317, 14, 1], [1317, 15, 1], [1317, 16, 1], [12056, 19, 1]] };
 function fixture(hull = null) {
   const routes = new Map(), operations = new Map();
   const held = { accountID: 7, characterID: 10, corporationID: 30, activeShipID: 50, stationID: 60, bridgeSessionID: "own-generation" };
@@ -19,9 +22,9 @@ function fixture(hull = null) {
   };
   const state = { writes: [], date: "100", stock: 4000, aboard: 3200, take: true, query: true, incomplete: false,
     providerCalls: [], sourceReads: [], failAfter: false, duplicateFit: false, heldFittingCalls: [], heldFittingError: null,
-    assembled: [], shipRows: [], shipActions: [], fitted: [] };
-  const fitItems = hull ? [[2, 27, 1], [7, 92, 1], [3, 27, 1], ...(hull.subsystem ? [[8, 125, 1]] : []), ...(hull.spares ? [[3, 5, hull.spares]] : []), ...(hull.drones ? [[5, 87, hull.drones]] : [])]
-    : [[2, 27, 1], [3, 5, 5000]];
+    assembled: [], shipRows: [], shipActions: [], fitted: [], rpc: [] };
+  const fitItems = hull?.fitItems ?? (hull ? [[2, 27, 1], [7, 92, 1], [3, 27, 1], ...(hull.subsystem ? [[8, 125, 1]] : []), ...(hull.spares ? [[3, 5, hull.spares]] : []), ...(hull.drones ? [[5, 87, hull.drones]] : [])]
+    : [[2, 27, 1], [3, 5, 5000]]);
   const library = owner => { const fit = id => [id, wireObject({ fittingID: id, ownerID: owner, shipTypeID: hull?.typeID ?? 1,
     name: "Exact", savedDate: { type: "long", value: state.date },
     fitData: wireList(fitItems.map(items => ({ type: "tuple", items }))) })];
@@ -33,17 +36,21 @@ function fixture(hull = null) {
     ({ itemID, typeID, quantity, locationID, flagID, ownerID, singleton });
   const provisionStock = hull ? [
     row(101, hull.typeID, 1, 777, divisionFlag, 30),
-    row(102, 2, 1, 777, divisionFlag, 30),
-    row(103, 7, 1, 777, divisionFlag, 30),
-    ...(hull.drones ? [row(104, 5, hull.drones, 777, divisionFlag, 30)] : []),
+    ...(hull.fitItems ? [...new Set(fitItems.map(([typeID]) => typeID))].map((typeID, index) =>
+      row(102 + index, typeID, fitItems.filter(item => item[0] === typeID).length, 777, divisionFlag, 30)) :
+      [row(102, 2, 1, 777, divisionFlag, 30), row(103, 7, 1, 777, divisionFlag, 30),
+        ...(hull.drones ? [row(104, 5, hull.drones, 777, divisionFlag, 30)] : [])]),
   ] : [];
+  let splitItemID = 600;
   function withdrawStock(id, sourceID, quantity) {
     assert.equal(sourceID, 777);
     const index = provisionStock.findIndex(item => item.itemID === id);
     assert.ok(index >= 0, "the transfer uses exact reviewed corporate stock");
-    const [item] = provisionStock.splice(index, 1);
-    assert.equal(item.quantity, quantity);
-    return item;
+    const item = provisionStock[index];
+    assert.ok(item.quantity >= quantity);
+    if (item.quantity === quantity) return provisionStock.splice(index, 1)[0];
+    provisionStock[index] = { ...item, quantity: item.quantity - quantity };
+    return { ...item, itemID: splitItemID++, quantity };
   }
   function items(key, flag, shipID) {
     if (hull && key === "ship" && shipID !== 50) {
@@ -58,17 +65,20 @@ function fixture(hull = null) {
     throw new Error(`unexpected inventory ${key}`);
   }
   const gateway = mutationFence.wrap({
-    async getSkills() { return { skills: [] }; },
+    async getSkills() { state.rpc.push("GetSkills"); return { skills: [] }; },
     selectFactoryCharacter() { throw new Error("Held provisioning must not select a Factory pilot."); },
     selectCharacter() { throw new Error("Held provisioning must not select or take over a pilot."); },
     releaseBridgeSession() { throw new Error("Held provisioning must keep the cockpit pilot selected."); },
     async callMethod(service, method, args, kwargs, fields, bridgeSessionID) {
+      state.rpc.push(method);
       assert.equal(service, "corpFittingMgr"); assert.equal(method, "GetFittings"); assert.equal(bridgeSessionID, undefined);
       state.providerCalls.push(fields);
       return { result: library(fields.corpid) };
     },
     async callBoundMethod(service, method, args, kwargs, fields, bridgeSessionID, spec) {
+      state.rpc.push(method);
       assert.equal(bridgeSessionID, held.bridgeSessionID);
+      state.beforeInventoryRead?.(method, args, spec);
       if (method === "GetCapacity") return { result: { capacity: args[0] === 5 ? 10000 : 0, used: 0 } };
       if (method === "ListByFlags") return { result: state.incomplete ? null
         : wireList(items("ship", undefined, spec.shipID).filter(item => args[0].includes(item.flagID))) };
@@ -86,7 +96,8 @@ function fixture(hull = null) {
         const item = withdrawStock(itemID, sourceID, 1);
         assert.equal(item.typeID, typeID);
         state.fitted.push({ flagID: Number(flag), typeID, fitRigs });
-        state.shipRows.push(row(itemID, typeID, 1, shipID, Number(flag), 10, 1));
+        state.shipRows.push(row(item.itemID, typeID, 1, shipID, Number(flag), 10, 1));
+        state.afterFit?.(item, Number(flag));
         return { result: null };
       }
       if (hull && method === "Add" && kwargs.flag === 5) {
@@ -123,6 +134,7 @@ function fixture(hull = null) {
       flag: descriptor.bay === "drone" ? 87 : 143, locationID: held.activeShipID };
     if (descriptor.kind === "container") return { spec: { key: "container" }, flag: 0, locationID: descriptor.itemID };
     if (descriptor.kind === "corp") {
+      state.rpc.push("GetMyCorporationsOffices");
       assert.equal(descriptor.division, division); return { spec: { key: "corp" }, flag: divisionFlag, locationID: null };
     }
     throw new Error("invalid descriptor");
@@ -136,11 +148,12 @@ function fixture(hull = null) {
       shipTypeID: (hull && state.assembled.find(item => item.itemID === held.activeShipID)?.typeID) ?? 1 } }),
     currentHeld: () => {}, inventoryLocation: () => held.stationID, pendingRecovery: () => false,
     resolvePlace, cargoBindSpec: (_held, shipID) => ({ key: "ship", shipID }),
-    inventoryManagerBindSpec: () => ({ key: "inventory-manager" }), slots: () => [27, 92],
+    inventoryManagerBindSpec: () => ({ key: "inventory-manager" }), slots: () => [27, 92, ...fitItems.map(([, flag]) => flag)],
     shipBays: () => [{ key: "ammo", flag: 143, label: "Ammo" }],
     capacity: raw => raw, mutationFence,
     boundCall: (_held, _session, spec, method, args, kwargs) => gateway.callBoundMethod("invbroker", method, args, kwargs, {}, held.bridgeSessionID, spec),
     heldCall: async (asked, session, service, method, args, kwargs) => {
+      state.rpc.push(method);
       if (hull && service === "ship" && method === "AssembleShip") {
         const item = state.assembled.find(row => row.itemID === args[0][0]);
         assert.equal(item?.singleton, 0);
@@ -157,6 +170,7 @@ function fixture(hull = null) {
     },
     boardShip: async (_held, _session, shipID, revalidate) => {
       await revalidate();
+      state.rpc.push("Board");
       assert.ok(state.assembled.some(item => item.itemID === shipID && item.singleton === 1));
       held.activeShipID = shipID;
       state.shipActions.push("board hull");
@@ -175,9 +189,85 @@ function fixture(hull = null) {
   }
   const input = { providerCharacterID: 11, corporationID: 20, fittingID: 4,
     source: hull ? { kind: "corp", corporationID: 30, division } : { kind: "hangar" } };
-  return { state, held, engine, operations, invoke, input,
+  return { state, held, engine, operations, invoke, input, items, provisionStock,
     adapter: () => registered.adapter({ webSessionID: "tab", account: { accountID: 7 } }, held) };
 }
+
+test("Bestower Apply installs all seven modules with a single fresh corporate access read", async () => {
+  const f = fixture(bestower), review = await f.invoke("ship-review", f.input);
+  assert.equal(review.canApply, true);
+  assert.equal(f.state.rpc.filter(method => method === "GetMember").length, 1);
+  f.state.rpc.length = 0;
+  const result = await f.invoke("provision-ship", { ...review, confirm: true });
+  assert.equal(result.state, "COMPLETE");
+  assert.equal(result.result.equipment, "VERIFIED");
+  assert.equal(f.state.fitted.length, 7);
+  assert.equal(f.state.rpc.filter(method => method === "GetMember").length, 1);
+  assert.equal(f.state.rpc.filter(method => method === "GetMyCorporationsOffices").length, 1);
+});
+
+test("unrelated corporate stock changes before and during fitting leave the exact transfers verifiable", async () => {
+  const f = fixture(bestower), review = await f.invoke("ship-review", f.input);
+  const stock = f.provisionStock;
+  stock.push({ ...stock[1], itemID: 150, typeID: 6 });
+  f.state.afterFit = (_, flag) => {
+    if (flag === 12) stock.push({ ...stock.find(r => r.typeID === 1317), itemID: 151, quantity: 10 });
+  };
+  const result = await f.invoke("provision-ship", { ...review, confirm: true });
+  assert.equal(result.state, "COMPLETE");
+  assert.equal(f.state.fitted.length, 7);
+  assert.equal(stock.find(r => r.itemID === 150).quantity, 1);
+  assert.equal(stock.find(r => r.itemID === 151).quantity, 10);
+});
+
+test("a lost fitting reply is proven by the selected stack and slot despite other transfers", async () => {
+  const f = fixture(bestower), review = await f.invoke("ship-review", f.input);
+  f.state.afterFit = (_, flag) => {
+    if (flag === 12) {
+      const sameType = f.provisionStock.find(r => r.typeID === 1317);
+      f.provisionStock.push({ ...sameType, itemID: 151, quantity: 10 });
+      throw Object.assign(new Error("lost reply after fitting"), { code: "TIMEOUT" });
+    }
+  };
+  const result = await f.invoke("provision-ship", { ...review, confirm: true });
+  assert.equal(result.state, "COMPLETE");
+  assert.equal(f.state.fitted.length, 7);
+  assert.equal(f.engine.journal.get(review.reviewID).actions.filter(a => a.error === "TIMEOUT").length, 1);
+});
+
+test("an ambiguous change to the exact corporate stack blocks fitting without replay", async () => {
+  const f = fixture(bestower), review = await f.invoke("ship-review", f.input);
+  f.state.afterFit = (_, flag) => {
+    if (flag === 12) f.provisionStock.find(r => r.typeID === 1317).quantity--;
+  };
+  const request = { ...review, confirm: true };
+  const result = await f.invoke("provision-ship", request);
+  assert.equal(result.reason, "OUTCOME_AMBIGUOUS");
+  assert.equal((await f.invoke("reconcile", { operationID: review.reviewID })).state, "BLOCKED");
+  assert.equal((await f.invoke("provision-ship", request)).state, "BLOCKED");
+  assert.deepEqual(f.state.fitted.map(r => r.flagID), [11, 12]);
+});
+
+for (const change of ["source", "slot", "roles"]) test(`fitting refuses changed ${change} before dispatch`, async () => {
+  const f = fixture(bestower), review = await f.invoke("ship-review", f.input);
+  f.state.beforeInventoryRead = (method, [flags], spec) => {
+    if (change === "source") {
+      if (method === "List" && spec.key === "corp" && f.held.activeShipID !== 50) {
+        f.provisionStock.find(r => r.typeID === 1403).quantity++;
+        f.state.beforeInventoryRead = null;
+      }
+      return;
+    }
+    if (method !== "ListByFlags" || flags.length !== 1 || flags[0] !== 11 || spec.shipID === 50) return;
+    if (change === "slot") f.state.shipRows.push({ itemID: 888, typeID: 1317, quantity: 1, locationID: spec.shipID,
+      flagID: 11, ownerID: 10, singleton: 1 });
+    if (change === "roles") f.held.corpRole = "updated";
+  };
+  const code = { source: "SOURCE_CHANGED", slot: "DESTRUCTIVE_FIT_UNSUPPORTED", roles: "SOURCE_AUTHORITY_CHANGED" }[change];
+  await assert.rejects(f.invoke("provision-ship", { ...review, confirm: true }), { code });
+  assert.equal(f.state.fitted.length, 0);
+  assert.ok(f.engine.journal.get(review.reviewID).actions.every(a => a.kind !== "FIT_ITEM"));
+});
 
 for (const hull of [
   { name: "Pioneer", typeID: 89240, groupID: 420, drones: 2 },

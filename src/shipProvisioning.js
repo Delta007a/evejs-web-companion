@@ -9,6 +9,14 @@ const quantity = (rows, type, flag = null, packaged = false) => rows.filter(r =>
 const equal = (a, b) => hash(a) === hash(b);
 const carriedSupply = supply => supply.mode === "CARRIED_SPARES" && supply.eligibleFlags.includes(5);
 
+function sameShipState(before, after) {
+  if (before.source.pin.descriptor.kind !== "corp") return equal(before, after);
+  // A shared warehouse can change independently of this ship. The exact
+  // stack used by each move is checked separately.
+  const withoutStock = ({ source, ...ship }) => ({ ...ship, source: { pin: source.pin, access: source.access } });
+  return equal(withoutStock(before), withoutStock(after));
+}
+
 // Station provisioning has no subsystem installation or capital assembly plan.
 const unsupportedHulls = new Set([29, 30, 485, 547, 659, 883, 963, 1538, 4594, 5120]);
 const mixedCargoTargets = (read, rows) => (read.mixedCargo || []).map(t => ({
@@ -76,16 +84,23 @@ function proveShipAction(action, after, verifyMovement) {
   const before = action.before, move = action.move;
   if (after.context.accountID !== before.context.accountID || after.context.characterID !== before.context.characterID ||
       after.context.corporationID !== before.context.corporationID || after.context.locationID !== before.context.locationID) return null;
-  const unchanged = (old, current) => equal(old, current);
+  const corporate = before.source.pin.descriptor.kind === "corp";
+  const relevantStock = source => corporate ? source.rows.filter(r => r.itemID === move.itemID) : source.rows;
+  const otherStockUnchanged = () => corporate ||
+    equal(before.source.rows.filter(r => r.typeID !== move.typeID), after.source.rows.filter(r => r.typeID !== move.typeID));
+  function moved(from, to) {
+    return equal(before.source.pin, after.source.pin) &&
+      verifyMovement({ source: relevantStock(before.source), destination: from },
+        { source: relevantStock(after.source), destination: to }, move) === "VERIFIED";
+  }
   if (action.kind === "WITHDRAW_HULL") {
-    if (verifyMovement({ source: before.source.rows, destination: before.hangar },
-      { source: after.source.rows, destination: after.hangar }, move) !== "VERIFIED") return null;
+    if (!moved(before.hangar, after.hangar)) return null;
     const candidates = after.hangar.filter(r => r.typeID === move.typeID && !r.singleton &&
       r.quantity - (before.hangar.find(old => old.itemID === r.itemID)?.quantity || 0) === 1);
     return candidates.length === 1 && candidates[0].ownerID === before.context.characterID && candidates[0].flagID === 4 &&
       candidates[0].locationID === before.context.locationID &&
-      unchanged(before.source.rows.filter(r => r.typeID !== move.typeID), after.source.rows.filter(r => r.typeID !== move.typeID)) &&
-      unchanged(before.hangar.filter(r => r.typeID !== move.typeID), after.hangar.filter(r => r.typeID !== move.typeID)) ?
+      otherStockUnchanged() &&
+      equal(before.hangar.filter(r => r.typeID !== move.typeID), after.hangar.filter(r => r.typeID !== move.typeID)) ?
       { packagedItemID: candidates[0].itemID, location: candidates[0].locationID } : null;
   }
   if (action.kind === "ASSEMBLE_HULL") {
@@ -105,12 +120,11 @@ function proveShipAction(action, after, verifyMovement) {
     after.context.shipTypeID === move.typeID && after.context.locationID === before.context.locationID ? { boardedShipID: move.itemID } : null;
   if (["FIT_ITEM", "LOAD_ITEM", "SUPPLY"].includes(action.kind)) {
     const current = after.target.rows;
-    if (verifyMovement({ source: before.source.rows, destination: before.target.rows },
-      { source: after.source.rows, destination: current }, move) !== "VERIFIED") return null;
+    if (!moved(before.target.rows, current)) return null;
     if (quantity(current, move.typeID, move.flag) - quantity(before.target.rows, move.typeID, move.flag) !== move.quantity ||
-        !unchanged(before.target.rows.filter(r => !(r.typeID === move.typeID && r.flagID === move.flag)),
+        !equal(before.target.rows.filter(r => !(r.typeID === move.typeID && r.flagID === move.flag)),
           current.filter(r => !(r.typeID === move.typeID && r.flagID === move.flag))) ||
-        !unchanged(before.source.rows.filter(r => r.typeID !== move.typeID), after.source.rows.filter(r => r.typeID !== move.typeID))) return null;
+        !otherStockUnchanged()) return null;
     return { itemIDs: current.filter(r => r.typeID === move.typeID && r.flagID === move.flag).map(r => r.itemID),
       location: move.shipID, flag: move.flag, quantity: quantity(current, move.typeID, move.flag) };
   }
@@ -242,14 +256,15 @@ function createShipOperations({ journal, reviews, reserve, release, assertWritab
         }
       }
     }
-    if (row) { scope(row, read); if (row.state !== "READY" || !equal(snapshot(read), row.expected)) {
+    if (row) { scope(row, read); if (row.state !== "READY" || !sameShipState(row.expected, snapshot(read))) {
       plan.canApply = false; plan.unsupported.push("Reconcile pending custody and changed world state before requesting continuation."); } }
     if (unresolved(read.context.characterID).some(r => r.key !== operationID)) { plan.canApply = false; plan.unsupported.push("This pilot has unresolved custody."); }
     const pin = snapshot(read), reviewID = randomUUID(), expiresAt = now() + 300_000;
     for (const [key, value] of reviews) if (value.expiresAt < now()) reviews.delete(key);
     reviews.set(reviewID, { kind: "SHIP_PROVISION", input, pin, operationID, plan, expiresAt });
     return { reviewID, reviewHash: hash(pin), expiresAt, contract: read.contract, context: read.context, plan,
-      status: inspectContract(read.contract, read.observation, data), source: pin.source, canApply: plan.canApply };
+      status: inspectContract(read.contract, read.observation, data), source: pin.source, canApply: plan.canApply,
+      personalHullIDs: read.hangar.filter(r => r.typeID === read.contract.shipTypeID && r.singleton).map(r => r.itemID) };
   }
   async function reconcileShip(adapter, id) {
     const row = journal.get(id); owned(row, await adapter.context()); row.key = id;
@@ -265,7 +280,7 @@ function createShipOperations({ journal, reviews, reserve, release, assertWritab
         advance(row, pending, read, proof);
       } else {
         const expected = { ...row.expected, context: { ...row.expected.context, sessionGeneration: read.context.sessionGeneration, recoveryReady: read.context.recoveryReady } };
-        if (!equal(snapshot(read), expected)) fail("RECONCILIATION_STATE_CHANGED");
+        if (!sameShipState(expected, snapshot(read))) fail("RECONCILIATION_STATE_CHANGED");
       }
       // Re-read the newly proven hull's inventory; assembly's first snapshot
       // intentionally observed no target because its identity was unknown.
@@ -306,11 +321,14 @@ function createShipOperations({ journal, reviews, reserve, release, assertWritab
     try {
       assertWritable(context.characterID, lease);
       let read = await adapter.readShip(accepted.input, accepted.pin.target.shipID, accepted.pin.source.pin);
-      if (!equal(snapshot(read), accepted.pin)) fail("REVIEW_REQUIRED");
+      if (!sameShipState(accepted.pin, snapshot(read))) fail("REVIEW_REQUIRED");
       if (accepted.operationID) {
         row = journal.get(id); owned(row, context); row.key = id; scope(row, read);
-        if (row.state !== "READY" || !equal(snapshot(read), row.expected)) fail("REVIEW_REQUIRED");
+        if (row.state !== "READY" || !sameShipState(row.expected, snapshot(read)) || !shipPlan(read, data, row).canApply) fail("REVIEW_REQUIRED");
       } else {
+        if (!shipPlan(read, data).canApply || (accepted.plan.mode === "NEW_HULL" &&
+            !read.source.rows.some(r => r.itemID === accepted.plan.hullSourceItemID && r.typeID === read.contract.shipTypeID && !r.singleton)))
+          fail("REVIEW_REQUIRED");
         row = { key: id, kind: "SHIP_PROVISION", accountID: context.accountID, characterID: context.characterID,
           context, reviewHash, input: accepted.input, contract: read.contract, sourcePin: read.source.pin, access: read.source.access,
           state: "PREPARED", createdAt: now(), moves: [], actions: [], expected: snapshot(read),
@@ -334,15 +352,16 @@ function createShipOperations({ journal, reviews, reserve, release, assertWritab
         }
         save(row);
       }
+      const readCurrentShip = () => adapter.readShip(row.input, row.manifest.targetHullID, row.sourcePin);
+      const refreshAfter = (before, action) => adapter.refreshShip
+        ? adapter.refreshShip(before, row.manifest.targetHullID, action) : readCurrentShip();
       for (let count = 0; count < 128; count++) {
         assertWritable(row.characterID, lease);
-        read = await adapter.readShip(row.input, row.manifest.targetHullID, row.sourcePin);
         scope(row, read);
-        if (!equal(snapshot(read), row.expected)) fail("PROVISIONING_STATE_CHANGED");
         let kind, move, requirementKey = null;
         const base = { typeID: row.manifest.hullTypeID, quantity: 1, shipID: row.manifest.targetHullID || context.shipID };
         if (!row.manifest.packagedItemID && !row.manifest.targetHullID) {
-          const source = read.source.rows.find(r => r.typeID === base.typeID && !r.singleton);
+          const source = read.source.rows.find(r => r.itemID === row.manifest.hull.sourceStackID && r.typeID === base.typeID && !r.singleton);
           if (!source) fail("SOURCE_CHANGED");
           kind = "WITHDRAW_HULL"; move = { ...base, itemID: source.itemID, sourceLocationID: source.locationID, destination: { kind: "hangar" }, flag: 4 };
         } else if (!row.manifest.targetHullID) {
@@ -384,22 +403,30 @@ function createShipOperations({ journal, reviews, reserve, release, assertWritab
           }
         }
         if (!positive(move.itemID) || !positive(move.quantity)) fail("INVALID_TRANSFER");
-        const stable = await adapter.readShip(row.input, row.manifest.targetHullID, row.sourcePin);
-        if (!equal(snapshot(stable), row.expected)) fail("PROVISIONING_STATE_CHANGED");
-        const action = { kind, move, requirementKey, sequence: row.actions.length + 1, invocationID: randomUUID(), issuedAt: now(), state: "PENDING", before: snapshot(stable) };
+        if (adapter.checkShipAction) {
+          await adapter.checkShipAction({ kind, move }, read, lease);
+        } else {
+          // Adapters with the original readShip contract verify the full pre-action state.
+          read = await readCurrentShip();
+          scope(row, read);
+          if (!equal(snapshot(read), row.expected)) fail("PROVISIONING_STATE_CHANGED");
+        }
+        const action = { kind, move, requirementKey, sequence: row.actions.length + 1, invocationID: randomUUID(), issuedAt: now(), state: "PENDING", before: snapshot(read) };
         row.actions.push(action); row.state = "PENDING"; save(row); // fsync/rename BEFORE dispatch.
-        try { await adapter.dispatchShip(action, stable, lease); } catch (error) { action.error = String(error.code || "DISPATCH_FAILED"); }
-        const after = await adapter.readShip(row.input, row.manifest.targetHullID, row.sourcePin);
+        try { await adapter.dispatchShip(action, read, lease); } catch (error) { action.error = String(error.code || "DISPATCH_FAILED"); }
+        const after = await refreshAfter(read, action);
         scope(row, after);
-        if (after.context.sessionGeneration !== stable.context.sessionGeneration ||
-            after.context.shipID !== (kind === "BOARD_HULL" ? move.itemID : stable.context.shipID)) fail("PROVISIONING_GENERATION_CHANGED");
+        if (after.context.sessionGeneration !== read.context.sessionGeneration ||
+            after.context.shipID !== (kind === "BOARD_HULL" ? move.itemID : read.context.shipID)) fail("PROVISIONING_GENERATION_CHANGED");
         const proof = proveShipAction(action, after, verifyMovement);
         if (!proof) { action.after = snapshot(after); action.state = "AMBIGUOUS"; row.state = "BLOCKED"; row.reason = "OUTCOME_AMBIGUOUS"; save(row); return result(row); }
         advance(row, action, after, proof);
+        read = after;
         if (kind === "ASSEMBLE_HULL") {
-          const assembled = await adapter.readShip(row.input, row.manifest.targetHullID, row.sourcePin);
-          if (!assembled.target.complete || assembled.target.rows.length) fail("ASSEMBLED_HULL_NOT_EMPTY");
-          row.expected = snapshot(assembled); save(row);
+          read = await refreshAfter(after, null);
+          scope(row, read);
+          if (!read.target.complete || read.target.rows.length) fail("ASSEMBLED_HULL_NOT_EMPTY");
+          row.expected = snapshot(read); save(row);
         }
       }
       fail("PROVISIONING_LIMIT");

@@ -74,7 +74,7 @@ function registerProvisioningRoutes(d) {
   function adapter(req, held) {
     const sessionID = req.webSessionID;
     const listedLocations = new Map();
-    async function context() {
+    async function context(known = null) {
       currentHeld(held, sessionID);
       const current = (await flight(held, sessionID)).flight;
       currentHeld(held, sessionID);
@@ -82,13 +82,18 @@ function registerProvisioningRoutes(d) {
       if (current.docked !== true || !current.shipID || current.shipID !== held.activeShipID ||
           !current.shipTypeID || !inventoryLocation(held)) fail("PROVISIONING_CONTEXT_UNAVAILABLE");
       if (held.structureID) fail("PROVISIONING_STATION_ONLY", "Initial replenishment supports docked NPC stations; structure qualification is pending.");
-      const pilot = (await store.listCharactersForAccount(req.account.accountID)).find(c => c.characterID === held.characterID);
-      currentHeld(held, sessionID);
-      if (!pilot || pilot.accountID !== req.account.accountID || pilot.corporationID !== held.corporationID) fail("PILOT_AUTHORITY_CHANGED");
-      return { accountID: Number(req.account.accountID), characterID: held.characterID, corporationID: held.corporationID,
+      const scope = { accountID: Number(req.account.accountID), characterID: held.characterID, corporationID: held.corporationID,
         shipID: current.shipID, shipTypeID: current.shipTypeID, locationID: inventoryLocation(held),
         recoveryReady: !pendingRecovery(held),
         sessionGeneration: hash([held.bridgeSessionID, held.botClaimSecret || null]) };
+      if (!known || known.sessionGeneration !== scope.sessionGeneration || known.accountID !== scope.accountID ||
+          known.characterID !== scope.characterID || known.corporationID !== scope.corporationID) {
+        const pilot = (await store.listCharactersForAccount(req.account.accountID)).find(c => c.characterID === held.characterID);
+        currentHeld(held, sessionID);
+        if (!pilot || pilot.accountID !== scope.accountID || pilot.characterID !== scope.characterID ||
+            pilot.corporationID !== scope.corporationID) fail("PILOT_AUTHORITY_CHANGED");
+      }
+      return scope;
     }
     async function library(input, allowMatch = false, includeFitItems = false) {
       if (!Number.isSafeInteger(input.providerCharacterID) || !Number.isSafeInteger(input.corporationID)) fail("INVALID_DEFINITION_SOURCE");
@@ -119,9 +124,10 @@ function registerProvisioningRoutes(d) {
       if (descriptor.kind === "corp") {
         if (descriptor.corporationID !== scope.corporationID) fail("CORPORATION_SOURCE_CHANGED");
         ownerID = scope.corporationID;
-        const member = serviceRow((await heldCall(held, sessionID, "corpRegistry", "GetMember", [held.characterID], null)).result);
-        currentHeld(held, sessionID);
-        const corp = serviceRow((await heldCall(held, sessionID, "corpRegistry", "GetCorporation", [], null)).result);
+        const [member, corp] = (await Promise.all([
+          heldCall(held, sessionID, "corpRegistry", "GetMember", [held.characterID], null),
+          heldCall(held, sessionID, "corpRegistry", "GetCorporation", [], null),
+        ])).map(reply => serviceRow(reply.result));
         currentHeld(held, sessionID);
         if (Number(member.characterID) !== held.characterID || Number(member.corporationID) !== ownerID ||
             Number(corp.corporationID) !== ownerID) fail("CORPORATION_ACCESS_UNKNOWN");
@@ -136,6 +142,9 @@ function registerProvisioningRoutes(d) {
             containerGroups.has(Number(data.getType(r.typeID)?.groupID)) && [scope.locationID, scope.shipID].includes(r.locationID)))
           fail("CONTAINER_NOT_LOCAL_OWNED");
       }
+      return readStock(scope, descriptor, place, access, ownerID, recoveryPin);
+    }
+    async function readStock(scope, descriptor, place, access, ownerID, recoveryPin) {
       const rows = await strictList(held, sessionID, place);
       if (rows.some(r => r.ownerID !== ownerID || r.flagID !== place.flag || r.loaded)) fail("SOURCE_IDENTITY_UNKNOWN");
       const locations = [...new Set(rows.map(r => r.locationID))];
@@ -148,12 +157,18 @@ function registerProvisioningRoutes(d) {
       return { rows, access, place, pin: { descriptor, ownerID, locationID: place.locationID || locations[0] || listedLocations.get(sourceKey) || null,
         flag: place.flag, office: descriptor.kind === "corp" ? place.spec.key : null, dockedLocationID: scope.locationID } };
     }
+    function refreshStock(scope, origin) {
+      return readStock(scope, origin.pin.descriptor, origin.place, origin.access, origin.pin.ownerID, origin.pin);
+    }
+    async function listShipFlags(shipID, flags) {
+      const { result } = await boundCall(held, sessionID, cargoBindSpec(held, shipID), "ListByFlags", [flags], null);
+      currentHeld(held, sessionID);
+      return inventoryRows(result).sort((a, b) => a.identity.localeCompare(b.identity));
+    }
     async function observation(scope) {
       try {
         const flags = [...new Set([...slots(), 5, 87, 158, 133, 143])];
-        const listed = await boundCall(held, sessionID, cargoBindSpec(held, scope.shipID), "ListByFlags", [flags], null);
-        currentHeld(held, sessionID);
-        const rows = inventoryRows(listed.result).sort((a, b) => a.identity.localeCompare(b.identity));
+        const rows = await listShipFlags(scope.shipID, flags);
         if (rows.some(r => r.locationID !== scope.shipID || r.ownerID !== scope.characterID || !data.getType(r.typeID))) fail("OBSERVATION_INCOMPLETE");
         return { complete: true, shipTypeID: scope.shipTypeID, rows };
       } catch (error) {
@@ -179,20 +194,58 @@ function registerProvisioningRoutes(d) {
       if (hash(await context()) !== hash(scope)) fail("PROVISIONING_CONTEXT_CHANGED");
       return { context: scope, ...definitions, contract, observation: observed, source: origin, target: { complete: observed.complete } };
     }
-    async function readShip(input, targetHullID = null, sourcePin = null) {
-      const scope = await context(), definitions = await library(input, false, true);
-      const observed = await observation(scope), origin = await source(input, scope, sourcePin);
-      const place = await resolvePlace(held, sessionID, { kind: "hangar" });
-      const hangar = await strictList(held, sessionID, place);
+    async function readHangar(scope, sourceRows = null) {
+      const hangar = sourceRows ?? await strictList(held, sessionID, await resolvePlace(held, sessionID, { kind: "hangar" }));
       if (hangar.some(r => r.ownerID !== scope.characterID || r.locationID !== scope.locationID || r.flagID !== 4 || r.loaded)) fail("HANGAR_IDENTITY_UNKNOWN");
-      let target = { complete: true, shipID: null, shipTypeID: definitions.contract.shipTypeID, rows: [] };
-      if (targetHullID) {
-        const hull = hangar.find(r => r.itemID === targetHullID && r.singleton && r.typeID === definitions.contract.shipTypeID);
-        if (!hull) fail("TARGET_HULL_CHANGED");
-        target = { ...await observation({ ...scope, shipID: targetHullID, shipTypeID: hull.typeID }), shipID: targetHullID };
-      }
-      if (hash(await context()) !== hash(scope)) fail("PROVISIONING_CONTEXT_CHANGED");
-      return { context: scope, ...definitions, observation: observed, source: origin, hangar, target };
+      return hangar;
+    }
+    async function shipTarget(scope, typeID, targetHullID, hangar, observed) {
+      if (!targetHullID) return { complete: true, shipID: null, shipTypeID: typeID, rows: [] };
+      if (!hangar.some(r => r.itemID === targetHullID && r.singleton && r.typeID === typeID)) fail("TARGET_HULL_CHANGED");
+      const target = targetHullID === scope.shipID ? observed : await observation({ ...scope, shipID: targetHullID, shipTypeID: typeID });
+      return { ...target, shipID: targetHullID };
+    }
+    async function readShip(input, targetHullID = null, sourcePin = null) {
+      const scope = await context(), corpRole = held.corpRole;
+      const [definitions, observed, origin, personal] = await Promise.all([
+        library(input, false, true), observation(scope), source(input, scope, sourcePin),
+        input.source.kind === "hangar" ? null : readHangar(scope),
+      ]);
+      const hangar = personal ?? await readHangar(scope, origin.rows);
+      const target = await shipTarget(scope, definitions.contract.shipTypeID, targetHullID, hangar, observed);
+      const read = { context: scope, corpRole, ...definitions, observation: observed, source: origin, hangar, target };
+      assertShipScope(read, await context(scope));
+      return read;
+    }
+    function assertShipScope(current, scope, boarded = null) {
+      const expected = boarded ? { ...current.context, shipID: boarded.itemID, shipTypeID: boarded.typeID } : current.context;
+      if (scope.sessionGeneration !== expected.sessionGeneration) fail("PROVISIONING_GENERATION_CHANGED");
+      if (hash(scope) !== hash(expected) || inventoryLocation(held) !== scope.locationID || held.activeShipID !== scope.shipID ||
+          held.characterID !== scope.characterID || held.corporationID !== scope.corporationID ||
+          (held.transition && held.transition.phase !== "ready") ||
+          hash([held.bridgeSessionID, held.botClaimSecret || null]) !== scope.sessionGeneration || scope.recoveryReady !== !pendingRecovery(held))
+        fail("PROVISIONING_CONTEXT_CHANGED");
+      if (current.source.pin.descriptor.kind === "corp" && held.corpRole !== current.corpRole) fail("SOURCE_AUTHORITY_CHANGED");
+    }
+    // Refresh physical evidence for this action, with the same station, pilot,
+    // definition and selected warehouse as the fresh Apply read.
+    async function refreshShip(current, targetHullID, action) {
+      const hangarChanged = ["WITHDRAW_HULL", "ASSEMBLE_HULL", "BOARD_HULL"].includes(action?.kind);
+      const fromStock = action && action.kind !== "ASSEMBLE_HULL" && action.kind !== "BOARD_HULL";
+      const scope = await context(current.context);
+      const boarded = action?.kind === "BOARD_HULL" ? action.move : null;
+      assertShipScope(current, scope, boarded);
+      const personalStock = current.source.pin.descriptor.kind === "hangar";
+      const [origin, personal, observed] = await Promise.all([
+        fromStock || (personalStock && hangarChanged) ? refreshStock(scope, current.source) : current.source,
+        hangarChanged && !personalStock ? readHangar(scope) : current.hangar,
+        observation(scope),
+      ]);
+      const hangar = personalStock ? origin.rows : personal;
+      const target = await shipTarget(scope, current.contract.shipTypeID, targetHullID, hangar, observed);
+      currentHeld(held, sessionID);
+      assertShipScope(current, scope, boarded);
+      return { ...current, context: scope, observation: observed, source: origin, hangar, target };
     }
     async function readMovement(move, sourcePin) {
       const scope = await context();
@@ -247,33 +300,65 @@ function registerProvisioningRoutes(d) {
           hash(from.access) !== hash(current.source.access)) fail("SOURCE_AUTHORITY_CHANGED");
       const selected = from.rows.find(r => r.itemID === move.itemID && r.typeID === move.typeID && r.quantity >= move.quantity);
       if (!selected || selected.locationID !== move.sourceLocationID) fail("SOURCE_CHANGED");
+      return sendTransfer(move, current, lease);
+    }
+    async function sendTransfer(move, current, lease) {
       const to = await resolvePlace(held, sessionID, move.destination);
       const spec = { ...to.spec, expectedDockedLocationID: current.context.locationID, expectedShipID: move.shipID };
       return mutationFence.withLease(lease, () => boundCall(held, sessionID, spec, "Add",
         [move.itemID, move.sourceLocationID], { flag: to.flag, qty: move.quantity }));
     }
-    return { context, read, readPreparation, readShip, readSkills: () => gateway.getSkills(held.accountID, held.characterID), plan, readMovement, dispatch,
+    async function checkShipAction(action, current, lease) {
+      engine.assertWritable(held.characterID, lease);
+      const scope = await context(current.context), move = action.move;
+      assertShipScope(current, scope);
+      if (current.source.access.take !== true || !scope.recoveryReady) fail("REVIEW_REQUIRED");
+      if (["ASSEMBLE_HULL", "BOARD_HULL"].includes(action.kind)) {
+        const boarding = action.kind === "BOARD_HULL";
+        const [fresh, target] = await Promise.all([
+          readHangar(scope),
+          boarding ? observation({ ...scope, shipID: move.itemID, shipTypeID: move.typeID }) : null,
+        ]);
+        const expected = current.hangar.find(r => r.itemID === move.itemID);
+        const selected = fresh.find(r => r.itemID === move.itemID);
+        if (!expected || !selected || hash(selected) !== hash(expected) ||
+            selected.typeID !== move.typeID || selected.singleton !== boarding) fail("TARGET_HULL_CHANGED");
+        if (boarding && (!target.complete || hash(target.rows) !== hash(current.target.rows))) fail("TARGET_HULL_CHANGED");
+      } else {
+        const withdrawal = action.kind === "WITHDRAW_HULL";
+        const [fresh, destination] = await Promise.all([
+          refreshStock(scope, current.source),
+          withdrawal ? readHangar(scope) : listShipFlags(move.shipID, [move.flag]),
+        ]);
+        const expected = current.source.rows.find(r => r.itemID === move.itemID);
+        const selected = fresh.rows.find(r => r.itemID === move.itemID);
+        if (hash(fresh.pin) !== hash(current.source.pin) || !expected || !selected || hash(selected) !== hash(expected) ||
+            selected.typeID !== move.typeID || selected.locationID !== move.sourceLocationID ||
+            selected.singleton || selected.quantity < move.quantity) fail("SOURCE_CHANGED");
+        if (action.kind === "FIT_ITEM" && destination.length) fail("DESTRUCTIVE_FIT_UNSUPPORTED");
+        if (action.kind !== "FIT_ITEM") {
+          const expected = withdrawal ? current.hangar : current.target.rows;
+          const selectedFlag = rows => rows.filter(r => r.flagID === move.flag && r.typeID === move.typeID);
+          if (destination.some(r => !withdrawal && (r.flagID !== move.flag || r.ownerID !== scope.characterID || r.locationID !== move.shipID)) ||
+              hash(selectedFlag(destination)) !== hash(selectedFlag(expected))) fail("PROVISIONING_STATE_CHANGED");
+        }
+      }
+      currentHeld(held, sessionID);
+      assertShipScope(current, scope);
+    }
+    return { context, read, readPreparation, readShip, refreshShip, checkShipAction, readSkills: () => gateway.getSkills(held.accountID, held.characterID), plan, readMovement, dispatch,
       async dispatchShip(action, current, lease) {
         engine.assertWritable(held.characterID, lease);
-        const revalidate = async () => {
-          const fresh = await readShip({ providerCharacterID: current.contract.definition.characterID,
-            corporationID: current.contract.definition.corporationID, fittingID: current.contract.definition.fittingID,
-            source: current.source.pin.descriptor }, current.target.shipID, current.source.pin);
-          const comparable = r => ({ context: r.context, contract: r.contract, observation: r.observation,
-            source: { pin: r.source.pin, access: r.source.access, rows: r.source.rows }, hangar: r.hangar, target: r.target });
-          if (hash(comparable(fresh)) !== hash(comparable(current)) || fresh.source.access.take !== true || pendingRecovery(held)) fail("REVIEW_REQUIRED");
-        };
-        await revalidate();
         const move = action.move;
         return mutationFence.withLease(lease, async () => {
           if (action.kind === "ASSEMBLE_HULL") return heldCall(held, sessionID, "ship", "AssembleShip", [[move.itemID], "", null], null);
-          if (action.kind === "BOARD_HULL") return boardShip(held, sessionID, move.itemID, revalidate);
+          if (action.kind === "BOARD_HULL") return boardShip(held, sessionID, move.itemID, () => checkShipAction(action, current, lease));
           if (action.kind === "FIT_ITEM") {
             const spec = { ...inventoryManagerBindSpec(held), expectedDockedLocationID: current.context.locationID, expectedShipID: move.shipID };
             return boundCall(held, sessionID, spec, "FitFitting", [move.shipID, null, { [move.typeID]: [move.itemID] },
               move.sourceLocationID, { [move.flag]: move.typeID }, {}, isRigSlotFlag(move.flag)], null);
           }
-          return dispatch(move, current, lease); // SAME authorized loader as Replenish.
+          return sendTransfer(move, current, lease);
         });
       },
       async validateMove(move, current, lease) {
