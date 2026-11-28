@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { miningFleetInspectRun, qualifyFleetFitHolds } from "./inspect.ts";
-import { titlesRowset } from "./corporateOfficeFixture.ts";
+import { carbonCorporationRow, titlesRowset } from "./corporateOfficeFixture.ts";
 
 function fixture(
   options: {
@@ -262,6 +262,7 @@ function officeFixture(
     setup?: unknown;
     stationIDs?: unknown;
     officeError?: string;
+    corporation?: unknown;
     member?: Record<string, unknown>;
     titles?: unknown;
     inSpace?: boolean;
@@ -293,7 +294,7 @@ function officeFixture(
           assert.deepEqual(request.args, []);
           return Response.json({
             ok: true,
-            result: {
+            result: config.corporation ?? {
               type: "object",
               name: "util.Row",
               args: {
@@ -336,11 +337,14 @@ function officeFixture(
   return { ...x, officeCalls };
 }
 
-test("office inspection uses the Farmer list and confirms Query for the exact pilot and remote dock", async () => {
-  const x = officeFixture({ setup: { officeLocationID: 700 } });
+test("office inspection reads the current corporation Row and confirms Query for the exact pilot and remote dock", async () => {
+  const x = officeFixture({
+    setup: { officeLocationID: 700 },
+    corporation: carbonCorporationRow({ corporationID: 77, stationID: 700 }),
+  });
   await miningFleetInspectRun.start(x.run);
   const report = await wait(x.reports);
-  assert.equal(report.phase, "Corporate delivery access inspected");
+  assert.equal(report.phase, "Corporate delivery access inspected", report.why);
   assert.equal(report.readout.characterID, 1);
   assert.equal(report.readout.corporationID, 77);
   assert.equal(report.readout.locationID, 700);
@@ -538,6 +542,10 @@ test("corporate office inspection rejects unreadable office and membership data"
     [{ stationIDs: ["700"] }, /office list or division names are unreadable/],
     [{ member: { characterID: 2 } }, /pilot or corporation did not match/],
     [{ member: { corporationID: 78 } }, /pilot or corporation did not match/],
+    [
+      { corporation: carbonCorporationRow({ corporationID: 78, stationID: 700 }) },
+      /pilot or corporation did not match/,
+    ],
     [{ member: { rolesAtHQ: 9_223_372_036_854_775_000 } }, /Corporation roles are unreadable/],
     [{ member: { titleMask: 65536 } }, /Corporation title assignments are unreadable/],
     [

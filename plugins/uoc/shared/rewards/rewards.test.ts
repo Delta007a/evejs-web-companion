@@ -74,9 +74,13 @@ test("wallet overlap must preserve the retained transactions and their order",()
 
 test("native held reward reads use exact calls and only stable non-NPC corporation LP",async()=>{
  const calls:string[]=[];
+  const corp={type:"objectex2", header:[
+    [{type:"token",value:"carbon.common.script.sys.row.Row"}],
+    [{type:"list",items:["corporationID"]}, {type:"list",items:[99_000_001]}],
+  ], list:[], dict:[]};
  const run={characterID:9,held:{characterID:9,character:{characterID:9,corporationID:99_000_001}},baseUrl:"http://held.test",fetch:async (_:unknown,init:RequestInit)=>{
   const body=JSON.parse(String(init.body)); calls.push(`${body.service}.${body.method}:${JSON.stringify(body.args)}`);assert.equal(body.pilot,true);
-  const result=body.method==="GetCashBalance"?100:body.method==="GetAllMyCharacterWalletLPBalances"?lp(5):body.method==="GetTransactions"?journal([]):body.method==="GetAllMyCorporationWalletLPBalances"?lp(10):{type:"object",name:"util.KeyVal",args:{type:"dict",entries:[["corporationID",99_000_001]]}};
+   const result=body.method==="GetCashBalance"?100:body.method==="GetAllMyCharacterWalletLPBalances"?lp(5):body.method==="GetTransactions"?journal([]):body.method==="GetAllMyCorporationWalletLPBalances"?lp(10):corp;
   return Response.json({ok:true,result}); }};
  const s=await captureReward(run as never,9,7,44);
  assert.equal(s.cash,"100");assert.equal(s.lp,"5");assert.equal(s.memberCorporationID,99_000_001);assert.equal(s.corporationLp,"10");

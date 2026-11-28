@@ -6,6 +6,7 @@ import { createDistributionWorker } from "./host.ts";
 import { loadFor, needs, type Config, type Office, type Stack, type Stock, type Volumes } from "./model.ts";
 import { createDistributionNative, type DistributionNative } from "./native.ts";
 import { createDistributionStore, type DistributionView } from "./store.ts";
+import { carbonCorporationRow } from "../miningFleet/corporateOfficeFixture.ts";
 
 const A: Office = { destinationID: 600, systemID: 300, kind: "station", division: 7, name: "Source Station" };
 const B: Office = { destinationID: 700, systemID: 301, kind: "structure", division: 1, name: "Delivery Hub" };
@@ -749,7 +750,7 @@ test("the native path uses MCC division authority and quotes the exact source, s
     flow: { flying: {
       bridgeAsk: async (service: string, method: string, args: unknown[], keywords?: unknown, id?: number) => {
         calls.push(service + "." + method);
-        if (method === "GetCorporation") return { type: "packedrow", fields: { corporationID: 99, ceoID: 2, stationID: 600 } };
+        if (method === "GetCorporation") return carbonCorporationRow({ corporationID: 99, ceoID: 2, stationID: 600 });
         if (method === "GetMember") return { type: "packedrow", fields: { corporationID: 99, characterID: 1,
           roles: 0, titleMask: 0, rolesAtHQ, baseID: null } };
         if (method === "GetMyCorporationsOffices") return { list: [{ fields: { stationID: 600, officeID: 601 } }] };

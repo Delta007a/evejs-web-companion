@@ -133,6 +133,41 @@ export function readPackedRow(row: unknown, key: string): JsonValue | undefined 
   return undefined;
 }
 
+/** Decode the installed carbon Row, keeping cell wrappers for identity and role checks. */
+export function readCarbonRowFields(value: unknown): Record<string, JsonValue> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { type, header } = value as { type?: unknown; header?: unknown };
+  if (type !== "objectex2" || !Array.isArray(header)) return null;
+
+  const scalar = (part: unknown) =>
+    typeof part === "object" &&
+    part !== null &&
+    !Array.isArray(part) &&
+    Object.hasOwn(part, "value")
+      ? (part as { value: unknown }).value
+      : part;
+  const [constructor, args] = header;
+  if (
+    !Array.isArray(constructor) ||
+    scalar(constructor[0]) !== "carbon.common.script.sys.row.Row" ||
+    !Array.isArray(args)
+  )
+    return null;
+
+  const [columnList, cellList] = args;
+  const columns = isListValue(columnList) ? columnList.items : columnList;
+  const cells = isListValue(cellList) ? cellList.items : cellList;
+  if (!Array.isArray(columns) || !Array.isArray(cells) || columns.length !== cells.length)
+    return null;
+  const names = columns.map(scalar);
+  if (
+    !names.every((name): name is string => typeof name === "string" && name.length > 0) ||
+    new Set(names).size !== names.length
+  )
+    return null;
+  return Object.fromEntries(names.map((name, i) => [name, cells[i]]));
+}
+
 /**
  * Read one field from a server ROW, whichever shape it arrived in — util.KeyVal
  * or packedrow.

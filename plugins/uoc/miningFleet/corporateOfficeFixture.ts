@@ -8,6 +8,21 @@ export function officeList(stationIDs: readonly number[] = [600]) {
   };
 }
 
+export function carbonCorporationRow(fields: Record<string, unknown>) {
+  return {
+    type: "objectex2",
+    header: [
+      [{ type: "token", value: "carbon.common.script.sys.row.Row" }],
+      [
+        { type: "list", items: Object.keys(fields) },
+        { type: "list", items: Object.values(fields) },
+      ],
+    ],
+    list: [],
+    dict: [],
+  };
+}
+
 export function corporationRow(
   method: string,
   characterID: number,

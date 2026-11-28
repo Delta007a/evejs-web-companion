@@ -1,6 +1,7 @@
 import { uocStore } from "../backendStores.ts";
 import type { BackendRun, PluginRunContext } from "../../../web/src/plugin-api/backend.ts";
 import { reconcile, preDispatchRefusal } from "./reconcile.ts";
+import { fields as nativeFields } from "./funding.ts";
 import type { JsonValue } from "../../../web/src/plugin-api/index.ts";
 
 type Storage = { read(): unknown; write(v: unknown): void };
@@ -25,18 +26,7 @@ const object = (x: unknown): x is Record<string, any> =>
 const positive = (x: unknown): x is number =>
   typeof x === "number" && Number.isSafeInteger(x) && x > 0;
 const scalar = (x: any): any => (object(x) && Object.hasOwn(x, "value") ? x.value : x);
-function fields(v: any): Record<string, any> {
-  if (v?.type === "packedrow" && object(v.fields)) return v.fields;
-  if (v?.type === "object" && v.args?.type === "dict" && Array.isArray(v.args.entries)) {
-    const f = Object.fromEntries(v.args.entries) as Record<string, any>,
-      names = f.header?.items,
-      values = f.line?.items;
-    return Array.isArray(names) && Array.isArray(values) && names.length === values.length
-      ? Object.fromEntries(names.map((k: string, i: number) => [k, values[i]]))
-      : f;
-  }
-  throw Error("Corporation record is unreadable.");
-}
+const fields = (value: unknown) => nativeFields(value, "Corporation record is unreadable.");
 function setupOf(v: unknown, kind: "training-hr" | "training-join"): Setup | null {
   if (
     !object(v) ||

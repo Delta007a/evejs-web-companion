@@ -1,4 +1,5 @@
 import type { JsonValue } from "../../../web/src/plugin-api/index.ts";
+import { readCarbonRowFields } from "../shared/wire.ts";
 
 export const TRAINING_FUNDING_POLICIES = [
   "CHARACTER_WALLET_ONLY",
@@ -66,13 +67,13 @@ export function cents(value: unknown): number {
   return rounded;
 }
 
-export function fields(value: any): Record<string, any> {
-  if (value?.type === "packedrow" && object(value.fields)) return value.fields;
-  if (
-    value?.type === "object" &&
-    value.args?.type === "dict" &&
-    Array.isArray(value.args.entries)
-  ) {
+export function fields(
+  value: unknown,
+  unreadable = "Native identity is unreadable.",
+): Record<string, any> {
+  if (!object(value)) throw Error(unreadable);
+  if (value.type === "packedrow" && object(value.fields)) return value.fields;
+  if (value.type === "object" && value.args?.type === "dict" && Array.isArray(value.args.entries)) {
     const row = Object.fromEntries(value.args.entries);
     const names = row.header?.items,
       values = row.line?.items;
@@ -80,7 +81,9 @@ export function fields(value: any): Record<string, any> {
       return Object.fromEntries(names.map((name: string, i: number) => [name, values[i]]));
     return row;
   }
-  throw Error("Native identity is unreadable.");
+  const row = readCarbonRowFields(value);
+  if (row) return row;
+  throw Error(unreadable);
 }
 
 export function rowsOf(value: unknown): Record<string, any>[] {
@@ -110,8 +113,9 @@ export async function readTrainingWallet(
   call: WalletCall,
   characterID: number,
   corporationID: number,
+  observedCorporation?: Readonly<Record<string, unknown>>,
 ): Promise<number> {
-  const corp = fields(await call("corpRegistry", "GetCorporation"));
+  const corp = observedCorporation ?? fields(await call("corpRegistry", "GetCorporation"));
   const member = fields(await call("corpRegistry", "GetMember", [characterID]));
   const roleValue = scalar(member.roles),
     roleText = String(roleValue);

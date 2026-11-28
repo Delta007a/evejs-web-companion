@@ -149,40 +149,50 @@ test("uncertain invitation is never resent", async () => {
   assert.equal(f.calls.filter((x) => x.method === "InsertInvitation").length, 1);
 });
 
-test("read-only authority inspection reads exact masks and never touches onboarding storage or writes", async () => {
+test("authority inspection reads the current corporation row and exact member masks without writes", async () => {
   const calls: string[] = [],
     reports: any[] = [];
-  const mask = Object.fromEntries(names.map((n, i) => [n, i === 0 ? "1" : "0"]));
+  const mask = Object.fromEntries(names.map((name, i) => [name, i === 0 ? "1" : "0"]));
+  const corporation = {
+    type: "objectex2",
+    header: [
+      [{ type: "token", value: "carbon.common.script.sys.row.Row" }],
+      [
+        { type: "list", items: ["corporationID", "ceoID", "corporationName"] },
+        { type: "list", items: [98, 99, { type: "wstring", value: "Test Corp" }] },
+      ],
+    ],
+  };
   const run: any = {
     characterID: 1,
     held: { characterID: 1 },
     setup: { stage: "inspect", authorityID: 1 },
     baseUrl: "http://local",
-    fetch: async (_: any, init: any) => {
-      const b = JSON.parse(init.body);
-      calls.push(b.method);
-      assert.equal(b.confirm, undefined);
+    fetch: async (_: unknown, init: { body: string }) => {
+      const body = JSON.parse(init.body);
+      calls.push(body.method);
+      assert.equal(body.confirm, undefined);
+      if (body.method === "GetCorporation") return Response.json({ ok: true, result: corporation });
+      assert.equal(body.method, "GetMember");
+      assert.deepEqual(body.args, [1]);
       return Response.json({
         ok: true,
-        result: {
-          type: "packedrow",
-          fields:
-            b.method === "GetCorporation"
-              ? { corporationID: 98, ceoID: 99, corporationName: "Test Corp" }
-              : { characterID: 1, corporationID: 98, ...mask },
-        },
+        result: { type: "packedrow", fields: { characterID: 1, corporationID: 98, ...mask } },
       });
     },
-    report: (x: any) => reports.push(x),
+    report: (value: unknown) => reports.push(value),
   };
   const engine = createTrainingHRRun("training-hr", () => {
     throw Error("must not open journal");
   });
   assert.equal((await engine.check(run.setup)).ok, true);
   await engine.start(run);
-  for (let i = 0; i < 100 && !reports.length; i++) await new Promise((r) => setTimeout(r, 1));
+  for (let i = 0; i < 100 && !reports.length; i++)
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  assert.equal(reports[0]?.phase, "Corporation authority inspected", reports[0]?.why);
   assert.deepEqual(calls, ["GetCorporation", "GetMember"]);
   assert.equal(reports[0].readout.eligible, true);
+  assert.equal(reports[0].readout.corporationName, "Test Corp");
   assert.deepEqual(reports[0].readout.roleMasks, mask);
 });
 

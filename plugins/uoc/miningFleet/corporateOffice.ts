@@ -1,6 +1,7 @@
 import {
   isListValue,
   isPackedRowValue,
+  readCarbonRowFields,
   readDictPairs,
   readRowField,
   unwrapLong,
@@ -15,6 +16,8 @@ const HANGAR_TAKE_1 = 8192n;
 function field(row: unknown, name: string): unknown {
   const direct = readRowField(row, name);
   if (direct !== undefined) return direct;
+  const fields = readCarbonRowFields(row);
+  if (fields) return fields[name];
   const value = row as { type?: unknown; name?: unknown; args?: unknown } | null;
   if (value?.type !== "object" || value.name !== "util.Row") return undefined;
   const entries = readDictPairs(value.args);

@@ -1,5 +1,12 @@
 import type { PluginRunContext } from "../../../../web/src/plugin-api/backend.ts";
-import { isListValue, readKeyVal, readRowField, unwrapLong, type JsonValue } from "../wire.ts";
+import {
+  isListValue,
+  readCarbonRowFields,
+  readKeyVal,
+  readRowField,
+  unwrapLong,
+  type JsonValue,
+} from "../wire.ts";
 import {
   captureMissionRewards,
   compareMissionRewards,
@@ -15,9 +22,11 @@ const numericID = (value: unknown): number | null => {
   return n !== null && n > 0n && n <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(n) : null;
 };
 const npcCorporation = (id: number) => id >= 1_000_000 && id < 2_000_000;
-/** corpRegistry.GetCorporation: packed/KeyVal or its native header/line wrapper. */
+/** corpRegistry.GetCorporation: packed, KeyVal, or a native corporation Row. */
 function corporationID(value: JsonValue): number | null {
-  const direct = numericID(readRowField(value, "corporationID"));
+  const direct = numericID(
+    readRowField(value, "corporationID") ?? readCarbonRowFields(value)?.corporationID,
+  );
   if (direct !== null) return direct;
   const native = value as any;
   const fields =
